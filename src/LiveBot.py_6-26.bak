@@ -1,0 +1,190 @@
+import time
+import json
+import requests
+import yfinance as yf
+import pandas as pd
+
+def send_discord_alert(ticker, action, price, detail="", conviction_data=None):
+    webhook_url = "https://discord.com/api/webhooks/1516048864325537847/fiH0REc5aHygxCfHFmplUA1tJlVfRJOI4MBRG4Oe0Kf_M2cigVyP5oPLgQvY9JG3vKk4"
+    
+    cso_notes = ""
+    if conviction_data:
+        cso_notes = (
+            f"\n\n**[CSO CONVICTION MATRIX]**\n"
+            f"• **Conviction:** {conviction_data['conviction']} ({conviction_data['confidence']}% Confidence)\n"
+            f"• **Action Plan:** {conviction_data['action']}\n"
+            f"• **Reasoning:** {conviction_data['notes']}"
+        )
+        
+    payload = {
+        "embeds": [{
+            "title": f"Harmonized AI Sentry: {action}",
+            "color": 16711680 if "REJECTION" in action or "SHORT" in action else (3447003 if "GAP" in action else 65280 if "HIGH" in conviction_data.get('conviction','') else 16776960),
+            "fields": [
+                {"name": "Asset", "value": ticker, "inline": True},
+                {"name": "Price", "value": f"${price:.2f}", "inline": True},
+                {"name": "Detail", "value": detail + cso_notes, "inline": False}
+            ]
+        }]
+    }
+    requests.post(webhook_url, json=payload)
+
+def load_integrated_levels():
+    try:
+        with open("trading_levels.json", "r") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"ERROR: Failed to read trading_levels.json: {e}")
+        return None
+
+def calculate_trade_conviction(ticker, current_price, trade_side, master_data):
+    """
+    Dynamically maps live price against multi-source structural layers
+    to calculate execution conviction for any asset and trade side.
+    """
+    asset = master_data["levels"].get(ticker)
+    
+    if not asset or not current_price:
+        return {"conviction": "NONE", "confidence": 0, "action": "PASS", "notes": "No manifest data."}
+    
+    macro = asset.get("algo_macro", {})
+    tactical = asset.get("human_tactical", {})
+    
+    # ----------------------------------------------------------------
+    # DIRECTIONAL ROUTING: SHORT MANIFEST
+    # ----------------------------------------------------------------
+    if trade_side == "SHORT":
+        breakdown_trig = tactical.get("breakdown_trigger")
+        rejection_zones = tactical.get("rejection_zones", [])
+        
+        # Rule 1: Breakout Failure / Tactical Rejection Confluence
+        for r_zone in rejection_zones:
+            if abs(current_price - r_zone) <= 0.50:
+                return {
+                    "conviction": "HIGH", "confidence": 90, "action": "EXECUTE",
+                    "notes": f"Confluence Short Zone active at ${r_zone}. High reward-to-risk macro rejection."
+                }
+        
+        # Rule 2: Clean Structural Breakdown
+        if breakdown_trig and current_price < breakdown_trig:
+            # Verify if there is an immediate macro support cushion nearby
+            macro_supports = [s for s in macro.get("support", []) if s < current_price]
+            cushion = max(macro_supports) if macro_supports else None
+            
+            notes = f"Tactical breakdown trigger (${breakdown_trig}) breached."
+            if cushion:
+                notes += f" Next structural macro floor is at ${cushion}."
+            else:
+                notes += " Zero nearby macro support structural blocks found. Free vacuum zone."
+                
+            return {
+                "conviction": "HIGH", "confidence": 95, "action": "EXECUTE",
+                "notes": notes
+            }
+
+    # ----------------------------------------------------------------
+    # DIRECTIONAL ROUTING: LONG MANIFEST
+    # ----------------------------------------------------------------
+    elif trade_side == "LONG":
+        macro_supports = macro.get("support", [])
+        mid_ranges = macro.get("mid_range", [])
+        
+        # Rule 1: Macro Floor Oversold Bounce (The Hard Defense Floor)
+        if macro_supports:
+            primary_floor = macro_supports[0] 
+            if abs(current_price - primary_floor) <= 0.75:
+                return {
+                    "conviction": "HIGH", "confidence": 88, "action": "EXECUTE",
+                    "notes": f"Approaching deep institutional support at ${primary_floor}. Strategic bounce play active."
+                }
+                
+        # Rule 2: Reclaiming Mid-Range Pivots (Momentum Reversals)
+        if len(mid_ranges) >= 2:
+            mid_point = mid_ranges[1] 
+            if current_price > mid_point:
+                return {
+                    "conviction": "MEDIUM", "confidence": 65, "action": "EXECUTE",
+                    "notes": f"Reclaimed the mid-point intraday pivot at ${mid_point}. Bullish trend continuation."
+                }
+
+    # ----------------------------------------------------------------
+    # DEFAULT PROTECTIVE CHURN OVERRIDE
+    # ----------------------------------------------------------------
+    return {
+        "conviction": "LOW", 
+        "confidence": 20, 
+        "action": "PASS", 
+        "notes": "Price action trapped in localized congestion or mid-range noise. Stand aside."
+    }
+
+def get_market_metrics(ticker):
+    stock = yf.Ticker(ticker)
+    df = stock.history(period="1d", interval="5m")
+    if len(df) < 2: return None
+    
+    day_open = df['Open'].iloc[0]
+    last_price = df['Close'].iloc[-1]
+    
+    recent_window = df.tail(6)
+    recent_high = recent_window['High'].max()
+    recent_low = recent_window['Low'].min()
+    
+    return {"open": day_open, "price": last_price, "recent_high": recent_high, "recent_low": recent_low}
+
+def main():
+    print("Harmonized AI Sentry v1.7.2 Online. [Mode: EXACT CONVICTION LOGIC]")
+    
+    master_data = load_integrated_levels()
+    if not master_data:
+        print("Aborting: Unable to load base levels map.")
+        return
+        
+    last_alert = {t: {"type": None, "time": 0} for t in master_data["levels"].keys()}
+    
+    while True:
+        current_time = time.time()
+        master_data = load_integrated_levels()
+        
+        for ticker, asset_data in master_data["levels"].items():
+            data = get_market_metrics(ticker)
+            if not data: continue
+            
+            macro = asset_data.get("algo_macro", {})
+            sup_list = macro.get("support", [])
+            res_list = macro.get("resistance", [])
+            
+            if not sup_list or not res_list: continue
+            
+            # Anchor outer bounds for the telemetry alerts
+            levels = {"support": sup_list[0], "resistance": res_list[0]}
+            
+            is_near_res = abs(data['price'] - levels['resistance']) / levels['resistance'] < 0.005
+            is_near_sup = abs(data['price'] - levels['support']) / levels['support'] < 0.005
+            
+            is_rejected = data['recent_high'] >= levels['resistance'] and data['price'] < levels['resistance']
+            is_bounced = data['recent_low'] <= levels['support'] and data['price'] > levels['support']
+            
+            def can_alert(alert_type):
+                if last_alert[ticker]["type"] == alert_type and (current_time - last_alert[ticker]["time"] < 1800):
+                    return False
+                return True
+                
+            def process_and_send(alert_type, side, detail_msg):
+                if can_alert(alert_type):
+                    conviction = calculate_trade_conviction(ticker, data['price'], side, master_data)
+                    send_discord_alert(ticker, alert_type, data['price'], detail_msg, conviction)
+                    last_alert[ticker] = {"type": alert_type, "time": current_time}
+
+            if is_rejected:
+                process_and_send("REJECTION_CONFIRMED", "SHORT", "Resistance rejection confirmed structurally.")
+            elif is_bounced:
+                process_and_send("BOUNCE_CONFIRMED", "LONG", "Support bounce confirmed structurally.")
+            elif is_near_res:
+                process_and_send("PROXIMITY_RES", "SHORT", f"Approaching ceiling band ${levels['resistance']:.2f}")
+            elif is_near_sup:
+                process_and_send("PROXIMITY_SUP", "LONG", f"Approaching floor band ${levels['support']:.2f}")
+                
+        time.sleep(300)
+
+if __name__ == "__main__":
+    main()

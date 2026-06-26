@@ -1,0 +1,69 @@
+{
+  "source": "Integrated_Consensus_2026-06-26",
+  "levels": {
+    "SPY": {
+      "algo_macro": {
+        "resistance": [740.52, 740.94],
+        "support": [730.36, 722.59],
+        "mid_range": [734.48]
+      },
+      "human_tactical": {
+        "rejection_zones": [731.50, 732.00],
+        "downside_targets": [727.50, 725.00]
+      }
+    },
+    "QQQ": {
+      "algo_macro": {
+        "resistance": [720.81, 723.33],
+        "support": [698.57, 686.37],
+        "mid_range": [716.06]
+      },
+      "human_tactical": {
+        "breakdown_trigger": 706.00,
+        "downside_targets": [701.75, 695.00]
+      }
+    },
+    "IWM": {
+      "algo_macro": {
+        "resistance": [301.50],
+        "support": [283.46, 277.62, 273.75, 260.32],
+        "mid_range": [296.73, 299.11, 301.50]
+      },
+      "human_tactical": {
+        "candlestick_alert": "Daily Doji",
+        "breakdown_trigger": 296.25,
+        "downside_targets": [295.50, 294.00, 292.00]
+      }
+    },
+    "NVDA": {
+      "algo_macro": {
+        "resistance": [203.12, 205.80],
+        "support": [196.58, 192.20],
+        "mid_range": [199.12]
+      },
+      "human_tactical": {
+        "rejection_zones": [197.00],
+        "downside_targets": [191.50, 189.50]
+      }
+    },
+    "TSLA": {
+      "algo_macro": {
+        "breakout_level": 379.00,
+        "downside_targets": [368.00, 365.00]
+      },
+      "human_tactical": {
+        "rejection_zones": [379.50],
+        "downside_targets": [369.00, 365.00]
+      }
+    },
+    "SPCX": {
+      "algo_macro": {
+        "downside_targets": [135.00],
+        "vwap_guide": 161.00
+      },
+      "human_tactical": {
+        "breakdown_trigger": 147.00
+      }
+    }
+  }
+}

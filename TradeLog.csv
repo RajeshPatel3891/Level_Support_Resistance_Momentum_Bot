@@ -1,0 +1,19 @@
+Timestamp,Ticker,Side,PnL,Strategy,Deviation,EmotionalScore,Notes
+2026-06-15 13:51,IWM,CALL,-21.00,Mini-Scalp,0.0%,1,"Ignored CSO advice, revenge trading, FOMO dip buy"
+2026-06-15 15:00,QQQ,PUT,6.00,Resistance-Reversal,0.0%,10,"Disciplined entry on Rejection signal, 15.8% gain"
+2026-06-16 22:48,IWM,LONG,-11.0,Proximity_Entry_Without_Confirmation,Over_Extended_Hope,2,Entered on Proximity. Failed to wait for Bounce_Confirmed. Ignored exit at 11.5 loss threshold. Held hope instead of discipline.
+2026-06-24 10:26,IWM,SHORT,0.14,Resistance_Rejection,0.0,0,"Signal precise, execution clean."
+2026-06-24 12:25,SPY,SHORT,0.06,Resistance_Rejection,0.0,2,"IV chop high, lowered exit to ensure capture."
+2026-06-24 12:52,IWM,SHORT,-0.33,Resistance_Rejection,0.0,8,Discipline failure; failed to stop loss. Euphoria-driven hold. Theta decay maximized.
+2026-06-25 09:51,RIOT,LONG,0.04,BM_Signal,0.0,0,BM's official trade signal. Clean execution.
+2026-06-25 09:58,AAPL,LONG,0.10,Syed_Recommendation,0.0,0,Syed group leader recommendation. Disciplined execution.
+2026-06-25 10:20,IWM,SHORT,0.04,Resistance_Rejection,0.0,0,Sentry REJECTION_CONFIRMED at 99.62. Clean execution.
+2026-06-25 10:36,SPY,LONG,-0.11,Support_Bounce,0.0,7,"Green for 45s, IV high, missed exit, reversed hard."
+2026-06-25 10:51,IWM,SHORT,0.00,Resistance_Rejection,0.0,3,Scratch trade. Saw .54 but volatility delayed execution. Used market/limit exit to scratch.
+2026-06-25 11:05,IWM,SHORT,0.04,Resistance_Rejection,0.0,6,"Held 20+ mins, down -22% at one point. Bracket order hit profit."
+2026-06-25 11:21,AAPL,LONG,0.06,Brian_Recommendation,0.0,0,Brian's trade recommendation. Clean execution.
+2026-06-25 11:34,LYFT,LONG,0.00,Brian_Recommendation,0.0,2,Scratch trade. Saw .36 but held for .38 target. Exited when Brian cut at break-even.
+2026-06-25 12:28,IWM,LONG,0.06,Xuan_Extreme,0.0,2,"Sniped extreme boundary contract 12+ points out. High IV, swift execution."
+2026-06-25 12:29,IWM,SHORT,0.04,Xuan_Extreme,0.0,1,Xuan Extreme deep OTM puts. High-velocity snipe.
+2026-06-25 15:06,IWM,LONG,0.03,Proximity_Support,0.0,0,Matched Sentry signal + Brian's recommendation. Executed at support.
+2026-06-25 15:08,LYFT,LONG,0.02,Xuan_Extreme,0.0,1,Xuan Extreme Call snipe. Swift execution.

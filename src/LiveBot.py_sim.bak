@@ -1,0 +1,85 @@
+import time
+import json
+import requests
+import yfinance as yf
+import pandas as pd
+
+def send_discord_alert(ticker, action, price, detail="", conviction_data=None):
+    webhook_url = "https://discord.com/api/webhooks/1516048864325537847/fiH0REc5aHygxCfHFmplUA1tJlVfRJOI4MBRG4Oe0Kf_M2cigVyP5oPLgQvY9JG3vKk4"
+    cso_notes = f"\n\n**[CSO CONVICTION MATRIX]**\n• **Conviction:** {conviction_data['conviction']} ({conviction_data['confidence']}% Confidence)\n• **Action:** {conviction_data['action']}\n• **Reasoning:** {conviction_data['notes']}" if conviction_data else ""
+    payload = {
+        "embeds": [{
+            "title": f"Harmonized AI Sentry: {action}",
+            "color": 16711680 if "REJECTION" in action or "SHORT" in action else 65280,
+            "fields": [
+                {"name": "Asset", "value": ticker, "inline": True},
+                {"name": "Price", "value": f"${price:.2f}", "inline": True},
+                {"name": "Detail", "value": detail + cso_notes, "inline": False}
+            ]
+        }]
+    }
+    requests.post(webhook_url, json=payload)
+
+def load_integrated_levels():
+    try:
+        with open("trading_levels.json", "r") as f:
+            return json.load(f)
+    except Exception: return None
+
+def calculate_trade_conviction(ticker, current_price, trade_side, master_data):
+    asset = master_data["levels"].get(ticker)
+    if not asset: return {"conviction": "NONE", "confidence": 0, "action": "PASS", "notes": "No manifest."}
+    macro = asset.get("algo_macro", {})
+    tactical = asset.get("human_tactical", {})
+    if trade_side == "SHORT":
+        breakdown_trig = tactical.get("breakdown_trigger")
+        if breakdown_trig and current_price < breakdown_trig:
+            return {"conviction": "HIGH", "confidence": 95, "action": "EXECUTE", "notes": f"Breakdown trigger ${breakdown_trig} breached."}
+    elif trade_side == "LONG":
+        support = macro.get("support", [0])[0]
+        if support and abs(current_price - support) <= 0.75:
+            return {"conviction": "HIGH", "confidence": 88, "action": "EXECUTE", "notes": f"Support floor ${support} hold."}
+    return {"conviction": "LOW", "confidence": 20, "action": "PASS", "notes": "Mid-range churn."}
+
+def get_market_metrics(ticker):
+    stock = yf.Ticker(ticker)
+    try:
+        # Use fast_info for the trigger price
+        last_price = stock.fast_info['last_price']
+        # Keep history for structural high/low validation
+        df = stock.history(period="1d", interval="5m")
+        if len(df) < 2: return None
+        return {"price": last_price, "recent_high": df.tail(6)['High'].max(), "recent_low": df.tail(6)['Low'].min()}
+    except Exception: return None
+
+def main():
+    print("Harmonized AI Sentry v1.7.4 Online. [Mode: FAST_INFO + PROTECTIONS]")
+    last_alert = {t: {"type": None, "time": 0} for t in ["SPY", "QQQ", "IWM", "NVDA", "TSLA", "SPCX"]}
+    
+    while True:
+        master_data = load_integrated_levels()
+        if master_data:
+            for ticker, asset_data in master_data["levels"].items():
+                data = get_market_metrics(ticker)
+                if not data: continue
+                macro = asset_data.get("algo_macro", {})
+                res = macro.get("resistance", [9999])[0]
+                sup = macro.get("support", [0])[0]
+                
+                # Cooldown logic preserved
+                def trigger(alert_type, side, msg):
+                    if last_alert.get(ticker, {}).get("type") == alert_type and (time.time() - last_alert[ticker]["time"] < 1800):
+                        return
+                    conv = calculate_trade_conviction(ticker, data['price'], side, master_data)
+                    send_discord_alert(ticker, alert_type, data['price'], msg, conv)
+                    last_alert[ticker] = {"type": alert_type, "time": time.time()}
+
+                if data['recent_high'] >= res and data['price'] < res:
+                    trigger("REJECTION_CONFIRMED", "SHORT", "Resistance rejection confirmed.")
+                elif data['recent_low'] <= sup and data['price'] > sup:
+                    trigger("BOUNCE_CONFIRMED", "LONG", "Support bounce confirmed.")
+        
+        time.sleep(30)
+
+if __name__ == "__main__":
+    main()
