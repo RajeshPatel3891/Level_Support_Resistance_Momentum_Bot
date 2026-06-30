@@ -1,0 +1,7 @@
+*.csv
+*.log
+*.bak
+active_signals.json
+__pycache__/
+.env
+.DS_Store

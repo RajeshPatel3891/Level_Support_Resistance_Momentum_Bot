@@ -1,0 +1,40 @@
+{
+  "source": "Integrated_Consensus_2026-06-30",
+  "levels": {
+    "SPY": { 
+      "algo_macro": {"resistance": [760.40], "support": [739.97, 738.83, 730.49]}, 
+      "human_tactical": {"reversal_zone": [740.00], "tactical_resistance": [745.00]},
+      "atr_multiplier": 1.5, "avg_volume": 1000 
+    },
+    "QQQ": { 
+      "algo_macro": {"resistance": [748.65], "support": [720.82, 720.01, 699.57]}, 
+      "human_tactical": {"breakout_trigger": 724.50, "tactical_resistance": [725.00]},
+      "atr_multiplier": 1.5, "avg_volume": 1000 
+    },
+    "IWM": { 
+      "algo_macro": {"resistance": [301.50], "support": [296.02, 292.78, 284.59]}, 
+      "human_tactical": {"tactical_resistance": [300.00], "reversal_zone": [295.75]},
+      "atr_multiplier": 2.0, "avg_volume": 1000 
+    },
+    "NVDA": { 
+      "algo_macro": {"resistance": [130.00, 140.00], "support": [115.00, 100.00]}, 
+      "human_tactical": {"tactical_resistance": [197.50], "reversal_zone": [190.00]},
+      "atr_multiplier": 1.4, "avg_volume": 2000 
+    },
+    "TSLA": { 
+      "algo_macro": {"resistance": [200.00, 220.00, 240.00], "support": [160.00, 138.80]}, 
+      "human_tactical": {"reversal_zone": [402.00]},
+      "atr_multiplier": 2.5, "avg_volume": 2000 
+    },
+    "AMZN": { 
+      "algo_macro": {"resistance": [205.00], "support": [185.00]}, 
+      "human_tactical": {},
+      "atr_multiplier": 1.3, "avg_volume": 1000 
+    },
+    "MSFT": {
+      "algo_macro": {"resistance": [438.68, 493.50, 553.72], "support": [398.01, 349.20]},
+      "human_tactical": {"reversal_zone": [367.00], "breakout_trigger": 373.00},
+      "atr_multiplier": 1.5, "avg_volume": 1000
+    }
+  }
+}
