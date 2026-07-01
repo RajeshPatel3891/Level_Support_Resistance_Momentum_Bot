@@ -12,6 +12,7 @@ from SignalBridge import read_signals, write_signals, init_bridge
 MASTER_DATA = json.load(open('trading_levels.json', 'r'))
 LEVEL_TIMER = {}
 LIQUIDITY_HEARTBEAT = {}
+COOLDOWN_TRACKER = {}  # Tracks last alert time per ticker
 
 # RVOL Tracking Dictionaries
 VOLUME_BUFFER = {}       # Stores tick volumes with timestamps
@@ -29,27 +30,17 @@ def update_rolling_volume(ticker, tick_vol):
     if ticker not in VOLUME_BUFFER:
         VOLUME_BUFFER[ticker] = []
     
-    # Add current tick
     VOLUME_BUFFER[ticker].append((now, tick_vol))
-    
-    # Remove ticks older than 60 seconds
     VOLUME_BUFFER[ticker] = [v for v in VOLUME_BUFFER[ticker] if now - v[0] <= 60]
-    
-    # Sum the remaining valid ticks to get current minute volume
     LOCAL_MINUTE_VOL[ticker] = sum(v[1] for v in VOLUME_BUFFER[ticker])
     return LOCAL_MINUTE_VOL[ticker]
 
 def calculate_exits(entry_price, rvol):
     """Dynamically calculates exits based on relative volume velocity."""
     p = float(entry_price)
-    
-    # Base risk is 0.5% (used when RVOL is exactly 1.0)
     base_risk_pct = 0.005 
-    
-    # Scale risk based on RVOL (Max expansion 1.5x, Min compression 0.5x)
     volatility_multiplier = max(0.5, min(1.5, rvol)) 
     dynamic_risk = base_risk_pct * volatility_multiplier
-    
     risk_dollars = p * dynamic_risk
     
     sl = p - risk_dollars
@@ -71,8 +62,8 @@ def send_discord_alert(ticker, action, price, detail="", conviction_data=None):
     webhook_url = "https://discord.com/api/webhooks/1516048864325537847/fiH0REc5aHygxCfHFmplUA1tJlVfRJOI4MBRG4Oe0Kf_M2cigVyP5oPLgQvY9JG3vKk4"
     cso_notes = f"\n\n**[CSO CONVICTION MATRIX]**\n• **Conviction:** {conviction_data['conviction']} ({conviction_data['confidence']}% Confidence)\n• **Volume:** {conviction_data.get('volume_status', 'N/A')}\n• **Action:** {conviction_data['action']}\n• **Reasoning:** {conviction_data['notes']}" if conviction_data else ""
     
-    if conviction_data and conviction_data.get('conviction') == "HIGH":
-        # Pass the calculated RVOL directly into the exit calculator
+    # Only push structural shadow trades if it's a clean execution signal, not a cooldown violation
+    if action == "EXECUTION" and conviction_data and conviction_data.get('conviction') == "HIGH":
         rvol = conviction_data.get('rvol', 1.0)
         sl, tp1, tp2 = calculate_exits(price, rvol)
         cso_notes += f"\n• **SL:** ${sl:.2f} | **TP1:** ${tp1:.2f} | **TP2:** ${tp2:.2f}"
@@ -96,7 +87,7 @@ def send_discord_alert(ticker, action, price, detail="", conviction_data=None):
     payload = {
         "embeds": [{
             "title": f"Harmonized AI Sentry: {action}",
-            "color": 16711680 if "REJECTION" in action or "SHORT" in action else (65535 if "PROXIMITY" in action else (16776960 if "CAUTION" in action else 65280)),
+            "color": 16753920 if "VIOLATION" in action else (16711680 if "REJECTION" in action or "SHORT" in action else (65535 if "PROXIMITY" in action else (16776960 if "CAUTION" in action else 65280))),
             "fields": [
                 {"name": "Asset", "value": ticker, "inline": True},
                 {"name": "Price", "value": f"${price:.2f}", "inline": True},
@@ -141,7 +132,6 @@ def calculate_trade_conviction(ticker, current_price, trade_side, rolling_vol, c
     avg_vol = asset.get("avg_volume", 1000)
     LEVEL_TIMER[ticker] = LEVEL_TIMER.get(ticker, 0) + 1
     
-    # Calculate true RVOL based on the 60-second rolling window vs manifest average
     rvol = rolling_vol / avg_vol if avg_vol > 0 else 0
     vol_status = f"{rvol:.2f}x Avg Volume (RVOL)"
     
@@ -173,7 +163,7 @@ def calculate_trade_conviction(ticker, current_price, trade_side, rolling_vol, c
             if dist <= 2.50 and vol_ok:
                 conf = int(88 * mod)
                 return {"conviction": "HIGH" if conf > 70 else "MEDIUM", "confidence": conf, "action": "EXECUTE", "volume_status": vol_status, "rvol": rvol, "notes": "Institutional Support Hold."}
-            if support_window < dist <= 7.00:
+            if dist <= 7.00:
                 return {"conviction": "LOW", "confidence": int(40 * mod), "action": "PROXIMITY_SUP", "volume_status": vol_status, "rvol": rvol, "notes": "Proximity alert."}
     return {"conviction": "LOW", "confidence": 20, "action": "PASS", "volume_status": vol_status, "rvol": rvol, "notes": "Waiting for conviction or liquidity."}
 
@@ -187,15 +177,29 @@ def on_message(ws, message):
                 conditions = e.get("conditions", e.get("c", []))
                 
                 if sym in MASTER_DATA["levels"]:
-                    # Get the aggregated 60-second volume instead of just the single tick
-                    rolling_vol = update_rolling_volume(sym, tick_vol)
+                    in_cooldown = (time.time() - COOLDOWN_TRACKER.get(sym, 0) < 300)
+                    is_dark_pool = conditions and any(c in [15, 38] for c in conditions)
                     
-                    # Pass the rolling volume into the conviction matrix
+                    if in_cooldown:
+                        # Drop retail noise instantly
+                        if not is_dark_pool:
+                            continue
+                        action_tag = "COOLDOWN_VIOLATION_DARK_POOL"
+                    else:
+                        action_tag = "EXECUTION"
+                    
+                    rolling_vol = update_rolling_volume(sym, tick_vol)
                     conv = calculate_trade_conviction(sym, price, "LONG", rolling_vol, conditions=conditions)
+                    
                     if conv['action'] == "EXECUTE": 
-                        send_discord_alert(sym, "EXECUTION", price, "Signal triggered", conv)
+                        # Reset cooldown tracking timestamp to keep the safety wrapper moving forward
+                        COOLDOWN_TRACKER[sym] = time.time()
+                        
+                        detail_msg = "Signal triggered during active trading metrics." if action_tag == "EXECUTION" else "⚠️ ALERT: Heavy Dark Pool volume print detected inside active 300-second cooldown lock!"
+                        send_discord_alert(sym, action_tag, price, detail_msg, conv)
                         
     except Exception as e: print(f"DEBUG: Message Error: {e}", file=sys.stderr)
 
 if __name__ == "__main__":
+    print("Initializing Live Bot Stream Connection Engine...")
     connect_massive_stream(on_message)
