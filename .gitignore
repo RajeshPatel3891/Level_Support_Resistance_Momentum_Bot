@@ -5,3 +5,24 @@ active_signals.json
 __pycache__/
 .env
 .DS_Store
+
+# Local Market Data Dumps
+*.json
+!active_signals.json
+
+# AWS CLI Artifacts
+aws/
+awscliv2.zip
+active_signals.json
+cso_audit_trail.jsonl
+cso_daemon.log
+active_signals.json
+cso_audit_trail.jsonl
+cso_daemon.log
+*.tmp
+*.db-journal
+harm_telemetry.db
+simulate_cso_matrix.py
+simulate_cso_matrix.py
+simulate_cso_matrix.py
+harm_telemetry.db

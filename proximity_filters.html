@@ -1,0 +1,148 @@
+<!-- ==========================================================================
+     STEP 1: PLACE THE CONTROL PANEL DIRECTLY ABOVE YOUR TELEMETRY METRIC CARDS
+     ========================================================================== -->
+<div class="filter-dashboard-panel bg-slate-900 border border-slate-800 p-6 rounded-lg mb-6 shadow-xl">
+    <h3 class="text-xs font-bold uppercase tracking-wider text-emerald-500 mb-4 font-mono">
+        ⚡ HARM.AI // MULTI-DIMENSIONAL PORTFOLIO FILTERS
+    </h3>
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-6 font-mono">
+        <!-- Filter 1: Strategy Breakdown -->
+        <div>
+            <label class="block text-slate-400 text-xs mb-2">STRATEGY VECTOR</label>
+            <select id="uiFilterStrategy" onchange="applyDynamicFilters()" class="w-full bg-slate-950 border border-slate-800 text-slate-200 text-xs rounded p-2.5 focus:outline-none focus:border-emerald-500">
+                <option value="ALL">ALL VECTORS</option>
+                <option value="SIDEKICK_MICRO_SCALP">SIDEKICK MICRO-SCALP</option>
+                <option value="REBOUND">SUPPORT REBOUND</option>
+                <option value="BREAKOUT">BREAKOUT MOMENTUM</option>
+                <option value="EOD_FLUSH">EOD FLUSH</option>
+            </select>
+        </div>
+
+        <!-- Filter 2: Time-Of-Day Clustering -->
+        <div>
+            <label class="block text-slate-400 text-xs mb-2">TIME-OF-DAY SEGMENT</label>
+            <select id="uiFilterTimeframe" onchange="applyDynamicFilters()" class="w-full bg-slate-950 border border-slate-800 text-slate-200 text-xs rounded p-2.5 focus:outline-none focus:border-emerald-500">
+                <option value="ALL">ALL SEGMENTS</option>
+                <option value="morning">MORNING DRIVE (09:30 - 10:30 AM)</option>
+                <option value="midday">MIDDAY CONSOLIDATION (10:30 AM - 02:00 PM)</option>
+                <option value="afternoon">EOD DRIVE (02:00 - 04:00 PM)</option>
+            </select>
+        </div>
+
+        <!-- Filter 3: Proximity Expectancy Slider -->
+        <div class="md:col-span-2">
+            <div class="flex justify-between mb-2">
+                <label class="text-slate-400 text-xs">MIN PROXIMITY EXPECTANCY</label>
+                <span id="proximityValue" class="text-emerald-400 text-xs font-bold">0%</span>
+            </div>
+            <input type="range" id="uiFilterProximity" min="0" max="100" value="0" oninput="updateProximityLabel(this.value)" onchange="applyDynamicFilters()" class="w-full accent-emerald-500 bg-slate-950 border border-slate-800 rounded h-2">
+        </div>
+    </div>
+</div>
+
+
+<!-- ==========================================================================
+     STEP 2: PLACE THE REACTIVE FILTER ENGINE IN YOUR JAVASCRIPT SCRIPT BLOCKS
+     ========================================================================== -->
+<script>
+// Global cache placeholders
+window.rawTradeHistory = [];
+
+/**
+ * Tracks the slider state and updates the UI proximity label in real-time
+ */
+function updateProximityLabel(val) {
+    document.getElementById('proximityValue').innerText = val + "%";
+}
+
+/**
+ * Captures the initial static fetch payload to preserve the raw session run
+ */
+function initializeDashboardCache(payload) {
+    window.rawTradeHistory = payload.history || [];
+    renderDashboard(payload.overall, payload.buckets, window.rawTradeHistory);
+}
+
+/**
+ * High-Impact Client-Side Filter Engine
+ * Isolates segment parameters and recalculates portfolio win-rate and profit ratios on the fly
+ */
+function applyDynamicFilters() {
+    const selectedStrategy = document.getElementById('uiFilterStrategy').value;
+    const selectedTimeframe = document.getElementById('uiFilterTimeframe').value;
+    const minProximity = parseFloat(document.getElementById('uiFilterProximity').value);
+
+    // Apply filtering logic to the cached raw trade records
+    const filteredTrades = window.rawTradeHistory.filter(trade => {
+        // 1. Strategy check
+        if (selectedStrategy !== "ALL" && trade.strategy !== selectedStrategy) {
+            return false;
+        }
+
+        // 2. Proximity expectation threshold check
+        const tradeProximity = parseFloat(trade.proximity) || 0.0;
+        if (tradeProximity < minProximity) {
+            return false;
+        }
+
+        // 3. Time-of-day clustering check
+        if (selectedTimeframe !== "ALL") {
+            try {
+                // Extracts HH:MM from ISO timestamp e.g. "2026-07-09 09:47:12"
+                const timeString = trade.timestamp.split(" ")[1] || trade.timestamp.split("T")[1];
+                const hour = parseInt(timeString.split(":")[0]);
+                const minute = parseInt(timeString.split(":")[1]);
+                const floatTime = hour + (minute / 60.0);
+
+                if (selectedTimeframe === "morning" && (floatTime < 9.5 || floatTime > 10.5)) return false;
+                if (selectedTimeframe === "midday" && (floatTime <= 10.5 || floatTime > 14.0)) return false;
+                if (selectedTimeframe === "afternoon" && (floatTime <= 14.0 || floatTime > 16.0)) return false;
+            } catch (err) {
+                console.warn("[Dashboard Filter] Failed parsing timestamp boundary: ", err);
+            }
+        }
+
+        return true;
+    });
+
+    // Recalculate Live Metrics (Win Rate & Return) strictly for the filtered subset
+    let wins = 0;
+    let totalPnl = 0.0;
+    const totalTrades = filteredTrades.length;
+
+    filteredTrades.forEach(trade => {
+        const pnl = parseFloat(trade.pnl) || 0.0;
+        totalPnl += pnl;
+        if (pnl > 0) wins++;
+    });
+
+    const winRate = totalTrades > 0 ? ((wins / totalTrades) * 100).toFixed(2) : "0.00";
+
+    // Standardize KPI DOM elements
+    const overallMetrics = {
+        total_trades: totalTrades,
+        net_pnl: totalPnl.toFixed(2),
+        win_rate: winRate
+    };
+
+    // Trigger dashboard redraw with filtered data (preserving static bucket chart profiles)
+    updateKPICards(overallMetrics);
+    renderLedgerTable(filteredTrades);
+}
+
+/**
+ * Updates DOM KPI containers dynamically
+ */
+function updateKPICards(metrics) {
+    document.getElementById('kpiTotalTrades').innerText = metrics.total_trades;
+    document.getElementById('kpiWinRate').innerText = metrics.win_rate + "%";
+    
+    const pnlEl = document.getElementById('kpiNetPnl');
+    pnlEl.innerText = (metrics.net_pnl >= 0 ? "+" : "") + "$" + metrics.net_pnl;
+    if (metrics.net_pnl >= 0) {
+        pnlEl.className = "text-emerald-400 font-bold text-3xl font-mono";
+    } else {
+        pnlEl.className = "text-rose-500 font-bold text-3xl font-mono";
+    }
+}
+</script>

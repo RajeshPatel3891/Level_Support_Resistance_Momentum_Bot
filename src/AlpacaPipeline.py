@@ -2,188 +2,226 @@ import os
 import sys
 import json
 import time
+import random
 import asyncio
 from datetime import datetime
 from dotenv import load_dotenv
-from alpaca.data.live import StockDataStream
 
-# 1. Load context environments
+# Try importing official Alpaca SDK components for Trading & WebSockets
+from alpaca.trading.client import TradingClient
+from alpaca.trading.requests import LimitOrderRequest
+from alpaca.trading.enums import OrderSide, TimeInForce, OrderType
+
+# Load environment variables
 load_dotenv()
-API_KEY = os.getenv("ALPACA_API_KEY")
-SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 
-from SignalBridge import read_signals, write_signals, init_bridge
-from AlertManager import send_discord_alert
+# --- SYSTEM DIRECTORY PATH RESOLUTION ---
+current_dir = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(current_dir)
+MANIFEST_PATH = os.path.join(ROOT_DIR, 'trading_levels.json')
+MACRO_STATE_PATH = os.path.join(ROOT_DIR, 'macro_state.json')
 
-# 2. State & Manifest Configuration
-MASTER_DATA = json.load(open('trading_levels.json', 'r'))
-LEVEL_TIMER = {}
-COOLDOWN_TRACKER = {}
+def log_msg(msg: str):
+    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] [PRODUCER] {msg}", flush=True)
 
-# RVOL Tracking Matrices
-VOLUME_BUFFER = {}
-LOCAL_MINUTE_VOL = {}
+if not os.path.exists(MANIFEST_PATH):
+    log_msg(f"CRITICAL: Manifest not found at {MANIFEST_PATH}. Ensure trading_levels.json exists.")
+    sys.exit(1)
 
-init_bridge()
+# Core State Manifests
+MASTER_DATA = json.load(open(MANIFEST_PATH, 'r'))
+WATCHLIST = list(MASTER_DATA.get("levels", {}).keys())
+ACTIVE_TRADES = {}  # Preserved global tracking state
 
-def update_rolling_volume(ticker, tick_vol):
-    """Aggregates tick volume into a 60-second rolling window."""
-    now = time.time()
-    if ticker not in VOLUME_BUFFER:
-        VOLUME_BUFFER[ticker] = []
+# --- INITIALIZE AUTHENTICATED TRADING CLIENT ---
+API_KEY = os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID")
+SECRET_KEY = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
+IS_PAPER = os.getenv("APCA_IS_PAPER", "true").lower() == "true"
+
+trading_client = None
+if API_KEY and SECRET_KEY:
+    try:
+        trading_client = TradingClient(api_key=API_KEY, secret_key=SECRET_KEY, paper=IS_PAPER)
+        log_msg(f"Trading Client successfully initialized in [{'PAPER' if IS_PAPER else 'LIVE'}] mode.")
+    except Exception as e:
+        log_msg(f"Failed to initialize Alpaca Trading Client: {e}")
+
+# --- THE ADVERSE-SELECTION DEFENSE ENVELOPE ---
+def submit_smart_order(symbol: str, qty: float, limit_price: float, side: OrderSide = OrderSide.BUY):
+    """
+    Submits a strict Limit Order with IOC (Immediate or Cancel).
+    This forces the trade to fill only at YOUR price or better, 
+    and aborts the order instantly if it's not immediately available.
+    """
+    if not trading_client:
+        log_msg("[🛡️] Order Execution Aborted: Trading Client not initialized (No API keys).")
+        return None
+        
+    order_data = LimitOrderRequest(
+        symbol=symbol,
+        qty=qty,
+        side=side,
+        type=OrderType.LIMIT,
+        time_in_force=TimeInForce.IOC,  # THE KEY: Fill immediately at limit or cancel instantly
+        limit_price=limit_price
+    )
     
-    VOLUME_BUFFER[ticker].append((now, tick_vol))
-    VOLUME_BUFFER[ticker] = [v for v in VOLUME_BUFFER[ticker] if now - v[0] <= 60]
-    LOCAL_MINUTE_VOL[ticker] = sum(v[1] for v in VOLUME_BUFFER[ticker])
-    return LOCAL_MINUTE_VOL[ticker]
+    try:
+        order = trading_client.submit_order(order_data=order_data)
+        log_msg(f"[✓] Smart Limit IOC Order submitted! ID: {order.id} | Status: {order.status}")
+        return order
+    except Exception as e:
+        log_msg(f"[🛡️] Order Execution Aborted: {e}")
+        return None
 
-def calculate_exits(entry_price, rvol):
-    """Dynamically calculates exits based on relative volume velocity."""
-    p = float(entry_price)
-    base_risk_pct = 0.005 
-    volatility_multiplier = max(0.5, min(1.5, rvol)) 
-    dynamic_risk = base_risk_pct * volatility_multiplier
-    risk_dollars = p * dynamic_risk
-    
-    sl = p - risk_dollars
-    tp1 = p + (risk_dollars * 2) 
-    tp2 = p + (risk_dollars * 4) 
-    return sl, tp1, tp2
+def load_macro_context():
+    """Reads active background sentiment contexts written by the CSO Sentinel Daemon."""
+    if not os.path.exists(MACRO_STATE_PATH):
+        return {"macro_regime": "NORMAL", "risk_bias": "NEUTRAL", "operational_directive": "None"}
+    try:
+        with open(MACRO_STATE_PATH, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return {"macro_regime": "ERR", "risk_bias": "CAUTION", "operational_directive": "Error reading state."}
 
-def is_opening_range():
-    now = datetime.now()
-    return now.hour == 9 and 30 <= now.minute < 45
-
-def check_for_reversal(ticker, rolling_vol):
-    asset = MASTER_DATA["levels"].get(ticker)
-    return rolling_vol > (asset.get("avg_volume", 1000) * 2.5) if asset else False
-
-def get_tactical_modifier(ticker, current_price, trade_side):
-    asset = MASTER_DATA["levels"].get(ticker, {})
-    tactical = asset.get("human_tactical", {})
-    modifier = 1.0
-    price_f = float(current_price)
-    if trade_side == "LONG" and "breakdown_trigger" in tactical:
-        trigger = float(tactical["breakdown_trigger"])
-        if abs(price_f - trigger) < 1.0: modifier = 0.5
-    if "reversal_zone" in tactical:
-        reversal_zone = [float(x) for x in tactical.get("reversal_zone", [])]
-        if price_f in reversal_zone: modifier = 1.2
-    return modifier
-
-def calculate_trade_conviction(ticker, current_price, trade_side, rolling_vol):
-    if current_price is None:
-        return {"conviction": "NONE", "confidence": 0, "action": "PASS", "notes": "Invalid price data."}
-    if is_opening_range() and trade_side == "LONG":
-        return {"conviction": "LOW", "confidence": 10, "action": "PASS", "notes": "Volatility Damper: Opening Range."}
-    
-    asset = MASTER_DATA["levels"].get(ticker)
-    if not asset: return {"conviction": "NONE", "confidence": 0, "action": "PASS", "notes": "No manifest."}
-    
-    macro, tactical = asset.get("algo_macro", {}), asset.get("human_tactical", {})
-    avg_vol = asset.get("avg_volume", 1000)
-    LEVEL_TIMER[ticker] = LEVEL_TIMER.get(ticker, 0) + 1
-    
-    rvol = rolling_vol / avg_vol if avg_vol > 0 else 0
-    vol_status = f"{rvol:.2f}x Avg Volume (RVOL)"
-    
-    vol_ok = rvol > 0.8
-    if LEVEL_TIMER[ticker] > 10: vol_ok = rvol > 0.5
-    
-    price_f = float(current_price)
-    mod = get_tactical_modifier(ticker, price_f, trade_side)
-    
-    if check_for_reversal(ticker, rolling_vol):
-        return {"conviction": "MEDIUM", "confidence": 60, "action": "CAUTION", "volume_status": vol_status, "rvol": rvol, "notes": "Reversal Momentum Detected: Institutional absorption."}
-    
-    if trade_side == "SHORT":
-        breakdown_trig = tactical.get("breakdown_trigger")
-        if breakdown_trig and price_f < float(breakdown_trig) and vol_ok:
-            conf = int(95 * mod)
-            return {"conviction": "HIGH" if conf > 70 else "MEDIUM", "confidence": conf, "action": "EXECUTE", "volume_status": vol_status, "rvol": rvol, "notes": "Strong volume breakdown."}
-    elif trade_side == "LONG":
-        support = macro.get("support", [None])[0]
-        if support is not None:
-            support_f = float(support)
-            dist = abs(price_f - support_f)
-            if dist <= 2.50 and vol_ok:
-                conf = int(88 * mod)
-                return {"conviction": "HIGH" if conf > 70 else "MEDIUM", "confidence": conf, "action": "EXECUTE", "volume_status": vol_status, "rvol": rvol, "notes": "Institutional Support Hold."}
-            if dist <= 7.00:
-                return {"conviction": "LOW", "confidence": int(40 * mod), "action": "PROXIMITY_SUP", "volume_status": vol_status, "rvol": rvol, "notes": "Proximity alert."}
-    return {"conviction": "LOW", "confidence": 20, "action": "PASS", "volume_status": vol_status, "rvol": rvol, "notes": "Waiting for conviction."}
-
-# 3. Dynamic Signal Pipeline Hook
-def process_incoming_tick(symbol, price, volume):
-    if symbol not in MASTER_DATA["levels"]:
+# ==========================================================
+# MODE A: REAL-TIME ALPACA WEBSOCKET STREAM
+# ==========================================================
+async def start_realtime_websocket_stream(api_key, secret_key):
+    """
+    Connects to Alpaca's live SIP/IEX data feed using alpaca-py.
+    Streams actual 1-minute bars at standard market pace.
+    """
+    try:
+        from alpaca.data.live import StockDataStream
+    except ImportError:
+        log_msg("[!] alpaca-py SDK missing in current environment. Pivoting to local simulation...")
+        run_simulation_loop()
         return
 
-    in_cooldown = (time.time() - COOLDOWN_TRACKER.get(symbol, 0) < 300)
-    if in_cooldown:
-        return # Drop noise during cooldown locks
-
-    rolling_vol = update_rolling_volume(symbol, volume)
+    log_msg(f"Connecting to Alpaca Live Market Data Socket for watchlist: {WATCHLIST}...")
+    stream = StockDataStream(api_key, secret_key)
     
-    # Evaluate Strategy Matrix
-    conv = calculate_trade_conviction(symbol, price, "LONG", rolling_vol)
-    
-    if conv['action'] == "EXECUTE":
-        COOLDOWN_TRACKER[symbol] = time.time()
-        
-        # Calculate Exits and Construct the complete CSO Conviction Matrix details
-        rvol = conv.get('rvol', 1.0)
-        sl, tp1, tp2 = calculate_exits(price, rvol)
-        
-        cso_notes = f"Signal triggered during active trading metrics.\n\n"
-        cso_notes += f"**[CSO CONVICTION MATRIX]**\n"
-        cso_notes += f"• **Conviction:** {conv['conviction']} ({conv['confidence']}% Confidence)\n"
-        cso_notes += f"• **Volume:** {conv.get('volume_status', 'N/A')}\n"
-        cso_notes += f"• **Action:** {conv['action']}\n"
-        cso_notes += f"• **Reasoning:** {conv['notes']}\n"
-        cso_notes += f"• **SL:** ${sl:.2f} | **TP1:** ${tp1:.2f} | **TP2:** ${tp2:.2f}"
-        
-        # --- SHADOW EXECUTION BRIDGE PUSH ---
-        current_signals = read_signals()
-        new_signal = {
-            "id": f"{symbol}_{int(time.time())}",
-            "timestamp": time.time(),
-            "symbol": symbol,
-            "ticker": symbol,
-            "entry_price": price,
-            "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
-            "rvol": rvol,
-            "status": "PENDING_BACKTEST"
+    async def bar_handler(data):
+        """Processes incoming real-time minute bars and formats them for Sentry."""
+        bar_tick = {
+            "symbol": data.symbol,
+            "close": float(data.close),
+            "volume": float(data.volume),
+            "timestamp": data.timestamp.isoformat()
         }
-        current_signals.append(new_signal)
-        write_signals(current_signals)
-        
-        print(f">>> Strategy Matrix Match! Triggering Signal Bridge Entry for {symbol} at ${price:.2f}")
-        send_discord_alert(symbol, "EXECUTION", price, cso_notes, conv)
+        # Output unbuffered to stdout so MasterSentry.py captures it instantly
+        print(f"BAR_TICK_DATA: {json.dumps(bar_tick)}", flush=True)
 
-async def main():
-    print("[*] Initializing Alpaca Real-Time Live Stream Protocol...")
-    if not API_KEY or not SECRET_KEY:
-        print("[!] Execution Halted: Missing credentials in env.")
-        return
+    try:
+        # Subscribe to standard 1-minute bars for your target assets
+        stream.subscribe_bars(bar_handler, *WATCHLIST)
+        await stream._run_forever()
+    except Exception as e:
+        log_msg(f"[!] Live connection error: {e}. Falling back to simulation.")
+        run_simulation_loop()
 
-    stream_client = StockDataStream(API_KEY, SECRET_KEY)
+# ==========================================================
+# MODE B: HIGH-FIDELITY SIMULATION MODE (Configurable Flow)
+# ==========================================================
+def run_simulation_loop():
+    """
+    Simulates high-fidelity intraday equity bars. Walks target stocks up and down
+    across technical breakout triggers and reversal zones.
     
-    async def handle_realtime_trade(data):
-        process_incoming_tick(data.symbol, data.price, data.size)
+    Toggles:
+    - SIM_INTERVAL_SECONDS (Default: 30) : Customize tick generation spacing.
+    - SIM_ALL_SIMULTANEOUS (Default: False): True matches legacy parallel ticker spam.
+    """
+    sim_interval = int(os.getenv("SIM_INTERVAL_SECONDS", "30"))
+    sim_all_simultaneous = os.getenv("SIM_ALL_SIMULTANEOUS", "False").lower() in ("true", "1", "yes")
 
-    active_symbols = list(MASTER_DATA["levels"].keys())
-    print(f"[*] Extracted active watchlist targets: {active_symbols}")
+    if sim_all_simultaneous:
+        log_msg(f"Initiating High-Fidelity Intraday Simulation Loop (Fast Multi-Ticker {sim_interval}s Intervals)...")
+    else:
+        log_msg(f"Initiating High-Fidelity Intraday Simulation Loop (Relaxed Single-Ticker {sim_interval}s Intervals)...")
     
-    for symbol in active_symbols:
-        stream_client.subscribe_trades(handle_realtime_trade, symbol)
+    levels_config = MASTER_DATA.get("levels", {})
+    symbol_states = {}
+    
+    # Anchor the initial asset price frames slightly below their configured triggers
+    for symbol, cfg in levels_config.items():
+        tactical = cfg.get("human_tactical", {})
+        trigger = tactical.get("breakout_trigger", 250.0)
+        reversal = tactical.get("reversal_zone", [trigger - 5.0, trigger - 4.0])
         
-    print("[*] Active pipeline subscriptions verified. Opening live socket...")
-    await stream_client._run_forever()
+        symbol_states[symbol] = {
+            "price": trigger - 1.5,
+            "trigger": trigger,
+            "reversal_low": min(reversal),
+            "reversal_high": max(reversal),
+            "step": 0,
+            "prev_vol": 1000
+        }
+    
+    while True:
+        macro_context = load_macro_context()
+        
+        # Determine targets for this step interval (all symbols at once vs. one randomly selected symbol)
+        targets = list(symbol_states.keys()) if sim_all_simultaneous else [random.choice(WATCHLIST)]
+        
+        for symbol in targets:
+            state = symbol_states[symbol]
+            state["step"] += 1
+            step = state["step"]
+            prev_price = state["price"]
+            
+            # Coordinated walk cycle to step assets through support levels & breakout triggers
+            if 1 <= step <= 3:
+                target_price = state["reversal_low"] + (state["reversal_high"] - state["reversal_low"]) / 2
+                delta = (target_price - prev_price) / 2
+                state["price"] += delta + random.uniform(-0.05, 0.05)
+                volume = int(state["prev_vol"] * random.uniform(0.8, 1.2))
+            elif step == 4:
+                # Bounce support on extreme volume (Simulates Institutional Block Buying)
+                state["price"] = (state["reversal_low"] + state["reversal_high"]) / 2
+                volume = int(state["prev_vol"] * 3.0)  # RVOL = 3.0x (Sentry's 2.5x threshold breached!)
+            elif 5 <= step <= 7:
+                target_price = state["trigger"] - 0.20
+                delta = (target_price - prev_price) / 2
+                state["price"] += delta + random.uniform(-0.05, 0.05)
+                volume = int(state["prev_vol"] * random.uniform(0.8, 1.2))
+            elif step == 8:
+                # Violent breakout above the tactical trigger line (Simulates Momentum Expansion)
+                state["price"] = state["trigger"] + 0.35
+                volume = int(state["prev_vol"] * 3.2)  # RVOL = 3.2x (Sentry's 2.5x threshold breached!)
+            else:
+                state["price"] = state["trigger"] - 1.5
+                volume = 1000
+                state["step"] = 0
+            
+            state["prev_vol"] = volume if volume > 0 else 1000
+            
+            bar_tick = {
+                "symbol": symbol,
+                "close": round(state["price"], 2),
+                "volume": volume,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            print(f"BAR_TICK_DATA: {json.dumps(bar_tick)}", flush=True)
+            
+        time.sleep(sim_interval)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        print("\n[!] Alpaca Stream terminated cleanly by developer request.")
+    # Resolve standard credential mappings
+    api_key = os.getenv("ALPACA_API_KEY") or os.getenv("APCA_API_KEY_ID")
+    api_secret = os.getenv("ALPACA_SECRET_KEY") or os.getenv("APCA_API_SECRET_KEY")
+    
+    if not api_key or not api_secret:
+        log_msg("Alpaca API credentials not detected. Engaging standard Simulation fallback...")
+        run_simulation_loop()
+    else:
+        log_msg("Active production credentials detected in environment.")
+        try:
+            asyncio.run(start_realtime_websocket_stream(api_key, api_secret))
+        except KeyboardInterrupt:
+            log_msg("Live streaming pipeline terminated cleanly by operator.")
+        except Exception as e:
+            log_msg(f"[!] Failed to launch streaming websocket: {e}. Falling back to simulation.")
+            run_simulation_loop()

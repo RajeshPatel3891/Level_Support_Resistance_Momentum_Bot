@@ -1,0 +1,538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HARM.AI // PROXIMITY TELEMETRY</title>
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Chart.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #020617;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #1e293b;
+            border-radius: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #334155;
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen custom-scrollbar selection:bg-emerald-500 selection:text-slate-950">
+
+    <!-- Top Header Navigation Bar -->
+    <header class="border-b border-slate-900 bg-slate-950/80 backdrop-blur-md sticky top-0 z-50">
+        <div class="max-w-7xl mx-auto px-6 py-4 flex flex-col sm:flex-row justify-between items-center gap-4">
+            <div>
+                <h1 class="text-xl font-bold tracking-wider text-slate-100 font-mono">
+                    HARM.AI <span class="text-emerald-500">//</span> PROXIMITY TELEMETRY
+                </h1>
+                <p class="text-xs text-slate-400 mt-1 font-mono">
+                    Mathematical Verification of Entry Distance vs. Strategy Profitability
+                </p>
+            </div>
+            <div class="flex items-center gap-4 font-mono">
+                <span class="text-[10px] bg-slate-900 border border-slate-800 text-slate-400 px-3 py-1.5 rounded text-right">
+                    Database: <span class="text-slate-200 text-xs font-semibold">local://harm_telemetry.db</span>
+                </span>
+                <span class="text-[10px] bg-emerald-950/30 border border-emerald-800/50 text-emerald-400 px-3 py-1.5 rounded font-bold uppercase tracking-wider flex items-center gap-1.5">
+                    <span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
+                    Production Live
+                </span>
+            </div>
+        </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-6 py-8">
+
+        <!-- ==========================================================================
+             ⚡ MULTI-DIMENSIONAL PORTFOLIO FILTER CONTROLS
+             ========================================================================== -->
+        <div class="filter-dashboard-panel bg-slate-900 border border-slate-800 p-6 rounded-lg mb-6 shadow-xl">
+            <h3 class="text-xs font-bold uppercase tracking-wider text-emerald-500 mb-6 font-mono flex items-center gap-2">
+                <span>⚡</span> HARM.AI // MULTI-DIMENSIONAL PORTFOLIO FILTER RIG
+            </h3>
+            
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-6 font-mono text-xs">
+                
+                <!-- ROW 1 / FILTER 1: Date Range Pickers -->
+                <div class="grid grid-cols-2 gap-2">
+                    <div>
+                        <label class="block text-slate-400 mb-1.5">START DATE</label>
+                        <input type="date" id="uiFilterStartDate" onchange="applyDynamicFilters()" class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-2 focus:outline-none focus:border-emerald-500">
+                    </div>
+                    <div>
+                        <label class="block text-slate-400 mb-1.5">END DATE</label>
+                        <input type="date" id="uiFilterEndDate" onchange="applyDynamicFilters()" class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-2 focus:outline-none focus:border-emerald-500">
+                    </div>
+                </div>
+
+                <!-- ROW 1 / FILTER 2: CSO Advisory Strategy Check -->
+                <div>
+                    <label class="block text-slate-400 mb-1.5">CSO ADVISORY STATUS</label>
+                    <select id="uiFilterCSO" onchange="applyDynamicFilters()" class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-2.5 focus:outline-none focus:border-emerald-500">
+                        <option value="ALL">ALL RISK PROFILES</option>
+                        <option value="CLEARED">CSO ALIGNED (Elite Proximity ≥ 80%)</option>
+                        <option value="CHASING">CSO CHALLENGED (Fringe Proximity < 80%)</option>
+                    </select>
+                </div>
+
+                <!-- ROW 1 / FILTER 3: Fibonacci Target Profile -->
+                <div>
+                    <label class="block text-slate-400 mb-1.5">FIB TARGET PROFILE</label>
+                    <select id="uiFilterFib" onchange="applyDynamicFilters()" class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-2.5 focus:outline-none focus:border-emerald-500">
+                        <option value="ALL">ALL FIB PROFILES</option>
+                        <option value="FIB_27">BULLISH COERCION (27.2% Target / Calls)</option>
+                        <option value="FIB_36">BEARISH CASCADE (36.0% Target / Puts)</option>
+                    </select>
+                </div>
+
+                <!-- ROW 1 / FILTER 4: Strategy Vector -->
+                <div>
+                    <label class="block text-slate-400 mb-1.5">STRATEGY VECTOR</label>
+                    <select id="uiFilterStrategy" onchange="applyDynamicFilters()" class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-2.5 focus:outline-none focus:border-emerald-500">
+                        <option value="ALL">ALL VECTORS</option>
+                        <option value="SIDEKICK_MICRO_SCALP">SIDEKICK MICRO-SCALP</option>
+                        <option value="REBOUND">SUPPORT REBOUND</option>
+                        <option value="BREAKOUT">BREAKOUT MOMENTUM</option>
+                        <option value="EOD_FLUSH">EOD FLUSH</option>
+                        <option value="LIVEBOT_HIGH">LIVEBOT HIGH CONVICTION</option>
+                    </select>
+                </div>
+
+                <!-- ROW 2 / FILTER 5: Time-Of-Day Segment -->
+                <div>
+                    <label class="block text-slate-400 mb-1.5">TIME-OF-DAY SEGMENT</label>
+                    <select id="uiFilterTimeframe" onchange="applyDynamicFilters()" class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-2.5 focus:outline-none focus:border-emerald-500">
+                        <option value="ALL">ALL SEGMENTS</option>
+                        <option value="morning">MORNING DRIVE (09:30 - 10:30 AM)</option>
+                        <option value="midday">MIDDAY CONSOLIDATION (10:30 AM - 02:00 PM)</option>
+                        <option value="afternoon">EOD DRIVE (02:00 - 04:00 PM)</option>
+                    </select>
+                </div>
+
+                <!-- ROW 2 / FILTER 6: Proximity Expectancy Slider -->
+                <div class="md:col-span-2">
+                    <div class="flex justify-between mb-1.5">
+                        <label class="text-slate-400">MIN PROXIMITY EXPECTANCY</label>
+                        <span id="proximityValue" class="text-emerald-400 font-bold">0%</span>
+                    </div>
+                    <input type="range" id="uiFilterProximity" min="0" max="100" value="0" oninput="updateProximityLabel(this.value)" onchange="applyDynamicFilters()" class="w-full accent-emerald-500 bg-slate-950 border border-slate-800 rounded h-2">
+                </div>
+
+                <!-- ROW 2 / FILTER 7: Manual Ticker Filtering -->
+                <div>
+                    <label class="block text-slate-400 mb-1.5">SEARCH SYMBOL</label>
+                    <input type="text" id="uiFilterTicker" onkeyup="applyDynamicFilters()" placeholder="e.g. NVDA, QQQ..." class="w-full bg-slate-950 border border-slate-800 text-slate-200 rounded p-2 focus:outline-none focus:border-emerald-500 uppercase">
+                </div>
+
+            </div>
+        </div>
+
+        <!-- Telemetry KPI Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <div class="bg-slate-900 border border-slate-850 p-6 rounded-lg shadow-lg">
+                <p class="text-xs font-mono uppercase tracking-wider text-slate-400">Total Trades</p>
+                <p id="kpiTotalTrades" class="text-3xl font-bold font-mono text-slate-100 mt-2">0</p>
+            </div>
+            <div class="bg-slate-900 border border-slate-850 p-6 rounded-lg shadow-lg">
+                <p class="text-xs font-mono uppercase tracking-wider text-slate-400">Win Rate</p>
+                <p id="kpiWinRate" class="text-3xl font-bold font-mono text-emerald-400 mt-2">0%</p>
+            </div>
+            <div class="bg-slate-900 border border-slate-850 p-6 rounded-lg shadow-lg">
+                <p class="text-xs font-mono uppercase tracking-wider text-slate-400">Net Portfolio Return</p>
+                <p id="kpiNetPnl" class="text-3xl font-bold font-mono text-slate-100 mt-2">$0.00</p>
+            </div>
+            <div class="bg-slate-900 border border-slate-850 p-6 rounded-lg shadow-lg">
+                <p class="text-xs font-mono uppercase tracking-wider text-slate-400">Proximity Edge Verdict</p>
+                <div id="kpiVerdictBox" class="mt-2 text-xs font-mono text-emerald-400 border border-emerald-950/50 bg-emerald-950/10 p-2.5 rounded">
+                    Elite Band (80-100%) holds +84.2% WR. Focus on tight entries.
+                </div>
+            </div>
+        </div>
+
+        <!-- Analytical Charts Panel -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-8 mb-8">
+            <!-- Win Rate by Proximity Bucket (Bar) -->
+            <div class="bg-slate-900 border border-slate-850 p-6 rounded-lg shadow-lg">
+                <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 font-mono mb-4">🏆 Win Rate (%) by Proximity Bucket</h3>
+                <div class="h-64 relative">
+                    <canvas id="proximityBarChart"></canvas>
+                </div>
+            </div>
+            <!-- Profitability vs Alert Proximity (Scatter) -->
+            <div class="bg-slate-900 border border-slate-850 p-6 rounded-lg shadow-lg">
+                <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 font-mono mb-4">📈 Profitability ($) vs. Alert Proximity (%)</h3>
+                <div class="h-64 relative">
+                    <canvas id="proximityScatterChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Ledger Table Panel -->
+        <div class="bg-slate-900 border border-slate-850 rounded-lg shadow-lg overflow-hidden">
+            <div class="p-6 border-b border-slate-850">
+                <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400 font-mono">📁 Unified Alert and Result Ledger</h3>
+            </div>
+            <div class="overflow-x-auto custom-scrollbar max-h-[500px]">
+                <table class="w-full text-left border-collapse text-xs font-mono">
+                    <thead class="bg-slate-950 text-slate-400 uppercase tracking-wider text-[10px] sticky top-0 z-10">
+                        <tr>
+                            <th class="p-4 border-b border-slate-850">Timestamp</th>
+                            <th class="p-4 border-b border-slate-850">Ticker</th>
+                            <th class="p-4 border-b border-slate-850">Vector Strategy</th>
+                            <th class="p-4 border-b border-slate-850">Direction</th>
+                            <th class="p-4 border-b border-slate-850 text-right">Proximity %</th>
+                            <th class="p-4 border-b border-slate-850 text-center">Status</th>
+                            <th class="p-4 border-b border-slate-850 text-right">Options Premium Return</th>
+                        </tr>
+                    </thead>
+                    <tbody id="ledgerTableBody" class="divide-y divide-slate-950">
+                        <!-- Instantiated by JS Engine -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+    </main>
+
+    <script>
+    // Global cache placeholders
+    window.rawTradeHistory = [];
+    let barChartInstance = null;
+    let scatterChartInstance = null;
+
+    /**
+     * Tracks the slider state and updates the UI proximity label in real-time
+     */
+    function updateProximityLabel(val) {
+        document.getElementById('proximityValue').innerText = val + "%";
+    }
+
+    /**
+     * Initialization Routine: Fetches telemetry JSON from backend
+     */
+    async function loadDashboardData() {
+        try {
+            const response = await fetch('dashboard_data.json');
+            if (!response.ok) throw new Error('Data file not available.');
+            const payload = await response.json();
+            
+            // Cache raw data locally
+            window.rawTradeHistory = payload.history || [];
+            
+            // Initial Render
+            applyDynamicFilters(true);
+        } catch (err) {
+            console.error('[Dashboard Ingest] Failed loading dataset:', err);
+        }
+    }
+
+    /**
+     * High-Impact Client-Side Filter Engine
+     * Recalculates stats, updates table rows, and repaints charts on input events.
+     */
+    function applyDynamicFilters(isInitialLoad = false) {
+        const selectedStrategy = document.getElementById('uiFilterStrategy').value;
+        const selectedTimeframe = document.getElementById('uiFilterTimeframe').value;
+        const minProximity = parseFloat(document.getElementById('uiFilterProximity').value);
+        const searchTicker = document.getElementById('uiFilterTicker').value.toUpperCase().trim();
+        
+        // Load newly added state controls
+        const startDate = document.getElementById('uiFilterStartDate').value;
+        const endDate = document.getElementById('uiFilterEndDate').value;
+        const selectedCSO = document.getElementById('uiFilterCSO').value;
+        const selectedFib = document.getElementById('uiFilterFib').value;
+
+        // Apply filtering parameters to the cached dataset
+        const filteredTrades = window.rawTradeHistory.filter(trade => {
+            // 1. Ticker search filter
+            if (searchTicker && !trade.ticker.includes(searchTicker)) {
+                return false;
+            }
+
+            // 2. Strategy vector filter
+            if (selectedStrategy !== "ALL" && trade.strategy !== selectedStrategy) {
+                return false;
+            }
+
+            // 3. Proximity expectancy threshold check
+            const tradeProximity = parseFloat(trade.proximity) || 0.0;
+            if (tradeProximity < minProximity) {
+                return false;
+            }
+
+            // 4. Date Range boundary checks
+            if (startDate || endDate) {
+                // Extracts date portion "YYYY-MM-DD" from timestamp "YYYY-MM-DD HH:MM:SS" or ISO format
+                const tradeDateStr = trade.timestamp.split(" ")[0].split("T")[0];
+                if (startDate && tradeDateStr < startDate) return false;
+                if (endDate && tradeDateStr > endDate) return false;
+            }
+
+            // 5. CSO Risk Advisory Gating
+            if (selectedCSO !== "ALL") {
+                // Low-risk entries represent elite level proximity (>= 80%)
+                if (selectedCSO === "CLEARED" && tradeProximity < 80.0) return false;
+                // High-threat signals represent chasing entries (< 80%)
+                if (selectedCSO === "CHASING" && tradeProximity >= 80.0) return false;
+            }
+
+            // 6. Fibonacci Target Profile & Exit Strategy
+            if (selectedFib !== "ALL") {
+                // Standard Call targets map strictly to CALL entries
+                if (selectedFib === "FIB_27" && trade.direction !== "CALL") return false;
+                // Bearish 36% target sweeps map strictly to PUT entries
+                if (selectedFib === "FIB_36" && trade.direction !== "PUT") return false;
+            }
+
+            // 7. Time-of-day clustering check
+            if (selectedTimeframe !== "ALL") {
+                try {
+                    const timeString = trade.timestamp.split(" ")[1] || trade.timestamp.split("T")[1];
+                    const hour = parseInt(timeString.split(":")[0]);
+                    const minute = parseInt(timeString.split(":")[1]);
+                    const floatTime = hour + (minute / 60.0);
+
+                    if (selectedTimeframe === "morning" && (floatTime < 9.5 || floatTime > 10.5)) return false;
+                    if (selectedTimeframe === "midday" && (floatTime <= 10.5 || floatTime > 14.0)) return false;
+                    if (selectedTimeframe === "afternoon" && (floatTime <= 14.0 || floatTime > 16.0)) return false;
+                } catch (err) {
+                    // Fail-safe skip on un-parseable timestamps
+                }
+            }
+
+            return true;
+        });
+
+        // Recalculate KPIs on the filtered subset
+        let wins = 0;
+        let totalPnl = 0.0;
+        const totalTrades = filteredTrades.length;
+
+        filteredTrades.forEach(trade => {
+            const pnl = parseFloat(trade.pnl) || 0.0;
+            totalPnl += pnl;
+            if (pnl > 0) wins++;
+        });
+
+        const winRate = totalTrades > 0 ? ((wins / totalTrades) * 100).toFixed(2) : "0.00";
+
+        // Update Overall Metric Widgets
+        updateKPICards({
+            total_trades: totalTrades,
+            net_pnl: totalPnl.toFixed(2),
+            win_rate: winRate
+        });
+
+        // Repopulate Table Ledger rows
+        renderLedgerTable(filteredTrades);
+
+        // Repaint Chart instances
+        updateCharts(filteredTrades);
+    }
+
+    /**
+     * Updates DOM KPI containers dynamically
+     */
+    function updateKPICards(metrics) {
+        document.getElementById('kpiTotalTrades').innerText = metrics.total_trades;
+        document.getElementById('kpiWinRate').innerText = metrics.win_rate + "%";
+        
+        const pnlEl = document.getElementById('kpiNetPnl');
+        pnlEl.innerText = (metrics.net_pnl >= 0 ? "+" : "") + "$" + metrics.net_pnl;
+        if (parseFloat(metrics.net_pnl) >= 0) {
+            pnlEl.className = "text-emerald-400 font-bold text-3xl font-mono mt-2";
+        } else {
+            pnlEl.className = "text-rose-500 font-bold text-3xl font-mono mt-2";
+        }
+
+        const wrEl = document.getElementById('kpiWinRate');
+        if (parseFloat(metrics.win_rate) >= 60) {
+            wrEl.className = "text-3xl font-bold font-mono text-emerald-400 mt-2";
+        } else {
+            wrEl.className = "text-3xl font-bold font-mono text-rose-500 mt-2";
+        }
+    }
+
+    /**
+     * Renders table rows on the UI
+     */
+    function renderLedgerTable(trades) {
+        const tbody = document.getElementById('ledgerTableBody');
+        tbody.innerHTML = '';
+
+        if (trades.length === 0) {
+            tbody.innerHTML = `<tr><td colspan="7" class="p-8 text-center text-slate-500">No transactions match current filter profile.</td></tr>`;
+            return;
+        }
+
+        trades.forEach(t => {
+            const tr = document.createElement('tr');
+            tr.className = "hover:bg-slate-900/50 transition-colors";
+
+            // Color coding status tag
+            let statusColor = "text-slate-400 bg-slate-900/50 border-slate-800";
+            if (t.status === "TAKE_PROFIT") statusColor = "text-emerald-400 bg-emerald-950/20 border-emerald-900/40";
+            if (t.status === "STOP_LOSS") statusColor = "text-rose-400 bg-rose-950/20 border-rose-900/40";
+            if (t.status === "FORCE_CLOSE" || t.status === "ACTIVE") statusColor = "text-amber-400 bg-amber-950/20 border-amber-900/40";
+
+            // Format Pnl string
+            const pnlVal = parseFloat(t.pnl) || 0.0;
+            const pnlStr = (pnlVal >= 0 ? "+" : "") + "$" + pnlVal.toFixed(2);
+            const pnlColor = pnlVal >= 0 ? "text-emerald-400" : "text-rose-500";
+
+            tr.innerHTML = `
+                <td class="p-4 border-b border-slate-900/40 text-slate-400">${t.timestamp}</td>
+                <td class="p-4 border-b border-slate-900/40 font-bold text-slate-200">${t.ticker}</td>
+                <td class="p-4 border-b border-slate-900/40 text-slate-300">
+                    <span class="px-2 py-1 rounded bg-slate-900 border border-slate-800 text-[10px] font-sans">${t.strategy}</span>
+                </td>
+                <td class="p-4 border-b border-slate-900/40 text-slate-400">${t.direction}</td>
+                <td class="p-4 border-b border-slate-900/40 text-right text-slate-300">${(t.proximity || 0).toFixed(1)}%</td>
+                <td class="p-4 border-b border-slate-900/40 text-center">
+                    <span class="px-2.5 py-1 text-[10px] rounded border uppercase font-bold tracking-wider font-sans ${statusColor}">${t.status}</span>
+                </td>
+                <td class="p-4 border-b border-slate-900/40 text-right ${pnlColor} font-bold">${pnlStr}</td>
+            `;
+            tbody.appendChild(tr);
+        });
+    }
+
+    /**
+     * Rebuilds both Chart.js instances dynamically based on active filter arrays
+     */
+    function updateCharts(trades) {
+        // --- 1. Compile Proximity Bucket statistics ---
+        const buckets = {
+            elite: { total: 0, wins: 0 },
+            moderate: { total: 0, wins: 0 },
+            fringe: { total: 0, wins: 0 }
+        };
+
+        trades.forEach(t => {
+            const prox = parseFloat(t.proximity) || 0.0;
+            const pnl = parseFloat(t.pnl) || 0.0;
+            const isWin = pnl > 0;
+
+            if (prox >= 80) {
+                buckets.elite.total++;
+                if (isWin) buckets.elite.wins++;
+            } else if (prox >= 50) {
+                buckets.moderate.total++;
+                if (isWin) buckets.moderate.wins++;
+            } else {
+                buckets.fringe.total++;
+                if (isWin) buckets.fringe.wins++;
+            }
+        });
+
+        const barData = [
+            buckets.elite.total > 0 ? (buckets.elite.wins / buckets.elite.total) * 100 : 0,
+            buckets.moderate.total > 0 ? (buckets.moderate.wins / buckets.moderate.total) * 100 : 0,
+            buckets.fringe.total > 0 ? (buckets.fringe.wins / buckets.fringe.total) * 100 : 0
+        ];
+
+        // Destroy old Bar chart instance if it exists
+        if (barChartInstance) {
+            barChartInstance.destroy();
+        }
+
+        const barCtx = document.getElementById('proximityBarChart').getContext('2d');
+        barChartInstance = new Chart(barCtx, {
+            type: 'bar',
+            data: {
+                labels: ['Elite Proximity (80-100%)', 'Moderate Proximity (50-80%)', 'Fringe Proximity (0-50%)'],
+                datasets: [{
+                    label: 'Win Rate (%)',
+                    data: barData,
+                    backgroundColor: ['rgba(16, 185, 129, 0.2)', 'rgba(59, 130, 246, 0.2)', 'rgba(239, 68, 68, 0.2)'],
+                    borderColor: ['#10b981', '#3b82f6', '#ef4444'],
+                    borderWidth: 1.5,
+                    borderRadius: 4
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false }
+                },
+                scales: {
+                    y: {
+                        beginAtZero: true,
+                        max: 100,
+                        grid: { color: 'rgba(30, 41, 59, 0.3)' },
+                        ticks: { color: '#94a3b8', font: { family: 'monospace' } }
+                    },
+                    x: {
+                        grid: { display: false },
+                        ticks: { color: '#94a3b8', font: { family: 'monospace' } }
+                    }
+                }
+            }
+        });
+
+        // --- 2. Compile Scatter Data ---
+        const scatterData = trades.map(t => ({
+            x: parseFloat(t.proximity) || 0.0,
+            y: parseFloat(t.pnl) || 0.0,
+            status: t.status
+        }));
+
+        // Destroy old Scatter chart instance if it exists
+        if (scatterChartInstance) {
+            scatterChartInstance.destroy();
+        }
+
+        const scatterColors = scatterData.map(d => d.y >= 0 ? '#10b981' : '#ef4444');
+
+        const scatterCtx = document.getElementById('proximityScatterChart').getContext('2d');
+        scatterChartInstance = new Chart(scatterCtx, {
+            type: 'scatter',
+            data: {
+                datasets: [{
+                    label: 'Premium Payout',
+                    data: scatterData,
+                    pointBackgroundColor: scatterColors,
+                    pointBorderColor: scatterColors,
+                    pointRadius: 5,
+                    pointHoverRadius: 7
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                plugins: {
+                    legend: { display: false }
+                },
+                scales: {
+                    x: {
+                        title: { display: true, text: 'Entry Proximity % (100% = Support Level)', color: '#94a3b8', font: { family: 'monospace' } },
+                        min: 0,
+                        max: 100,
+                        grid: { color: 'rgba(30, 41, 59, 0.3)' },
+                        ticks: { color: '#94a3b8', font: { family: 'monospace' } }
+                    },
+                    y: {
+                        title: { display: true, text: 'Payout ($)', color: '#94a3b8', font: { family: 'monospace' } },
+                        grid: { color: 'rgba(30, 41, 59, 0.3)' },
+                        ticks: { color: '#94a3b8', font: { family: 'monospace' } }
+                    }
+                }
+            }
+        });
+    }
+
+    // Fire the initializer
+    window.onload = loadDashboardData;
+    </script>
+</body>
+</html>

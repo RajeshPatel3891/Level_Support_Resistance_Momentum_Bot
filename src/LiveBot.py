@@ -1,110 +1,128 @@
-import os, sys, json, requests, time
+import os
+import sys
+import json
+import requests
+import ssl
+import websocket
+import time
 from datetime import datetime
 from dotenv import load_dotenv
 
-# 1. Load the Massive API key from the .env file immediately
-load_dotenv()
+# --- INTEGRATED: Import All Three Playbooks ---
+import src.aapl_playbook as aapl
+import src.tsla_playbook as tsla
+import src.nvda_playbook as nvda
+import src.rivn_playbook as rivn
+import src.pltr_playbook as pltr
 
-from Connection import connect_massive_stream
-from SignalBridge import read_signals, write_signals, init_bridge
+load_dotenv() # This loads everything from your .env file
 
-# Load your manifest
-MASTER_DATA = json.load(open('trading_levels.json', 'r'))
+# --- INTEGRATED: Robust Dynamic Manifest Path Resolution ---
+current_dir = os.path.dirname(os.path.abspath(__file__))
+
+# 1. Search for trading_levels.json (Checks 'src/' first, then falls back to Parent Root)
+MANIFEST_PATH = os.path.join(current_dir, 'trading_levels.json')
+if not os.path.exists(MANIFEST_PATH):
+    MANIFEST_PATH = os.path.join(os.path.dirname(current_dir), 'trading_levels.json')
+
+# 2. Search for macro_state.json (Checks Parent Root first, then falls back to 'src/')
+MACRO_STATE_PATH = os.path.join(current_dir, '..', 'macro_state.json')
+if not os.path.exists(MACRO_STATE_PATH):
+    MACRO_STATE_PATH = os.path.join(current_dir, 'macro_state.json')
+
+if not os.path.exists(MANIFEST_PATH):
+    print(f"CRITICAL: Manifest not found at {MANIFEST_PATH}. Please generate it.")
+    sys.exit(1)
+
+# Persistent state for atomic file monitoring
+LAST_READ_TIME = 0
+MASTER_DATA = json.load(open(MANIFEST_PATH, 'r'))
+
 LEVEL_TIMER = {}
 LIQUIDITY_HEARTBEAT = {}
-COOLDOWN_TRACKER = {}  # Tracks last alert time per ticker
+TICK_COUNTER = {} 
+ACTIVE_TRADES = {} 
+LAST_EXIT_TIME = {}
+LAST_EXIT_PRICE = {}
 
-# RVOL Tracking Dictionaries
-VOLUME_BUFFER = {}       # Stores tick volumes with timestamps
-LOCAL_MINUTE_VOL = {}    # Stores the aggregated 60-second rolling volume
+# --- INTEGRATED: Multi-Ticker Routing Map ---
+PLAYBOOKS = {
+    "AAPL": aapl,
+    "TSLA": tsla,
+    "NVDA": nvda,
+    "RIVN": rivn,
+    "PLTR": pltr
+}
 
-init_bridge()
+# --- INTEGRATED: Multi-Ticker In-Memory Telemetry Pools ---
+TELEMETRY = {
+    "AAPL": {"candles_1m": [], "current_candle": None, "cum_volume": 0.0, "cum_pv": 0.0, "current_vwap": 0.0},
+    "TSLA": {"candles_1m": [], "current_candle": None, "cum_volume": 0.0, "cum_pv": 0.0, "current_vwap": 0.0},
+    "NVDA": {"candles_1m": [], "current_candle": None, "cum_volume": 0.0, "cum_pv": 0.0, "current_vwap": 0.0},
+    "RIVN": {"candles_1m": [], "current_candle": None, "cum_volume": 0.0, "cum_pv": 0.0, "current_vwap": 0.0},
+    "PLTR": {"candles_1m": [], "current_candle": None, "cum_volume": 0.0, "cum_pv": 0.0, "current_vwap": 0.0}
+}
 
-def log_debug(message):
-    with open("debug_trace.log", "a") as f:
-        f.write(f"{datetime.now()} - {message}\n")
-
-def update_rolling_volume(ticker, tick_vol):
-    """Aggregates tick volume into a 60-second rolling window."""
-    now = time.time()
-    if ticker not in VOLUME_BUFFER:
-        VOLUME_BUFFER[ticker] = []
+def update_trading_levels_atomic(new_levels):
+    """Physically updates trading_levels.json using atomic file replacement."""
+    filepath = MANIFEST_PATH
+    temp_filepath = f"{filepath}.tmp"
     
-    VOLUME_BUFFER[ticker].append((now, tick_vol))
-    VOLUME_BUFFER[ticker] = [v for v in VOLUME_BUFFER[ticker] if now - v[0] <= 60]
-    LOCAL_MINUTE_VOL[ticker] = sum(v[1] for v in VOLUME_BUFFER[ticker])
-    return LOCAL_MINUTE_VOL[ticker]
+    # Write to temp file first
+    with open(temp_filepath, 'w') as f:
+        json.dump(new_levels, f, indent=4)
+        
+    # Atomic swap: The OS ensures this is instantaneous
+    os.replace(temp_filepath, filepath)
+    print("[+] trading_levels.json updated atomically.")
 
-def calculate_exits(entry_price, rvol):
-    """Dynamically calculates exits based on relative volume velocity."""
+def reload_manifest_if_changed():
+    """Checks file metadata and reloads MASTER_DATA if updated on disk."""
+    global MASTER_DATA, LAST_READ_TIME
+    mtime = os.path.getmtime(MANIFEST_PATH)
+    if mtime > LAST_READ_TIME:
+        with open(MANIFEST_PATH, 'r') as f:
+            MASTER_DATA = json.load(f)
+        LAST_READ_TIME = mtime
+        print("[*] Detected change in trading levels. Reloading...")
+
+def load_macro_context():
+    """Asynchronously reads the macro state from the shared JSON file."""
+    if not os.path.exists(MACRO_STATE_PATH):
+        return {"macro_regime": "NORMAL", "risk_bias": "NEUTRAL", "operational_directive": "None"}
+    try:
+        with open(MACRO_STATE_PATH, 'r') as f:
+            return json.load(f)
+    except Exception:
+        return {"macro_regime": "ERR_READ", "risk_bias": "MAX_CAUTION", "operational_directive": "Failed to read macro state."}
+
+def calculate_exits(entry_price):
     p = float(entry_price)
-    base_risk_pct = 0.005 
-    volatility_multiplier = max(0.5, min(1.5, rvol)) 
-    dynamic_risk = base_risk_pct * volatility_multiplier
-    risk_dollars = p * dynamic_risk
-    
-    sl = p - risk_dollars
-    tp1 = p + (risk_dollars * 2) 
-    tp2 = p + (risk_dollars * 4) 
-    
-    log_debug(f"Calculated Dynamic Exits - Price: {p} | RVOL: {rvol:.2f} | Risk%: {dynamic_risk*100:.2f}% | SL: {sl:.2f} | TP1: {tp1:.2f}")
-    return sl, tp1, tp2
-
-def check_dark_pool_liquidity(ticker, price, conditions):
-    is_liquid = conditions and any(c in [15, 38] for c in conditions)
-    prev_was_liquid = LIQUIDITY_HEARTBEAT.get(ticker, False)
-    LIQUIDITY_HEARTBEAT[ticker] = is_liquid
-    if is_liquid:
-        log_debug(f"Ticker: {ticker} | Liquidity Detected: {conditions} | Sequential: {prev_was_liquid}")
-    return is_liquid and prev_was_liquid
+    risk = p * 0.005
+    return p - risk, p + (risk * 2), p + (risk * 4)
 
 def send_discord_alert(ticker, action, price, detail="", conviction_data=None):
-    webhook_url = "https://discord.com/api/webhooks/1516048864325537847/fiH0REc5aHygxCfHFmplUA1tJlVfRJOI4MBRG4Oe0Kf_M2cigVyP5oPLgQvY9JG3vKk4"
-    cso_notes = f"\n\n**[CSO CONVICTION MATRIX]**\n• **Conviction:** {conviction_data['conviction']} ({conviction_data['confidence']}% Confidence)\n• **Volume:** {conviction_data.get('volume_status', 'N/A')}\n• **Action:** {conviction_data['action']}\n• **Reasoning:** {conviction_data['notes']}" if conviction_data else ""
-    
-    # Only push structural shadow trades if it's a clean execution signal, not a cooldown violation
-    if action == "EXECUTION" and conviction_data and conviction_data.get('conviction') == "HIGH":
-        rvol = conviction_data.get('rvol', 1.0)
-        sl, tp1, tp2 = calculate_exits(price, rvol)
-        cso_notes += f"\n• **SL:** ${sl:.2f} | **TP1:** ${tp1:.2f} | **TP2:** ${tp2:.2f}"
+    webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
+    if not webhook_url: return
 
-        # --- SHADOW EXECUTION BRIDGE PUSH ---
-        current_signals = read_signals()
-        new_signal = {
-            "id": f"{ticker}_{int(time.time())}",
-            "timestamp": time.time(),
-            "symbol": ticker,
-            "entry_price": price,
-            "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
-            "rvol": rvol,
-            "status": "PENDING_BACKTEST"
-        }
-        current_signals.append(new_signal)
-        write_signals(current_signals)
+    cso_notes = f"\n\n**[CSO CONVICTION MATRIX]**\n• **Conviction:** {conviction_data['conviction']} ({conviction_data['confidence']}% Confidence)\n• **Volume:** {conviction_data.get('volume_status', 'N/A')}\n• **Action:** {conviction_data['action']}\n• **Reasoning:** {conviction_data['notes']}" if conviction_data else ""
+    if conviction_data and conviction_data.get('conviction') == "HIGH":
+        sl, tp1, tp2 = calculate_exits(price)
+        cso_notes += f"\n• **SL:** {sl:.2f} | **TP1:** {tp1:.2f} | **TP2:** {tp2:.2f}"
 
     payload = {
         "embeds": [{
             "title": f"Harmonized AI Sentry: {action}",
-            "color": 16753920 if "VIOLATION" in action else (16711680 if "REJECTION" in action or "SHORT" in action else (65535 if "PROXIMITY" in action else (16776960 if "CAUTION" in action else 65280))),
+            "color": 16711680 if "REJECTION" in action or "SHORT" in action else (65535 if "PROXIMITY" in action else (16776960 if "CAUTION" in action else 65280)),
             "fields": [
                 {"name": "Asset", "value": ticker, "inline": True},
-                {"name": "Price", "value": f"${price:.2f}", "inline": True},
+                {"name": "Price", "value": f"{price}", "inline": True},
                 {"name": "Detail", "value": detail + cso_notes, "inline": False}
             ]
         }]
     }
     try: requests.post(webhook_url, json=payload)
-    except Exception as e: print(f"DEBUG: Alert Error: {e}", file=sys.stderr)
-
-def is_opening_range():
-    now = datetime.now()
-    return now.hour == 9 and 30 <= now.minute < 45
-
-def check_for_reversal(ticker, rolling_vol):
-    asset = MASTER_DATA["levels"].get(ticker)
-    return rolling_vol > (asset.get("avg_volume", 1000) * 2.5) if asset else False
+    except Exception as e: print(f"Alert Error: {e}")
 
 def get_tactical_modifier(ticker, current_price, trade_side):
     asset = MASTER_DATA["levels"].get(ticker, {})
@@ -119,87 +137,174 @@ def get_tactical_modifier(ticker, current_price, trade_side):
         if price_f in reversal_zone: modifier = 1.2
     return modifier
 
-def calculate_trade_conviction(ticker, current_price, trade_side, rolling_vol, conditions=None):
+def calculate_trade_conviction(ticker, current_price, trade_side, curr_vol, conditions=None):
+    if ACTIVE_TRADES.get(ticker, False):
+        return {"conviction": "NONE", "confidence": 0, "action": "PASS", "notes": "Trade Active: Locked."}
+    
+    macro_context = load_macro_context()
+    if macro_context.get("risk_bias") == "RISK_OFF_LIQUIDATION" and trade_side == "LONG":
+        return {"conviction": "NONE", "confidence": 0, "action": "PASS", "notes": f"BLOCKED BY MACRO SENTINEL: {macro_context.get('operational_directive')}"}
+    
     if current_price is None:
         return {"conviction": "NONE", "confidence": 0, "action": "PASS", "notes": "Invalid price data."}
-    if is_opening_range() and trade_side == "LONG":
-        return {"conviction": "LOW", "confidence": 10, "action": "PASS", "notes": "Volatility Damper: Opening Range."}
     
     asset = MASTER_DATA["levels"].get(ticker)
     if not asset: return {"conviction": "NONE", "confidence": 0, "action": "PASS", "notes": "No manifest."}
     
-    macro, tactical = asset.get("algo_macro", {}), asset.get("human_tactical", {})
+    macro = asset.get("algo_macro", {})
     avg_vol = asset.get("avg_volume", 1000)
-    LEVEL_TIMER[ticker] = LEVEL_TIMER.get(ticker, 0) + 1
-    
-    rvol = rolling_vol / avg_vol if avg_vol > 0 else 0
-    vol_status = f"{rvol:.2f}x Avg Volume (RVOL)"
-    
-    vol_ok = rvol > 0.8
-    if LEVEL_TIMER[ticker] > 10: vol_ok = rvol > 0.5
+    vol_ok = curr_vol > (avg_vol * 0.8)
+    vol_surge_multiplier = min(max(curr_vol / avg_vol, 1.0), 2.0)
     
     price_f = float(current_price)
     mod = get_tactical_modifier(ticker, price_f, trade_side)
     
-    dark_pool_signal = check_dark_pool_liquidity(ticker, price_f, conditions)
-    support_window = 5.00 if dark_pool_signal else 2.50
-    
-    if check_for_reversal(ticker, rolling_vol):
-        return {"conviction": "MEDIUM", "confidence": 60, "action": "CAUTION", "volume_status": vol_status, "rvol": rvol, "notes": "Reversal Momentum Detected: Institutional absorption."}
-    
-    if trade_side == "SHORT":
-        breakdown_trig = tactical.get("breakdown_trigger")
-        if breakdown_trig and price_f < float(breakdown_trig) and vol_ok:
-            conf = int(95 * mod)
-            return {"conviction": "HIGH" if conf > 70 else "MEDIUM", "confidence": conf, "action": "EXECUTE", "volume_status": vol_status, "rvol": rvol, "notes": "Strong volume breakdown."}
-    elif trade_side == "LONG":
-        support = macro.get("support", [None])[0]
+    if trade_side == "LONG":
+        support_array = macro.get("support", [])
+        support = support_array[0] if (isinstance(support_array, list) and len(support_array) > 0) else None
         if support is not None:
-            support_f = float(support)
-            dist = abs(price_f - support_f)
-            if dist <= support_window and dark_pool_signal:
-                conf = int(90 * mod)
-                return {"conviction": "HIGH", "confidence": conf, "action": "EXECUTE", "volume_status": "VALIDATED_LIQUIDITY", "rvol": rvol, "notes": "High-Conviction Sequential Dark Pool Scalp."}
+            dist = abs(price_f - float(support))
             if dist <= 2.50 and vol_ok:
                 conf = int(88 * mod)
-                return {"conviction": "HIGH" if conf > 70 else "MEDIUM", "confidence": conf, "action": "EXECUTE", "volume_status": vol_status, "rvol": rvol, "notes": "Institutional Support Hold."}
-            if dist <= 7.00:
-                return {"conviction": "LOW", "confidence": int(40 * mod), "action": "PROXIMITY_SUP", "volume_status": vol_status, "rvol": rvol, "notes": "Proximity alert."}
-    return {"conviction": "LOW", "confidence": 20, "action": "PASS", "volume_status": vol_status, "rvol": rvol, "notes": "Waiting for conviction or liquidity."}
+                return {"conviction": "HIGH" if conf > 70 else "MEDIUM", "confidence": conf, "action": "EXECUTE", "notes": "Institutional Support Hold."}
+                
+    return {"conviction": "LOW", "confidence": 20, "action": "PASS", "notes": "Waiting for conviction."}
+
+# --- INTEGRATED: Asset-Specific Active Trade Queries ---
+def has_active_position(ticker):
+    """Returns True if there is an open trade on the specified ticker."""
+    return ACTIVE_TRADES.get(ticker, False)
+
+def execute_order(symbol, ticker, quantity, side):
+    """Submits limit or market options executions to sandbox environment."""
+    print(f"[*] Dispatching Broker Order for {symbol}: {side.upper()} {quantity} contracts of {ticker}")
+    if "buy" in side.lower():
+        ACTIVE_TRADES[symbol] = True
+    elif "sell" in side.lower():
+        ACTIVE_TRADES[symbol] = False
+
+# --- INTEGRATED: Isolated Ticker Candle Accumulation ---
+def process_candle_and_vwap_telemetry(ticker, price, vol):
+    """Processes ticking events to construct candles and dynamic VWAP per ticker."""
+    global TELEMETRY
+    now_m = int(time.time() / 60)
+    data = TELEMETRY[ticker]
+    
+    # 1. Update VWAP
+    data["cum_volume"] += vol
+    data["cum_pv"] += (price * vol)
+    if data["cum_volume"] > 0:
+         data["current_vwap"] = data["cum_pv"] / data["cum_volume"]
+        
+    # 2. Update/Rotate 1m candle state
+    if data["current_candle"] is None or data["current_candle"]['minute'] != now_m:
+        if data["current_candle"] is not None:
+            data["candles_1m"].append(data["current_candle"])
+            if len(data["candles_1m"]) > 20:
+                data["candles_1m"].pop(0)
+                
+        data["current_candle"] = {
+            'minute': now_m,
+            'open': price,
+            'high': price,
+            'low': price,
+            'close': price
+        }
+    else:
+        data["current_candle"]['high'] = max(data["current_candle"]['high'], price)
+        data["current_candle"]['low'] = min(data["current_candle"]['low'], price)
+        data["current_candle"]['close'] = price
+
+# --- INTEGRATED: Multi-Ticker Main Intraday Event Loop ---
+def on_market_tick(ticker, current_price, current_vwap, candles_1m):
+    """Main execution router evaluated on every new tick per asset."""
+    if ticker not in PLAYBOOKS:
+        return
+        
+    playbook = PLAYBOOKS[ticker]
+    
+    if not has_active_position(ticker):
+        # Evaluate Call Entry Setup
+        buy_calls, contract_count = playbook.evaluate_call_entry(candles_1m, current_price, current_vwap)
+        if buy_calls:
+            print(f"[🔥 TRIGGER] {ticker} Bullish Support confirmed. Sizing: {contract_count} contracts.")
+            execute_order(ticker, playbook.TICKER_CALL, quantity=contract_count, side="buy_to_open")
+            send_discord_alert(ticker, "BUY_TO_OPEN_CALL", current_price, f"Rule matched. Target Contracts: {contract_count}")
+            return
+            
+        # Evaluate Put Entry Setup
+        buy_puts, contract_count = playbook.evaluate_put_entry(candles_1m, current_price, current_vwap)
+        if buy_puts:
+            print(f"[🔥 TRIGGER] {ticker} Bearish Resistance confirmed. Sizing: {contract_count} contracts.")
+            execute_order(ticker, playbook.TICKER_PUT, quantity=contract_count, side="buy_to_open")
+            send_discord_alert(ticker, "BUY_TO_OPEN_PUT", current_price, f"Rule matched. Target Contracts: {contract_count}")
+            return
 
 def on_message(ws, message):
+    reload_manifest_if_changed()
     try:
         events = json.loads(message)
         if not isinstance(events, list): events = [events]
         for e in events:
             if e.get("ev") == "T":
-                tick_vol, sym, price = e.get("size", 0), e.get("sym"), e.get("price")
-                conditions = e.get("conditions", e.get("c", []))
+                vol, sym, price = e.get("size", 0), e.get("sym"), e.get("price")
                 
+                # Check active playbook assets
+                if sym in PLAYBOOKS:
+                    process_candle_and_vwap_telemetry(sym, price, vol)
+                    
+                    # Package up full 1m candles including the currently forming one
+                    data = TELEMETRY[sym]
+                    candles_to_eval = data["candles_1m"] + ([data["current_candle"]] if data["current_candle"] else [])
+                    on_market_tick(sym, price, data["current_vwap"], candles_to_eval)
+                
+                # Check legacy indicators for subscription assets
                 if sym in MASTER_DATA["levels"]:
-                    in_cooldown = (time.time() - COOLDOWN_TRACKER.get(sym, 0) < 300)
-                    is_dark_pool = conditions and any(c in [15, 38] for c in conditions)
-                    
-                    if in_cooldown:
-                        # Drop retail noise instantly
-                        if not is_dark_pool:
-                            continue
-                        action_tag = "COOLDOWN_VIOLATION_DARK_POOL"
-                    else:
-                        action_tag = "EXECUTION"
-                    
-                    rolling_vol = update_rolling_volume(sym, tick_vol)
-                    conv = calculate_trade_conviction(sym, price, "LONG", rolling_vol, conditions=conditions)
-                    
+                    conv = calculate_trade_conviction(sym, price, "LONG", vol)
                     if conv['action'] == "EXECUTE": 
-                        # Reset cooldown tracking timestamp to keep the safety wrapper moving forward
-                        COOLDOWN_TRACKER[sym] = time.time()
-                        
-                        detail_msg = "Signal triggered during active trading metrics." if action_tag == "EXECUTION" else "⚠️ ALERT: Heavy Dark Pool volume print detected inside active 300-second cooldown lock!"
-                        send_discord_alert(sym, action_tag, price, detail_msg, conv)
-                        
+                        ACTIVE_TRADES[sym] = True
+                        send_discord_alert(sym, "EXECUTION", price, "Signal triggered", conv)
     except Exception as e: print(f"DEBUG: Message Error: {e}", file=sys.stderr)
 
+def get_fresh_session_id():
+    token = os.getenv("TRADIER_TOKEN")
+    response = requests.post(
+        'https://api.tradier.com/v1/markets/events/session', 
+        headers={
+            'Authorization': f'Bearer {token}',
+            'Accept': 'application/json'
+        },
+        data={}  # This explicitly sets Content-Length: 0
+    )
+    if response.status_code != 200:
+        print(f"DEBUG: API returned {response.status_code}: {response.text}")
+        raise Exception("Failed to fetch session ID")
+        
+    return response.json()['stream']['sessionid']
+
+def on_open(ws):
+    print("### Authenticating with Tradier... ###")
+    try:
+        session_id = get_fresh_session_id()
+        payload = {
+            # Subscribing to MSFT, SPY, AAPL, TSLA, and NVDA to feed the execution matrix
+            "symbols": ["MSFT", "SPY", "AAPL", "TSLA", "NVDA", "RIVN", "PLTR"], 
+            "filter": ["trade"], 
+            "sessionid": session_id, 
+            "linebreak": True
+        }
+        ws.send(json.dumps(payload))
+        print("### Subscription sent successfully ###")
+    except Exception as e:
+        print(f"Auth Failed: {e}")
+
+print("Harmonized AI LiveBot v2.2 Active with Atomic Manifest Reloading.")
+
 if __name__ == "__main__":
-    print("Initializing Live Bot Stream Connection Engine...")
-    connect_massive_stream(on_message)
+    # Ensure URL is correct
+    ws = websocket.WebSocketApp(
+        "wss://ws.tradier.com/v1/markets/events", 
+        on_message=on_message,
+        on_open=on_open
+    )
+    ws.run_forever()

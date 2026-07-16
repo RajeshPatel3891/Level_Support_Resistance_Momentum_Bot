@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HARM.AI // Live Operations & Monitoring Architecture</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Urbanist:wght@400;500;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+    <style>
+        /* CORE RECONCILIATION LAYOUT */
+        * { box-sizing: border-box; }
+        body {
+            background-color: #020617;
+            display: grid;
+            gap: 40px;
+            grid-template-columns: 1fr;
+            margin: 0;
+            min-height: 100vh;
+            place-items: center;
+            padding: 40px 0;
+        }
+
+        .slide-container {
+            background-color: #0f172a;
+            border-radius: 12px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+            display: flex;
+            flex-direction: column;
+            font-family: 'Urbanist', sans-serif;
+            height: 720px;
+            justify-content: flex-start;
+            overflow: hidden;
+            padding: 60px;
+            position: relative;
+            width: 1280px;
+            color: #f1f5f9;
+        }
+
+        .slide-container::before {
+            content: '';
+            position: absolute;
+            top: -200px;
+            right: -200px;
+            width: 600px;
+            height: 600px;
+            background: radial-gradient(circle, rgba(56, 189, 248, 0.04) 0%, transparent 70%);
+            z-index: 0;
+        }
+
+        .slide-container::after {
+            content: '';
+            position: absolute;
+            bottom: 40px;
+            left: 60px;
+            right: 60px;
+            height: 1px;
+            background: linear-gradient(90deg, #10b981 0%, rgba(16, 185, 129, 0.1) 100%);
+            z-index: 0;
+        }
+
+        .slide-container > * { position: relative; z-index: 1; }
+
+        /* TYPOGRAPHY MATRIX */
+        h1 { font-size: 60px; font-weight: 700; color: #f8fafc; margin: 0; font-family: monospace; }
+        h1 span { color: #38bdf8; }
+        
+        .slide-title { font-size: 42px; font-weight: 700; margin-bottom: 30px; font-family: monospace; color: #10b981; letter-spacing: -1px; }
+        .slide-title span { color: #38bdf8; }
+
+        h3 { font-size: 24px; font-weight: 700; color: #38bdf8; margin: 0 0 10px 0; }
+        p, li { font-size: 18px; line-height: 1.6; color: #94a3b8; margin: 0 0 15px 0; }
+        strong { color: #f1f5f9; font-weight: 600; }
+        
+        .subtitle { font-size: 24px; color: #64748b; margin-top: 20px; max-width: 900px; }
+
+        /* INTERFACE TILES */
+        .content-area { display: flex; flex-direction: column; flex-grow: 1; width: 100%; justify-content: center; }
+        .two-column { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; width: 100%; align-items: center; }
+        .tiled-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; width: 100%; }
+        .tile { background: rgba(30, 41, 59, 0.4); padding: 25px; border-radius: 8px; border: 1px solid #334155; }
+        .tile i { font-size: 32px; color: #10b981; margin-bottom: 15px; }
+        
+        .code-display { background: #020617; padding: 20px; border-radius: 8px; font-family: 'JetBrains Mono', monospace; font-size: 14px; border: 1px solid #1e293b; color: #38bdf8; overflow: hidden; }
+        .text-emerald { color: #10b981; }
+    </style>
+</head>
+<body>
+
+<div class="slide-container" style="justify-content: center; align-items: center; text-align: center;">
+    <h1>LIVE OPERATIONS &amp; <span>MONITORING</span></h1>
+    <p class="subtitle">Production Infrastructure, Multi-Threaded Daemon Orchestration, and Real-Time Signal Routing.</p>
+    <div style="margin-top: 40px; padding: 10px 24px; background: rgba(56, 189, 248, 0.1); border-radius: 40px; color: #38bdf8; font-weight: 500; font-family: monospace;">
+        HARM.AI SUITE VER 1.1 // DEPLOYMENT HARDENING
+    </div>
+</div>
+
+<div class="slide-container">
+    <div class="slide-title">Daemon Orchestration: <span>Zero-Latency Pipeline</span></div>
+    <div class="content-area">
+        <div class="two-column">
+            <div>
+                <h3>Concurrent Execution Pool</h3>
+                <p>The system initializes the micro-scalper inside a decoupled <strong>Background Daemon Thread</strong> directly within the parent <code>MasterSentry.py</code> engine wrapper.</p>
+                <p>This design shields your primary trend breakout strategies from operational drift, isolating computational tasks from subprocess structures.</p>
+                <div class="tile" style="margin-top: 20px; border-left: 5px solid #38bdf8;">
+                    <strong>Thread Isolation Vector:</strong> Subprocess outputs from <code>AlpacaPipeline.py</code> stream straight into the callback parser without triggering loop wait bottlenecks.
+                </div>
+            </div>
+            <div class="code-display">
+# Multi-Threaded Worker Instantiation
+sidekick = MicroScalpSidekick()
+
+sidekick_thread = threading.Thread(
+    target=start_sidekick_worker, 
+    args=(sidekick,), 
+    daemon=True
+)
+sidekick_thread.start()
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="slide-container">
+    <div class="slide-title">Real-Time Data Ingestion: <span>The Bar Hook</span></div>
+    <div class="content-area">
+        <div class="two-column">
+            <div class="code-display" style="color: #34d399;">
+def on_bar_callback(incoming_bar_data, sidekick_instance):
+    ticker = incoming_bar_data.get("symbol")
+    close_price = incoming_bar_data.get("close")
+    bar_volume = incoming_bar_data.get("volume")
+    
+    # Non-blocking injection to background engine
+    sidekick_instance.process_live_candle(
+        ticker, close_price, bar_volume
+    )
+            </div>
+            <div>
+                <h3>Intercepting Live Tape</h3>
+                <p>The system bridges live websocket channels right through the orchestrator. Incoming ticks are parsed and immediately pushed into the micro-scalper memory buffer via an automated callback configuration.</p>
+                <p>By handling data parsing in native dictionary frameworks, the system protects incoming streams from decoding errors during high-frequency network spikes.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="slide-container">
+    <div class="slide-title">Infrastructure Rigidity: <span>Overnight Persistence</span></div>
+    <div class="content-area">
+        <div class="tiled-grid">
+            <div class="tile">
+                <i class="fa-solid fa-shield-halved"></i>
+                <h3>SIGHUP Protection</h3>
+                <p>Utilizing a detached <code>nohup</code> container structure intercepts terminal hangup signals, preventing active stream closures when developer SSH contexts disconnect over long intervals.</p>
+            </div>
+            <div class="tile">
+                <i class="fa-solid fa-box-archive"></i>
+                <h3>Unified Logging Layer</h3>
+                <p>Standard out (<code>stdout</code>) and standard error (<code>stderr</code>) streams combine directly into a localized <code>sentry_production.log</code> matrix for continuous diagnostic tracing.</p>
+            </div>
+            <div class="tile">
+                <i class="fa-solid fa-bolt"></i>
+                <h3>Zombie Isolation</h3>
+                <p>Explicit termination loops purge orphaned dependencies from background memory, securing cleaner websocket authentication access paths for newer execution requests.</p>
+            </div>
+        </div>
+        <div class="code-display" style="margin-top: 30px; text-align: center; font-size: 16px; color: #10b981;">
+nohup python3 src/MasterSentry.py > sentry_production.log 2>&1 &
+        </div>
+    </div>
+</div>
+
+<div class="slide-container">
+    <div class="slide-title">Telemetry Visualizations: <span>Sidekick Alerts</span></div>
+    <div class="content-area">
+        <div class="two-column">
+            <div>
+                <h3>Automated Discord Integration</h3>
+                <p>The second a high-velocity volatility surge matches historical expectancy markers, the system builds an instantaneous dark-mode embed object.</p>
+                <p>This allows automated brackets to sync across communication servers in less than 200 milliseconds, giving teams real-time visibility into strategy behaviors without terminal monitoring dependencies.</p>
+            </div>
+            <div class="tile" style="background: #020617; font-family: monospace; border: 1px solid #10b981;">
+                <span class="text-emerald">⚡ HARM.AI SIDEKICK // SIGNAL FIRED</span><br>
+                <span style="color: #64748b;">Asset Target:</span> <strong>MSFT</strong><br>
+                <span style="color: #64748b;">Impulse Vector Range:</span> <strong>$1.05</strong><br><br>
+                <span style="color: #38bdf8;">[AUTOMATED BRACKET PARAMETERS]</span><br>
+                • Position Size : 5 Contracts (0DTE)<br>
+                • Calculated Entry Limit : $379.12<br>
+                • Target Profit (OCO) : $379.81<br><br>
+                <span class="text-emerald">Target Scalp Value Payout: +$172.05 🎉</span>
+            </div>
+        </div>
+    </div>
+</div>
+
+</body>
+</html>
