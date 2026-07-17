@@ -144,25 +144,48 @@ class MicroScalpSidekick:
                     self.inject_active_position(symbol, "CALL", current_close, round(current_close-1.5,2), round(current_close+3.0,2), "BREAKOUT")
 
 def stream_output(process, sidekick):
+    # Use readlines to avoid locking resources during stream termination
     for line in iter(process.stdout.readline, ''):
+        if not line:
+            break
         if "BAR_TICK_DATA" in line:
             try:
                 data = json.loads(line.split("BAR_TICK_DATA:")[-1].strip())
                 sidekick.process_live_candle(data["symbol"], data["close"], data["volume"])
             except: pass
 
-def force_kill_subprocesses():
+def force_kill_subprocesses(signum=None, frame=None):
+    """Clean exit handler that forcefully reaps subprocesses."""
+    print("\n🛑 [SHUTDOWN] Intercepted termination signal. Reaping engines...")
     global live_bot, shadow_bot
-    for proc in [live_bot, shadow_bot]:
-        if proc and proc.poll() is None: proc.terminate()
+    for label, proc in [("Live Bot", live_bot), ("Shadow Bot", shadow_bot)]:
+        if proc and proc.poll() is None:
+            print(f" └─ Sending SIGTERM to {label}...")
+            proc.terminate()
+            try:
+                # Wait up to 1 second for graceful exit
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                print(f" └─ [⚠️ FORCE] {label} refused to exit. Sending SIGKILL...")
+                proc.kill()
+                proc.wait()
+    print("[✓] Process ecosystem cleared. Exiting safely.\n")
+    sys.exit(0)
 
 if __name__ == "__main__":
+    # Register handlers supporting standard signal interface arguments
     signal.signal(signal.SIGINT, force_kill_subprocesses)
+    signal.signal(signal.SIGTERM, force_kill_subprocesses)
+    
     sidekick = MicroScalpSidekick()
     live_bot = subprocess.Popen([sys.executable, "-u", "src/AlpacaPipeline.py"], stdout=subprocess.PIPE, text=True)
     shadow_bot = subprocess.Popen([sys.executable, "-u", "src/BacktestBot.py", "--live"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    
     threading.Thread(target=stream_output, args=(live_bot, sidekick), daemon=True).start()
     threading.Thread(target=stream_output, args=(shadow_bot, sidekick), daemon=True).start()
+    
     try:
-        while True: time.sleep(1)
-    except: force_kill_subprocesses()
+        while True:
+            time.sleep(1)
+    except (KeyboardInterrupt, SystemExit):
+        force_kill_subprocesses()

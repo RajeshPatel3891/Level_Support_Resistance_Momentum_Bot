@@ -1,5 +1,5 @@
 # ==============================================================================
-# HARMONIZED AI: FIVE-TICKER REGIME GUARDRAIL AUDITOR
+# HARMONIZED AI: FIVE-TICKER REGIME GUARDRAIL AUDITOR (DIRECTION-AWARE v2.6)
 # Intraday Execution Check & Fallback Diagnostics
 # ==============================================================================
 
@@ -45,20 +45,39 @@ def run_global_audit():
         sa, sb = levels["support_a"], levels["support_b"]
         ra, rb = levels["resistance_a"], levels["resistance_b"]
         
-        print(f"\n🍏 **{ticker}** | Spot: **${p:.2f}** (VWAP: ${vwap:.2f})")
+        print(f"\nCore Asset: **{ticker}** | Spot: **${p:.2f}** (VWAP: ${vwap:.2f})")
         print(f"   • Active Registry: Support [{sa:.2f} - {sb:.2f}] | Resistance [{ra:.2f} - {rb:.2f}]")
         
-        # Guardrail 1: Is Price Over VWAP for Longs?
-        g1_status = "✅ PASSED" if p >= vwap else "❌ BLOCKED (Price below VWAP)"
-        # Guardrail 2: Falling Knife filter check
-        g2_status = "❌ ENGAGED (Freefall detected)" if "Lower Lows" in snap["structure"] else "✅ CLEAN (No waterfall structure)"
+        # 1. Determine Zone Context (Long at Support vs. Short at Resistance)
+        is_at_support = (sa <= p <= sb)
+        is_at_resistance = (ra <= p <= rb)
         
-        # Sizing Evaluation
-        in_zone = "YES" if (sa <= p <= sb or ra <= p <= rb) else "NO (Out of Bounds)"
+        # 2. Apply Guardrail 1: Directional Momentum (Long: Spot >= VWAP, Short: Spot < VWAP)
+        if is_at_support:
+            g1_passed = (p >= vwap)
+            g1_status = "✅ PASSED" if g1_passed else "❌ BLOCKED (Long setup below VWAP)"
+        elif is_at_resistance:
+            g1_passed = (p < vwap)
+            g1_status = "✅ PASSED" if g1_passed else "❌ BLOCKED (Short setup above VWAP)"
+        else:
+            g1_passed = False
+            g1_status = "❌ BLOCKED (Outside trading zones)"
+
+        # 3. Apply Guardrail 2: Falling Knife filter check
+        g2_passed = "Lower Lows" not in snap["structure"]
+        g2_status = "❌ ENGAGED (Freefall detected)" if not g2_passed else "✅ CLEAN (No waterfall structure)"
+        
+        # 4. Resolve Execution Verdict
+        if (is_at_support or is_at_resistance) and g1_passed and g2_passed:
+            exec_verdict = "YES"
+        elif not (is_at_support or is_at_resistance):
+            exec_verdict = "NO (Out of Bounds)"
+        else:
+            exec_verdict = "NO (Guardrail Blocked)"
         
         print(f"   └─> [Guardrail 1 - Momentum Filter] : {g1_status}")
         print(f"   └─> [Guardrail 2 - Velocity Filter] : {g2_status}")
-        print(f"   └─> [Execution Status]             : {in_zone}")
+        print(f"   └─> [Execution Status]             : {exec_verdict}")
 
     print("\n" + "-"*80)
     print("💡 *System Verdict:* Dynamic level matching is completely operational. No privilege sprawl or leakage recorded.")

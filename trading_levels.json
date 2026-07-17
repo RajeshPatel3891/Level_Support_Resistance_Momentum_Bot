@@ -1,8 +1,92 @@
 {
-    "AAPL": {
-        "support_a": 312.0,
-        "support_b": 315.0,
-        "resistance_a": 321.0,
-        "resistance_b": 323.0
-    }
+  "TSLA": {
+    "support_a": 384.1,
+    "support_b": 385.9,
+    "resistance_a": 400.1,
+    "resistance_b": 401.9,
+    "last_price": 390.0,
+    "gamma_flip": 388.0,
+    "call_wall": 415.0,
+    "put_wall": 380.0
+  },
+  "AAPL": {
+    "support_a": 323.1,
+    "support_b": 324.9,
+    "resistance_a": 332.1,
+    "resistance_b": 333.9,
+    "last_price": 328.0,
+    "gamma_flip": 326.0,
+    "call_wall": 340.0,
+    "put_wall": 320.0
+  },
+  "PLTR": {
+    "support_a": 128.75,
+    "support_b": 133.25,
+    "resistance_a": 135.25,
+    "resistance_b": 136.75,
+    "last_price": 133.0,
+    "gamma_flip": 132.0,
+    "call_wall": 140.0,
+    "put_wall": 125.0
+  },
+  "NVDA": {
+    "support_a": 205.1,
+    "support_b": 206.9,
+    "resistance_a": 214.1,
+    "resistance_b": 215.9,
+    "last_price": 150.0,
+    "gamma_flip": 210.0,
+    "call_wall": 240.0,
+    "put_wall": 200.0
+  },
+  "RIVN": {
+    "support_a": 17.11,
+    "support_b": 17.19,
+    "resistance_a": 18.51,
+    "resistance_b": 18.59,
+    "last_price": 17.15,
+    "gamma_flip": 17.5,
+    "call_wall": 20.0,
+    "put_wall": 16.5
+  },
+  "SOFI": {
+    "support_a": 17.11,
+    "support_b": 17.19,
+    "resistance_a": 18.51,
+    "resistance_b": 18.59,
+    "last_price": 17.15,
+    "gamma_flip": 17.5,
+    "call_wall": 20.0,
+    "put_wall": 16.5
+  },
+  "INTC": {
+    "support_a": 97.85,
+    "support_b": 99.15,
+    "resistance_a": 104.42,
+    "resistance_b": 105.08,
+    "last_price": 70.0,
+    "gamma_flip": 101.0,
+    "call_wall": 115.0,
+    "put_wall": 95.0
+  },
+  "F": {
+    "support_a": 13.88,
+    "support_b": 14.01,
+    "resistance_a": 14.29,
+    "resistance_b": 14.42,
+    "last_price": 14.15,
+    "gamma_flip": 14.1,
+    "call_wall": 15.5,
+    "put_wall": 13.5
+  },
+  "AAL": {
+    "support_a": 15.18,
+    "support_b": 15.32,
+    "resistance_a": 15.98,
+    "resistance_b": 16.12,
+    "last_price": 15.6,
+    "gamma_flip": 15.5,
+    "call_wall": 17.0,
+    "put_wall": 14.5
+  }
 }
