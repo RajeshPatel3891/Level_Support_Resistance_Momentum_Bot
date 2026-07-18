@@ -1,0 +1,34 @@
+<!-- Floating Aggregate Card -->
+<div class="bg-gray-900/60 border border-gray-800 rounded-xl p-5 shadow-xl backdrop-blur-sm">
+    <p class="text-xs text-gray-400 uppercase tracking-widest font-semibold">Aggregate Open Floating P&L</p>
+    <h2 class="text-3xl font-extrabold tracking-tight mt-1 {{ pnl_class }}">{{ total_pnl }}</h2>
+</div>
+
+<!-- Active Positions Loop Stack -->
+<h3 class="text-xs uppercase text-gray-500 tracking-wider font-bold px-1 mt-6">Active Positions</h3>
+<div class="space-y-3">
+    {% if not trades %}
+    <div class="text-center py-8 border border-dashed border-gray-800 rounded-xl text-gray-500 text-sm">
+        Desk state sterile. Monitoring watchlist signals.
+    </div>
+    {% else %}
+        {% for trade in trades %}
+        <div class="bg-gray-900/40 border border-gray-800/80 rounded-xl p-4 flex justify-between items-center shadow-sm">
+            <div>
+                <div class="flex items-center space-x-2">
+                    <span class="font-bold text-base text-white tracking-wide">{{ trade.ticker }}</span>
+                    <span class="text-[10px] bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded uppercase font-medium">{{ trade.status }}</span>
+                </div>
+                <div class="text-xs text-gray-400 mt-1 space-x-2">
+                    <span>Live: <b class="text-gray-200">{{ trade.price }}</b></span>
+                    <span>Cost: <b class="text-gray-200">{{ trade.basis }}</b></span>
+                </div>
+            </div>
+            <div class="text-right">
+                <span class="text-sm font-bold block {{ trade.pnl_class }}">{{ trade.dollar_pnl }}</span>
+                <span class="text-[11px] text-gray-500 block mt-0.5">{{ trade.pnl_pct }}</span>
+            </div>
+        </div>
+        {% endfor %}
+    {% endif %}
+</div>

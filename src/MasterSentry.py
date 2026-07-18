@@ -26,6 +26,15 @@ class MicroScalpSidekick:
         self.levels_cache = {}
         self.last_levels_mtime = 0
         self.active_positions = {}
+        try:
+            import sqlite3
+            conn = sqlite3.connect(DB_FILE)
+            cursor = conn.cursor()
+            cursor.execute("SELECT ticker, spot_price, stop_loss, take_profit, timestamp FROM trades WHERE exit_status = 'ACTIVE' OR exit_status = 'SIM_TRAILING_STOP'")
+            for row in cursor.fetchall():
+                self.active_positions[row[0]] = {"entry_price": row[1], "stop_loss": row[2], "take_profit": row[3], "timestamp": row[4]}
+            conn.close()
+        except Exception as e: print(f"[!] Recovery Error: {e}")
         self.load_tactical_levels()
         print("[✓] HARM.AI Sidekick Engine: Production-Grade Orchestrator Loaded with CSO Context.")
 
@@ -35,7 +44,7 @@ class MicroScalpSidekick:
                 mtime = os.path.getmtime(LEVELS_FILE)
                 if mtime > self.last_levels_mtime:
                     with open(LEVELS_FILE, "r") as f:
-                        self.levels_cache = json.load(f).get("levels", {})
+                        self.levels_cache = json.load(f)
                     self.last_levels_mtime = mtime
                     print("[⚙️] Sentry dynamically loaded levels.")
         except Exception as e:
@@ -73,12 +82,8 @@ class MicroScalpSidekick:
             cso_cleared = not override
             cso_notes = f"{regime} | {catalyst}"
 
-            support_val = float(self.levels_cache.get(symbol, {}).get("algo_macro", {}).get("support", [entry])[0])
-            if support_val == 0: support_val = entry
-            if symbol in self.levels_cache:
-                support_list = self.levels_cache[symbol].get("algo_macro", {}).get("support", [])
-                if support_list:
-                    support_val = float(support_list[0])
+            # Fallback cleanly to flat schema parameters
+            support_val = float(self.levels_cache.get(symbol, {}).get("support_a", entry))
 
             dist = abs(entry - support_val)
             allowed = 2.50
@@ -122,26 +127,57 @@ class MicroScalpSidekick:
         # Exit Monitoring
         if symbol in self.active_positions:
             pos = self.active_positions[symbol]
-            if current_close <= pos['stop_loss'] or current_close >= pos['take_profit']:
-                net_pnl = 500.0 if current_close >= pos['take_profit'] else -500.0
+            try:
+                conn = sqlite3.connect(DB_FILE)
+                cursor = conn.cursor()
+                # Calculate basic percentage return
+                pnl_pct = round(((current_close - pos["entry_price"]) / pos["entry_price"]) * 100, 7)
+                cursor.execute("UPDATE trades SET spot_price = ?, net_pnl = ? WHERE ticker = ? AND timestamp = ?", (current_close, pnl_pct, symbol, pos["timestamp"]))
+                conn.commit(); conn.close()
+            except Exception as e: print(f"[!] Real-time Update Error: {e}")
+            # Initialize trailing stop if not present
+            if 'highest_price' not in pos or current_close > pos['highest_price']:
+                pos['highest_price'] = max(current_close, pos.get('entry_price', current_close))
+            
+            # Dynamically calculate trailing stop floor (e.g., 1.5 * ATR below highest price reached)
+            atr = pos.get('daily_atr', 1.5)
+            dynamic_stop = max(pos['stop_loss'], pos['highest_price'] - (1.5 * atr))
+            
+            # Check exit triggers
+            hit_tp = current_close >= pos['take_profit']
+            hit_sl = current_close <= dynamic_stop
+            
+            if hit_tp or hit_sl:
+                # Calculate exact dynamic shares based on $85 risk rules
+                risk_dist = abs(pos['entry_price'] - pos['stop_loss'])
+                shares = 85.0 / risk_dist if risk_dist > 0 else 1.0
+                net_pnl = round((current_close - pos['entry_price']) * shares, 2)
+                
+                # Safeguard: cap loss at -$85 if slippage occurs
+                if hit_sl and net_pnl < -85.0:
+                    net_pnl = -85.00
                 try:
                     conn = sqlite3.connect(DB_FILE)
                     cursor = conn.cursor()
-                    cursor.execute("UPDATE trades SET exit_price = ?, exit_status = ?, net_pnl = ? WHERE ticker = ? AND timestamp = ? AND exit_status = 'ACTIVE' AND is_live = 1", 
-                                   (current_close, "STOP_LOSS" if current_close <= pos['stop_loss'] else "TAKE_PROFIT", round(net_pnl, 2), symbol, pos['timestamp']))
+                    cursor.execute("UPDATE trades SET exit_price = ?, exit_status = ?, net_pnl = ? WHERE ticker = ? AND exit_status = 'ACTIVE'", 
+                                   (current_close, "TAKE_PROFIT" if hit_tp else ("TRAILING_STOP" if dynamic_stop > pos['stop_loss'] else "STOP_LOSS"), round(net_pnl, 2), symbol))
                     conn.commit(); conn.close()
-                    del self.active_positions[symbol]
                     print(f"[!] Exit Triggered for {symbol}: ${net_pnl}")
-                except Exception as e: print(f"[!] DB Exit Error: {e}")
+                except Exception as e: 
+                    print(f"[!] DB Exit Error: {e}")
+                finally:
+                    if symbol in self.active_positions:
+                        del self.active_positions[symbol]
         
         # Signal Engine
-        if symbol in self.levels_cache:
+        if symbol in self.levels_cache and symbol not in self.active_positions:
             tactical = self.levels_cache[symbol].get("human_tactical", {})
-            trigger = tactical.get("breakout_trigger")
+            trigger = self.levels_cache[symbol].get("support_a")
+            atr = self.levels_cache[symbol].get("daily_atr", 1.5)
             if trigger and current_close >= trigger:
                 override, _, _, _, _, _, _ = self.get_macro_safety_state()
                 if not override:
-                    self.inject_active_position(symbol, "CALL", current_close, round(current_close-1.5,2), round(current_close+3.0,2), "BREAKOUT")
+                    self.inject_active_position(symbol, "CALL", current_close, round(current_close - (atr * 0.5), 2), round(current_close + (atr * 1.5), 2), "BREAKOUT")
 
 def stream_output(process, sidekick):
     # Use readlines to avoid locking resources during stream termination
@@ -149,6 +185,7 @@ def stream_output(process, sidekick):
         if not line:
             break
         if "BAR_TICK_DATA" in line:
+            print(f"[SENTRY_LOG] {line.strip()}", flush=True)
             try:
                 data = json.loads(line.split("BAR_TICK_DATA:")[-1].strip())
                 sidekick.process_live_candle(data["symbol"], data["close"], data["volume"])
@@ -184,8 +221,13 @@ if __name__ == "__main__":
     threading.Thread(target=stream_output, args=(live_bot, sidekick), daemon=True).start()
     threading.Thread(target=stream_output, args=(shadow_bot, sidekick), daemon=True).start()
     
+    print("[✓] Process Supervisor active. Monitoring engines persistently...", flush=True)
     try:
         while True:
-            time.sleep(1)
+            time.sleep(5)
+            # If a process finished, don't let MasterSentry exit!
+            if live_bot.poll() is not None:
+                # Optional: Add auto-restart logic here if needed
+                pass
     except (KeyboardInterrupt, SystemExit):
         force_kill_subprocesses()

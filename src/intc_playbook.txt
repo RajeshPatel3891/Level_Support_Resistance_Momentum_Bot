@@ -1,0 +1,103 @@
+# =========================================================================================================
+# 🛰️ HARM.AI // TRADEGPT OPERATIONAL PLAYBOOK: INTC
+# Regime: Velocity CLEAN / Range Chop | Risk Budget: $85 Target
+# =========================================================================================================
+
+IF [Symbol] IS "INTC" AND [HARM.AI Guardrail State] IS "Velocity CLEAN/Range Chop" THEN
+    # === 1. CORE GUARDRAIL PARAMETERS ===
+    SET Current_Spot                   = 92.89                      # Reconciled pre-market spot
+    SET Daily_ATR                      = 2.45                       # High-volatility tech expansion baseline
+    SET VWAP                           = 93.10                      # Local intraday volume anchor
+
+    SET Underlying_Stop_Distance       = 1.75 * Daily_ATR           # 1.75 * 2.45 = 4.2875
+    SET Underlying_Take_Profit_Dist    = 3.00 * Daily_ATR           # 3.00 * 2.45 = 7.35
+
+    # Target Structural Price Levels
+    SET Underlying_Stop_Level_Long     = Current_Spot - Underlying_Stop_Distance    # 92.89 - 4.29 = 88.60
+    SET Underlying_Take_Profit_Long    = Current_Spot + Underlying_Take_Profit_Dist # 92.89 + 7.35 = 100.24
+
+    SET Underlying_Stop_Level_Short    = Current_Spot + Underlying_Stop_Distance    # 92.89 + 4.29 = 97.18
+    SET Underlying_Take_Profit_Short   = Current_Spot - Underlying_Take_Profit_Dist # 92.89 - 7.35 = 85.54
+
+    # Options Risk Architecture
+    SET Target_Option_Delta            = 0.50
+    SET Position_Sizing_Rule           = "Standard contract allocation up to maximum premium exposure = $85"
+    SET Option_Stop_Loss_Percent       = 15                         # Strict range stop floor
+    SET Support_Resistance_Symmetry    = "Standard bounds capped at 1.5 * ATR of Spot"
+
+    # 1.5 * ATR Volatility Bands
+    SET Aggressive_Band_Width          = 1.5 * Daily_ATR            # 3.675
+    SET Aggressive_Lower_Bound         = Current_Spot - Aggressive_Band_Width       # 92.89 - 3.68 = 89.21
+    SET Aggressive_Upper_Bound         = Current_Spot + Aggressive_Band_Width       # 92.89 + 3.68 = 96.57
+
+    # TradeAlgo Macro Zones (Sourced from local JSON configuration)
+    SET Macro_Support_Low              = 97.85                      # Historical structural shelf reference points
+    SET Macro_Support_High             = 99.15
+    SET Macro_Resistance_Low           = 104.42
+    SET Macro_Resistance_High          = 105.08
+
+    # === 2. OPTION RISK BOX (Sized to ~$85 max risk with 15% stop) ===
+    # Call Side (Bullish)
+    SET INTC_CALL_Entry_Premium        = 1.15
+    SET INTC_CALL_Stop_Premium         = INTC_CALL_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0) # 1.15 * 0.85 = 0.97
+    SET INTC_CALL_TP1_Premium          = INTC_CALL_Entry_Premium * 1.50                                 # 1.725
+
+    SET INTC_CALL_Risk_Per_Contract    = (INTC_CALL_Entry_Premium - INTC_CALL_Stop_Premium) * 100       # (1.15-0.97)*100 = $18.00
+    SET INTC_CALL_Max_Contracts        = FLOOR(85.00 / INTC_CALL_Risk_Per_Contract)                     # 4 Contracts Max
+    SET N_INTC_CALL                    = INTC_CALL_Max_Contracts                                        # 4 contracts -> $72 risk
+
+    # Put Side (Bearish)
+    SET INTC_PUT_Entry_Premium         = 1.25
+    SET INTC_PUT_Stop_Premium          = INTC_PUT_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0)  # 1.25 * 0.85 = 1.06
+    SET INTC_PUT_TP1_Premium           = INTC_PUT_Entry_Premium * 1.50                                 # 1.875
+
+    SET INTC_PUT_Risk_Per_Contract     = (INTC_PUT_Entry_Premium - INTC_PUT_Stop_Premium) * 100         # (1.25-1.06)*100 = $19.00
+    SET INTC_PUT_Max_Contracts         = FLOOR(85.00 / INTC_PUT_Risk_Per_Contract)                      # 4 Contracts Max
+    SET N_INTC_PUT                     = INTC_PUT_Max_Contracts                                         # 4 contracts -> $76 risk
+
+    # === 3. LONG CALL PLAYBOOK (VWAP Breakout / Momentum Reclaims) ===
+    SET INTC_Long_VWAP_Reclaim_Min     = 93.15                      # Clear trigger boundary over VWAP wall
+    SET INTC_Long_VWAP_Reclaim_Max     = 93.80
+
+    IF
+        INTC_LAST >= INTC_Long_VWAP_Reclaim_Min
+        AND INTC_LAST <= INTC_Long_VWAP_Reclaim_Max
+        AND INTC_LAST CROSSES ABOVE VWAP
+        AND INTC_1MIN_VOL >= 1.5 * INTC_1MIN_VOL_10BAR_AVG
+    THEN
+        BUY_TO_OPEN N_INTC_CALL INTC_<NEAR_WEEKLY>_CALL_DELTA50 @ INTC_CALL_Entry_Premium LMT
+
+    # Long Call Risk Management
+    IF INTC_<NEAR_WEEKLY>_CALL_DELTA50_LAST <= INTC_CALL_Stop_Premium THEN
+        SELL_TO_CLOSE ALL INTC_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    IF INTC_LAST <= Underlying_Stop_Level_Long THEN
+        SELL_TO_CLOSE ALL INTC_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    # === 4. LONG PUT PLAYBOOK (VWAP Rejections / Fades) ===
+    SET INTC_Short_R1_Entry            = 93.10                      # Immediate resistance tracking at VWAP line
+
+    IF
+        INTC_LAST <= INTC_Short_R1_Entry
+        AND INTC_LAST CROSSES BELOW VWAP
+        AND INTC_1MIN_VOL >= 1.5 * INTC_1MIN_VOL_10BAR_AVG
+    THEN
+        BUY_TO_OPEN N_INTC_PUT INTC_<NEAR_WEEKLY>_PUT_DELTA50 @ INTC_PUT_Entry_Premium LMT
+
+    # Long Put Risk Management
+    IF INTC_<NEAR_WEEKLY>_PUT_DELTA50_LAST <= INTC_PUT_Stop_Premium THEN
+        SELL_TO_CLOSE ALL INTC_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    IF INTC_LAST >= Underlying_Stop_Level_Short THEN
+        SELL_TO_CLOSE ALL INTC_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    # === 5. $0.50 INSTITUTIONAL TRIGGER POINTS ===
+    SET INTC_Trigger_Long_1            = 90.00                      # Large retail and institutional volume wall
+    SET INTC_Trigger_Short_1           = 95.00                      # Half-dollar breakout ceiling tier
+    
+    IF INTC_LAST CROSSES ABOVE INTC_Trigger_Long_1 AND INTC_1MIN_VOL >= 1.5 * INTC_1MIN_VOL_10BAR_AVG THEN
+        FLAG_LONG_ENTRY_INTC(INTC_Trigger_Long_1)
+
+    IF INTC_LAST CROSSES BELOW INTC_Trigger_Short_1 AND INTC_1MIN_VOL >= 1.5 * INTC_1MIN_VOL_10BAR_AVG THEN
+        FLAG_SHORT_ENTRY_INTC(INTC_Trigger_Short_1)
+END

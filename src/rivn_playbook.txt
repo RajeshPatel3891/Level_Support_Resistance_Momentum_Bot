@@ -1,0 +1,110 @@
+# =========================================================================================================
+# 🛰️ HARM.AI // TRADEGPT OPERATIONAL PLAYBOOK: RIVN
+# Regime: Velocity CLEAN / Range Chop | Risk Budget: $85 Target
+# =========================================================================================================
+
+IF [Symbol] IS "RIVN" AND [HARM.AI Guardrail State] IS "Velocity CLEAN/Range Chop" THEN
+    # === 1. CORE GUARDRAIL PARAMETERS ===
+    SET Current_Spot                   = 16.77                      # Live localized asset spot
+    SET Daily_ATR                      = 0.95                       # Low-priced equity baseline compression
+    SET VWAP                           = 17.05                      # Active resistance pivot overhead
+
+    SET Underlying_Stop_Distance       = 1.75 * Daily_ATR           # 1.75 * 0.95 = 1.6625
+    SET Underlying_Take_Profit_Dist    = 3.00 * Daily_ATR           # 3.00 * 0.95 = 2.85
+
+    # Target Structural Price Levels
+    SET Underlying_Stop_Level_Long     = Current_Spot - Underlying_Stop_Distance    # 16.77 - 1.66 = 15.11
+    SET Underlying_Take_Profit_Long    = Current_Spot + Underlying_Take_Profit_Dist # 16.77 + 2.85 = 19.62
+
+    SET Underlying_Stop_Level_Short    = Current_Spot + Underlying_Stop_Distance    # 16.77 + 1.66 = 18.43
+    SET Underlying_Take_Profit_Short   = Current_Spot - Underlying_Take_Profit_Dist # 16.77 - 2.85 = 13.92
+
+    # Options Risk Architecture
+    SET Target_Option_Delta            = 0.50
+    SET Position_Sizing_Rule           = "Standard contract allocation up to maximum premium exposure = $85"
+    SET Option_Stop_Loss_Percent       = 15                         # Tight range stop buffer
+    SET Support_Resistance_Symmetry    = "Standard bounds capped at 1.5 * ATR of Spot"
+
+    # 1.5 * ATR Volatility Bands
+    SET Aggressive_Band_Width          = 1.5 * Daily_ATR            # 1.425
+    SET Aggressive_Lower_Bound         = Current_Spot - Aggressive_Band_Width       # 16.77 - 1.42 = 15.35
+    SET Aggressive_Upper_Bound         = Current_Spot + Aggressive_Band_Width       # 16.77 + 1.42 = 18.19
+
+    # TradeAlgo Macro Zones (Sourced from local JSON)
+    SET Macro_Support_Low              = 17.11                      # Current spot sits just below historical profile support
+    SET Macro_Support_High             = 17.19
+    SET Macro_Resistance_Low           = 18.51
+    SET Macro_Resistance_High          = 18.59
+
+    # === 2. OPTION RISK BOX (Sized to ~$85 max risk with 15% stop) ===
+    # Call Side (Bullish)
+    SET RIVN_CALL_Entry_Premium        = 0.45                       # Cheap short-dated contract profile
+    SET RIVN_CALL_Stop_Premium         = RIVN_CALL_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0)  # 0.45 * 0.85 = 0.38
+    SET RIVN_CALL_TP1_Premium          = RIVN_CALL_Entry_Premium * 1.50                                  # 0.675
+
+    SET RIVN_CALL_Risk_Per_Contract    = (RIVN_CALL_Entry_Premium - RIVN_CALL_Stop_Premium) * 100        # (0.45-0.38)*100 = $7.00
+    SET RIVN_CALL_Max_Contracts        = FLOOR(85.00 / RIVN_CALL_Risk_Per_Contract)                      # 12 Contracts Max
+    SET N_RIVN_CALL                    = RIVN_CALL_Max_Contracts                                         # 12 contracts -> $84 risk
+
+    # Put Side (Bearish)
+    SET RIVN_PUT_Entry_Premium         = 0.50
+    SET RIVN_PUT_Stop_Premium          = RIVN_PUT_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0)   # 0.50 * 0.85 = 0.42
+    SET RIVN_PUT_TP1_Premium           = RIVN_PUT_Entry_Premium * 1.50                                   # 0.75
+
+    SET RIVN_PUT_Risk_Per_Contract     = (RIVN_PUT_Entry_Premium - RIVN_PUT_Stop_Premium) * 100          # (0.50-0.42)*100 = $8.00
+    SET RIVN_PUT_Max_Contracts         = FLOOR(85.00 / RIVN_PUT_Risk_Per_Contract)                       # 10 Contracts Max
+    SET N_RIVN_PUT                      = RIVN_PUT_Max_Contracts                                         # 10 contracts -> $80 risk
+
+    # === 3. LONG CALL PLAYBOOK (VWAP Breakout / Value Traps) ===
+    SET RIVN_Long_S1_Entry             = 15.35                      # Support bounce channel
+    SET RIVN_Long_VWAP_Reclaim_Min     = 17.10                      # Entry signal upon reclaiming structural floor
+    SET RIVN_Long_VWAP_Reclaim_Max     = 17.30
+
+    # Call Entry Logic: VWAP Reclaim Cross
+    IF
+        RIVN_LAST >= RIVN_Long_VWAP_Reclaim_Min
+        AND RIVN_LAST <= RIVN_Long_VWAP_Reclaim_Max
+        AND RIVN_LAST CROSSES ABOVE VWAP
+        AND RIVN_1MIN_VOL >= 1.5 * RIVN_1MIN_VOL_10BAR_AVG
+    THEN
+        BUY_TO_OPEN N_RIVN_CALL RIVN_<NEAR_WEEKLY>_CALL_DELTA50 @ RIVN_CALL_Entry_Premium LMT
+
+    # Long Call Risk Management
+    IF RIVN_<NEAR_WEEKLY>_CALL_DELTA50_LAST <= RIVN_CALL_Stop_Premium THEN
+        SELL_TO_CLOSE ALL RIVN_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    IF RIVN_LAST <= Underlying_Stop_Level_Long THEN
+        SELL_TO_CLOSE ALL RIVN_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    # === 4. LONG PUT PLAYBOOK (Fade Overhead Res / VWAP Rejection) ===
+    SET RIVN_Short_R1_Entry            = 17.05                      # Immediate resistance tracking at VWAP line
+    SET RIVN_Short_R2_Entry            = 18.15                      # High range ceiling
+
+    # Put Entry Logic: VWAP Rejection confirmation
+    IF
+        RIVN_LAST <= RIVN_Short_R1_Entry
+        AND RIVN_LAST CROSSES BELOW VWAP
+        AND RIVN_1MIN_VOL >= 1.5 * RIVN_1MIN_VOL_10BAR_AVG
+    THEN
+        BUY_TO_OPEN N_RIVN_PUT RIVN_<NEAR_WEEKLY>_PUT_DELTA50 @ RIVN_PUT_Entry_Premium LMT
+
+    # Long Put Risk Management
+    IF RIVN_<NEAR_WEEKLY>_PUT_DELTA50_LAST <= RIVN_PUT_Stop_Premium THEN
+        SELL_TO_CLOSE ALL RIVN_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    IF RIVN_LAST >= Underlying_Stop_Level_Short THEN
+        SELL_TO_CLOSE ALL RIVN_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    # === 5. $0.50 INSTITUTIONAL TRIGGER POINTS ===
+    SET RIVN_Trigger_Long_1            = 16.00      
+    SET RIVN_Trigger_Long_2            = 17.00      
+    SET RIVN_Trigger_Short_1           = 17.00      
+    SET RIVN_Trigger_Short_2           = 18.00      
+
+    # Institutional Volume Router Loops
+    IF RIVN_LAST CROSSES ABOVE RIVN_Trigger_Long_2 AND RIVN_1MIN_VOL >= 1.5 * RIVN_1MIN_VOL_10BAR_AVG THEN
+        FLAG_LONG_ENTRY_RIVN(RIVN_Trigger_Long_2)
+
+    IF RIVN_LAST CROSSES BELOW RIVN_Trigger_Short_1 AND RIVN_1MIN_VOL >= 1.5 * RIVN_1MIN_VOL_10BAR_AVG THEN
+        FLAG_SHORT_ENTRY_RIVN(RIVN_Trigger_Short_1)
+END

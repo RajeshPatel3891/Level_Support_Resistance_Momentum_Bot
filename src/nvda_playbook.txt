@@ -1,0 +1,158 @@
+# =========================================================================================================
+# 🛰️ HARM.AI // TRADEGPT OPERATIONAL PLAYBOOK: NVDA
+# Regime: Velocity CLEAN / Range Chop | Risk Budget: $85 Target
+# =========================================================================================================
+
+IF [Symbol] IS "NVDA" AND [HARM.AI Guardrail State] IS "Velocity CLEAN/Range Chop" THEN
+    # === 1. CORE GUARDRAIL PARAMETERS ===
+    SET Current_Spot                   = 211.82 
+    SET Daily_ATR                      = 5.80 
+    SET VWAP                           = 211.50
+
+    SET Underlying_Stop_Distance       = 1.75 * Daily_ATR                 # = 10.15
+    SET Underlying_Take_Profit_Dist    = 3.00 * Daily_ATR                 # = 17.40
+
+    SET Underlying_Stop_Level_Long     = Current_Spot - Underlying_Stop_Distance   # 211.82 - 10.15 = 201.67
+    SET Underlying_Take_Profit_Long    = Current_Spot + Underlying_Take_Profit_Dist# 211.82 + 17.40 = 229.22
+
+    SET Underlying_Stop_Level_Short    = Current_Spot + Underlying_Stop_Distance   # 211.82 + 10.15 = 221.97
+    SET Underlying_Take_Profit_Short   = Current_Spot - Underlying_Take_Profit_Dist# 211.82 - 17.40 = 194.42
+
+    SET Target_Option_Delta            = 0.50
+    SET Position_Sizing_Rule           = "Standard contract allocation up to maximum premium exposure = $85"
+    SET Option_Stop_Loss_Percent       = 15
+    SET Support_Resistance_Symmetry    = "Standard bounds capped at 1.5 * ATR of Spot"
+
+    # 1.5 * ATR Volatility Bands
+    SET Aggressive_Band_Width          = 1.5 * Daily_ATR                  # 8.70
+    SET Aggressive_Lower_Bound         = Current_Spot - Aggressive_Band_Width  # 211.82 - 8.70 = 203.12
+    SET Aggressive_Upper_Bound         = Current_Spot + Aggressive_Band_Width  # 211.82 + 8.70 = 220.52
+
+    # TradeAlgo Macro Zones (Clipped to Volatility Bands)
+    SET Macro_Support_Low              = 205.10
+    SET Macro_Support_High             = 206.90
+    SET Macro_Resistance_Low           = 214.10
+    SET Macro_Resistance_High          = 215.90
+
+    # === 2. OPTION RISK BOX (Sized to ~$85 risk with 15% stop) ===
+    # Call Side (Bullish)
+    SET NVDA_CALL_Entry_Premium        = 2.00
+    SET NVDA_CALL_Stop_Premium         = NVDA_CALL_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0)  # 2.00 * 0.85 = 1.70
+    SET NVDA_CALL_TP1_Premium          = NVDA_CALL_Entry_Premium * 1.50                                  # 3.00
+
+    SET NVDA_CALL_Risk_Per_Contract    = (NVDA_CALL_Entry_Premium - NVDA_CALL_Stop_Premium) * 100        # (2.00-1.70)*100 = 30
+    SET NVDA_CALL_Max_Contracts        = FLOOR(85.00 / NVDA_CALL_Risk_Per_Contract)                      # 2
+    SET N_NVDA_CALL                    = NVDA_CALL_Max_Contracts                                         # 2 contracts → $60 risk
+
+    # Put Side (Bearish)
+    SET NVDA_PUT_Entry_Premium         = 2.10
+    SET NVDA_PUT_Stop_Premium          = NVDA_PUT_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0)   # 2.10 * 0.85 = 1.79
+    SET NVDA_PUT_TP1_Premium           = NVDA_PUT_Entry_Premium * 1.50                                   # 3.15
+
+    SET NVDA_PUT_Risk_Per_Contract     = (NVDA_PUT_Entry_Premium - NVDA_PUT_Stop_Premium) * 100          # (2.10-1.79)*100 = 31
+    SET NVDA_PUT_Max_Contracts         = FLOOR(85.00 / NVDA_PUT_Risk_Per_Contract)                       # 2
+    SET N_NVDA_PUT                     = NVDA_PUT_Max_Contracts                                          # 2 contracts → $62 risk
+
+    # === 3. LONG CALL PLAYBOOK (Buy Support / VWAP Reclaim) ===
+    SET NVDA_Long_S1_Entry             = 206.00      
+    SET NVDA_Long_S2_Entry             = 205.50      
+    SET NVDA_Long_VWAP_Reclaim_Min     = 211.00
+    SET NVDA_Long_VWAP_Reclaim_Max     = 212.50
+
+    # Call Entry Logic: VWAP Cross
+    IF
+        NVDA_LAST >= NVDA_Long_VWAP_Reclaim_Min
+        AND NVDA_LAST <= NVDA_Long_VWAP_Reclaim_Max
+        AND NVDA_LAST CROSSES ABOVE VWAP
+        AND NVDA_1MIN_VOL >= 1.5 * NVDA_1MIN_VOL_10BAR_AVG
+    THEN
+        BUY_TO_OPEN N_NVDA_CALL NVDA_<NEAR_WEEKLY>_CALL_DELTA50 @ NVDA_CALL_Entry_Premium LMT
+
+    # Call Entry Logic: Support Bounce S1
+    IF
+        NVDA_LAST <= NVDA_Long_S1_Entry
+        AND NVDA_LAST >= Aggressive_Lower_Bound
+        AND NVDA_LAST CROSSES ABOVE NVDA_Long_S1_Entry FROM BELOW
+        AND NVDA_5MIN_VOL >= 1.5 * NVDA_5MIN_VOL_20BAR_AVG
+    THEN
+        BUY_TO_OPEN N_NVDA_CALL NVDA_<NEAR_WEEKLY>_CALL_DELTA50 @ NVDA_CALL_Entry_Premium LMT
+
+    # Call Entry Logic: Support Bounce S2
+    IF
+        NVDA_LAST <= NVDA_Long_S2_Entry
+        AND NVDA_LAST >= Aggressive_Lower_Bound
+        AND NVDA_LAST CROSSES ABOVE NVDA_Long_S2_Entry FROM BELOW
+        AND NVDA_5MIN_VOL >= 1.5 * NVDA_5MIN_VOL_20BAR_AVG
+    THEN
+        BUY_TO_OPEN N_NVDA_CALL NVDA_<NEAR_WEEKLY>_CALL_DELTA50 @ NVDA_CALL_Entry_Premium LMT
+
+    # Long Call Risk Management
+    IF NVDA_<NEAR_WEEKLY>_CALL_DELTA50_LAST <= NVDA_CALL_Stop_Premium THEN
+        SELL_TO_CLOSE ALL NVDA_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    IF NVDA_LAST <= Underlying_Stop_Level_Long THEN
+        SELL_TO_CLOSE ALL NVDA_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    IF NVDA_LAST >= Underlying_Take_Profit_Long OR NVDA_<NEAR_WEEKLY>_CALL_DELTA50_LAST >= NVDA_CALL_TP1_Premium THEN
+        SELL_TO_CLOSE ALL NVDA_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    # === 4. LONG PUT PLAYBOOK (Fade Resistance / VWAP Rejection) ===
+    SET NVDA_Short_R1_Entry            = 214.10      
+    SET NVDA_Short_R2_Entry            = 215.50      
+
+    # Put Entry Logic: VWAP Rejection / Resistance Crack
+    IF
+        NVDA_LAST >= NVDA_Short_R1_Entry
+        AND NVDA_LAST <= NVDA_Short_R2_Entry
+        AND NVDA_LAST CROSSES BELOW VWAP
+        AND NVDA_1MIN_VOL >= 1.5 * NVDA_1MIN_VOL_10BAR_AVG
+    THEN
+        BUY_TO_OPEN N_NVDA_PUT NVDA_<NEAR_WEEKLY>_PUT_DELTA50 @ NVDA_PUT_Entry_Premium LMT
+
+    # Put Entry Logic: Resistance Rejection R2
+    IF
+        NVDA_LAST >= NVDA_Short_R2_Entry
+        AND NVDA_LAST <= Aggressive_Upper_Bound
+        AND NVDA_LAST CROSSES BELOW NVDA_Short_R1_Entry FROM ABOVE
+        AND NVDA_5MIN_VOL >= 1.5 * NVDA_5MIN_VOL_20BAR_AVG
+    THEN
+        BUY_TO_OPEN N_NVDA_PUT NVDA_<NEAR_WEEKLY>_PUT_DELTA50 @ NVDA_PUT_Entry_Premium LMT
+
+    # Long Put Risk Management
+    IF NVDA_<NEAR_WEEKLY>_PUT_DELTA50_LAST <= NVDA_PUT_Stop_Premium THEN
+        SELL_TO_CLOSE ALL NVDA_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    IF NVDA_LAST >= Underlying_Stop_Level_Short THEN
+        SELL_TO_CLOSE ALL NVDA_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    IF NVDA_LAST <= Underlying_Take_Profit_Short OR NVDA_<NEAR_WEEKLY>_PUT_DELTA50_LAST >= NVDA_PUT_TP1_Premium THEN
+        SELL_TO_CLOSE ALL NVDA_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    # === 5. $0.50 INSTITUTIONAL TRIGGER POINTS ===
+    SET NVDA_Trigger_Long_1            = 206.00      
+    SET NVDA_Trigger_Long_2            = 210.50      
+    SET NVDA_Trigger_Long_3            = 212.00      
+
+    SET NVDA_Trigger_Short_1           = 214.50      
+    SET NVDA_Trigger_Short_2           = 215.50      
+    SET NVDA_Trigger_Short_3           = 210.50      
+
+    # Institutional Volume Router Loops
+    IF NVDA_LAST CROSSES ABOVE NVDA_Trigger_Long_1 AND NVDA_1MIN_VOL >= 1.5 * NVDA_1MIN_VOL_10BAR_AVG AND NVDA_LAST >= Macro_Support_Low AND NVDA_LAST <= VWAP THEN
+        FLAG_LONG_ENTRY_NVDA(NVDA_Trigger_Long_1)
+
+    IF NVDA_LAST CROSSES ABOVE NVDA_Trigger_Long_2 AND NVDA_1MIN_VOL >= 1.5 * NVDA_1MIN_VOL_10BAR_AVG AND NVDA_LAST <= Macro_Resistance_Low THEN
+        FLAG_LONG_ENTRY_NVDA(NVDA_Trigger_Long_2)
+
+    IF NVDA_LAST CROSSES ABOVE NVDA_Trigger_Long_3 AND NVDA_1MIN_VOL >= 1.5 * NVDA_1MIN_VOL_10BAR_AVG AND NVDA_LAST <= Macro_Resistance_High THEN
+        FLAG_LONG_ENTRY_NVDA(NVDA_Trigger_Long_3)
+
+    IF NVDA_LAST CROSSES BELOW NVDA_Trigger_Short_1 AND NVDA_1MIN_VOL >= 1.5 * NVDA_1MIN_VOL_10BAR_AVG AND NVDA_LAST >= VWAP THEN
+        FLAG_SHORT_ENTRY_NVDA(NVDA_Trigger_Short_1)
+
+    IF NVDA_LAST CROSSES BELOW NVDA_Trigger_Short_2 AND NVDA_1MIN_VOL >= 1.5 * NVDA_1MIN_VOL_10BAR_AVG AND NVDA_LAST >= Macro_Resistance_Low THEN
+        FLAG_SHORT_ENTRY_NVDA(NVDA_Trigger_Short_2)
+
+    IF NVDA_LAST CROSSES BELOW NVDA_Trigger_Short_3 AND NVDA_1MIN_VOL >= 1.5 * NVDA_1MIN_VOL_10BAR_AVG AND NVDA_LAST >= VWAP THEN
+        FLAG_SHORT_ENTRY_NVDA(NVDA_Trigger_Short_3)
+END

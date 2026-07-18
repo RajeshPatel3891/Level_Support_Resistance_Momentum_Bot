@@ -1,0 +1,129 @@
+# =========================================================================================================
+# 🛰️ HARM.AI // TRADEGPT OPERATIONAL PLAYBOOK: AAPL
+# Regime: Velocity CLEAN / Range Chop | Risk Budget: $85 Target
+# =========================================================================================================
+
+IF [Symbol] IS "AAPL" AND [HARM.AI Guardrail State] IS "Velocity CLEAN/Range Chop" THEN
+    # === 1. CORE GUARDRAIL PARAMETERS ===
+    SET Current_Spot                   = 325.40
+    SET Daily_ATR                      = 4.10                       # Standard compression variance
+    SET VWAP                           = 321.10
+
+    SET Underlying_Stop_Distance       = 1.75 * Daily_ATR           # Tight range leash = 7.175
+    SET Underlying_Take_Profit_Dist    = 3.00 * Daily_ATR           # 12.30
+
+    # Target Structural Price Levels
+    SET Underlying_Stop_Level_Long     = Current_Spot - Underlying_Stop_Distance    # 325.40 - 7.175 = 318.225
+    SET Underlying_Take_Profit_Long    = Current_Spot + Underlying_Take_Profit_Dist # 325.40 + 12.30 = 337.70
+
+    SET Underlying_Stop_Level_Short    = Current_Spot + Underlying_Stop_Distance    # 325.40 + 7.175 = 332.575
+    SET Underlying_Take_Profit_Short   = Current_Spot - Underlying_Take_Profit_Dist # 325.40 - 12.30 = 313.10
+
+    # Options Risk Profile Settings
+    SET Target_Option_Delta            = 0.50                       # ATM near-weeklies to catch aggressive gamma
+    SET Position_Sizing_Rule           = "Standard contract allocation up to maximum premium exposure = $85"
+    SET Option_Stop_Loss_Percent       = 15                         # Tighter 15% protective stop
+    SET Support_Resistance_Symmetry    = "Standard bounds capped at 1.5 * ATR of Spot"
+
+    # 1.5 * ATR Volatility Bands
+    SET Aggressive_Band_Width          = 1.5 * Daily_ATR            # 6.15
+    SET Aggressive_Lower_Bound         = Current_Spot - Aggressive_Band_Width       # 325.40 - 6.15 = 319.25
+    SET Aggressive_Upper_Bound         = Current_Spot + Aggressive_Band_Width       # 325.40 + 6.15 = 331.55
+
+    # TradeAlgo Macro Zones (Clipped to Volatility Bands)
+    SET Macro_Support_Low              = 323.10
+    SET Macro_Support_High             = 324.90
+    SET Macro_Resistance_Low           = 332.10
+    SET Macro_Resistance_High          = 333.90
+
+    # === 2. OPTION RISK BOX (Sized to ~$85 max risk with 15% stop) ===
+    # Call Side (Bullish)
+    SET AAPL_CALL_Entry_Premium        = 2.80
+    SET AAPL_CALL_Stop_Premium         = AAPL_CALL_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0)  # 2.80 * 0.85 = 2.38
+    SET AAPL_CALL_TP1_Premium          = AAPL_CALL_Entry_Premium * 1.50                                  # 4.20
+
+    SET AAPL_CALL_Risk_Per_Contract    = (AAPL_CALL_Entry_Premium - AAPL_CALL_Stop_Premium) * 100        # (2.80-2.38)*100 = 42
+    SET AAPL_CALL_Max_Contracts        = FLOOR(85.00 / AAPL_CALL_Risk_Per_Contract)                      # 2 Contracts Max
+    SET N_AAPL_CALL                    = AAPL_CALL_Max_Contracts                                         # 2 contracts -> $84 risk
+
+    # Put Side (Bearish)
+    SET AAPL_PUT_Entry_Premium         = 2.95
+    SET AAPL_PUT_Stop_Premium          = AAPL_PUT_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0)   # 2.95 * 0.85 = 2.50
+    SET AAPL_PUT_TP1_Premium           = AAPL_PUT_Entry_Premium * 1.50                                   # 4.425
+
+    SET AAPL_PUT_Risk_Per_Contract     = (AAPL_PUT_Entry_Premium - AAPL_PUT_Stop_Premium) * 100          # (2.95-2.50)*100 = 45
+    SET AAPL_PUT_Max_Contracts         = FLOOR(85.00 / AAPL_PUT_Risk_Per_Contract)                       # 1 Contract Max
+    SET N_AAPL_PUT                     = AAPL_PUT_Max_Contracts                                          # 1 contract -> $45 risk
+
+    # === 3. LONG CALL PLAYBOOK (Buy Support Bounce / VWAP Holds) ===
+    SET AAPL_Long_S1_Entry             = 324.50      
+    SET AAPL_Long_S2_Entry             = 323.50      
+    SET AAPL_Long_VWAP_Hold_Min        = 321.20
+    SET AAPL_Long_VWAP_Hold_Max        = 322.50
+
+    # Call Entry Logic: VWAP Support Confirmation
+    IF
+        AAPL_LAST >= AAPL_Long_VWAP_Hold_Min
+        AND AAPL_LAST <= AAPL_Long_VWAP_Hold_Max
+        AND AAPL_LAST CROSSES ABOVE VWAP
+        AND AAPL_1MIN_VOL >= 1.5 * AAPL_1MIN_VOL_10BAR_AVG
+    THEN
+        BUY_TO_OPEN N_AAPL_CALL AAPL_<NEAR_WEEKLY>_CALL_DELTA50 @ AAPL_CALL_Entry_Premium LMT
+
+    # Call Entry Logic: Support Zone Reversal
+    IF
+        AAPL_LAST <= AAPL_Long_S1_Entry
+        AND AAPL_LAST >= Aggressive_Lower_Bound
+        AND AAPL_LAST CROSSES ABOVE AAPL_Long_S1_Entry FROM BELOW
+        AND AAPL_5MIN_VOL >= 1.5 * AAPL_5MIN_VOL_20BAR_AVG
+    THEN
+        BUY_TO_OPEN N_AAPL_CALL AAPL_<NEAR_WEEKLY>_CALL_DELTA50 @ AAPL_CALL_Entry_Premium LMT
+
+    # Long Call Risk Management
+    IF AAPL_<NEAR_WEEKLY>_CALL_DELTA50_LAST <= AAPL_CALL_Stop_Premium THEN
+        SELL_TO_CLOSE ALL AAPL_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    IF AAPL_LAST <= Underlying_Stop_Level_Long THEN
+        SELL_TO_CLOSE ALL AAPL_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    IF AAPL_LAST >= Underlying_Take_Profit_Long OR AAPL_<NEAR_WEEKLY>_CALL_DELTA50_LAST >= AAPL_CALL_TP1_Premium THEN
+        SELL_TO_CLOSE ALL AAPL_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    # === 4. LONG PUT PLAYBOOK (Fade Resistance Extremes) ===
+    SET AAPL_Short_R1_Entry            = 332.10      
+    SET AAPL_Short_R2_Entry            = 333.50      
+
+    # Put Entry Logic: Overextended Range Breakdown
+    IF
+        AAPL_LAST >= AAPL_Short_R1_Entry
+        AND AAPL_LAST <= AAPL_Short_R2_Entry
+        AND AAPL_5MIN_VOL >= 1.5 * AAPL_5MIN_VOL_20BAR_AVG
+    THEN
+        BUY_TO_OPEN N_AAPL_PUT AAPL_<NEAR_WEEKLY>_PUT_DELTA50 @ AAPL_PUT_Entry_Premium LMT
+
+    # Long Put Risk Management
+    IF AAPL_<NEAR_WEEKLY>_PUT_DELTA50_LAST <= AAPL_PUT_Stop_Premium THEN
+        SELL_TO_CLOSE ALL AAPL_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    IF AAPL_LAST >= Underlying_Stop_Level_Short THEN
+        SELL_TO_CLOSE ALL AAPL_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    IF AAPL_LAST <= Underlying_Take_Profit_Short OR AAPL_<NEAR_WEEKLY>_PUT_DELTA50_LAST >= AAPL_PUT_TP1_Premium THEN
+        SELL_TO_CLOSE ALL AAPL_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    # === 5. $0.50 INSTITUTIONAL TRIGGER POINTS ===
+    SET AAPL_Trigger_Long_1            = 323.50      
+    SET AAPL_Trigger_Long_2            = 325.00      
+    SET AAPL_Trigger_Short_1           = 332.00      
+    SET AAPL_Trigger_Short_2           = 333.50      
+
+    # Institutional Volume Router Loops
+    IF AAPL_LAST CROSSES ABOVE AAPL_Trigger_Long_1 AND AAPL_1MIN_VOL >= 1.5 * AAPL_1MIN_VOL_10BAR_AVG AND AAPL_LAST >= Macro_Support_Low THEN
+        FLAG_LONG_ENTRY_AAPL(AAPL_Trigger_Long_1)
+
+    IF AAPL_LAST CROSSES ABOVE AAPL_Trigger_Long_2 AND AAPL_1MIN_VOL >= 1.5 * AAPL_1MIN_VOL_10BAR_AVG THEN
+        FLAG_LONG_ENTRY_AAPL(AAPL_Trigger_Long_2)
+
+    IF AAPL_LAST CROSSES BELOW AAPL_Trigger_Short_1 AND AAPL_1MIN_VOL >= 1.5 * AAPL_1MIN_VOL_10BAR_AVG THEN
+        FLAG_SHORT_ENTRY_AAPL(AAPL_Trigger_Short_1)
+END

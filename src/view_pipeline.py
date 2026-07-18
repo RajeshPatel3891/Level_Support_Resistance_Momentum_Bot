@@ -23,26 +23,23 @@ def get_live_quote(symbol):
 def get_db_tickers_by_status(statuses):
     try:
         conn = sqlite3.connect("harm_telemetry.db")
-        
-        # Build dynamic IN query parameter list: '?', '?', etc.
         placeholders = ",".join("?" for _ in statuses)
-        
-        # Pull the absolute LATEST record (highest id/rowid) for each distinct ticker matching the statuses
         query = f"""
             SELECT ticker, spot_price, exit_status 
             FROM trades 
-            WHERE exit_status IN ({placeholders})
-            GROUP BY ticker
-            HAVING rowid = MAX(rowid)
+            WHERE id IN (
+                SELECT MAX(id) 
+                FROM trades 
+                WHERE exit_status IN ({placeholders}) 
+                GROUP BY ticker
+            )
         """
-        
         rows = conn.execute(query, statuses).fetchall()
         conn.close()
-        return rows # Return deduplicated list of (ticker, spot_price, exit_status)
-    except Exception as e: 
+        return rows
+    except Exception as e:
         print(f"[-] Database Query Error: {e}")
         return []
-
 def display_dashboard(statuses):
     active_trades = get_db_tickers_by_status(statuses)
     

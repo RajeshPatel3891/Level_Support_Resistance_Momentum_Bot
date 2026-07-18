@@ -1,0 +1,130 @@
+# =========================================================================================================
+# 🛰️ HARM.AI // TRADEGPT OPERATIONAL PLAYBOOK: PLTR
+# Regime: Velocity CLEAN / Range Chop | Risk Budget: $85 Target
+# =========================================================================================================
+
+IF [Symbol] IS "PLTR" AND [HARM.AI Guardrail State] IS "Velocity CLEAN/Range Chop" THEN
+    # === 1. CORE GUARDRAIL PARAMETERS ===
+    SET Current_Spot                   = 133.72
+    SET Daily_ATR                      = 3.10                       # Compressing volatility variance
+    SET VWAP                           = 134.80
+
+    SET Underlying_Stop_Distance       = 1.75 * Daily_ATR           # Tight structural leash = 5.425
+    SET Underlying_Take_Profit_Dist    = 3.00 * Daily_ATR           # 9.30
+
+    # Target Structural Price Levels
+    SET Underlying_Stop_Level_Long     = Current_Spot - Underlying_Stop_Distance    # 133.72 - 5.425 = 128.295
+    SET Underlying_Take_Profit_Long    = Current_Spot + Underlying_Take_Profit_Dist # 133.72 + 9.30  = 143.02
+
+    SET Underlying_Stop_Level_Short    = Current_Spot + Underlying_Stop_Distance    # 133.72 + 5.425 = 139.145
+    SET Underlying_Take_Profit_Short   = Current_Spot - Underlying_Take_Profit_Dist # 133.72 - 9.30  = 124.42
+
+    # Options Risk Architecture
+    SET Target_Option_Delta            = 0.50
+    SET Position_Sizing_Rule           = "Standard contract allocation up to maximum premium exposure = $85"
+    SET Option_Stop_Loss_Percent       = 15                         # Rigid range stop floor
+    SET Support_Resistance_Symmetry    = "Standard bounds capped at 1.5 * ATR of Spot"
+
+    # 1.5 * ATR Volatility Bands
+    SET Aggressive_Band_Width          = 1.5 * Daily_ATR            # 4.65
+    SET Aggressive_Lower_Bound         = Current_Spot - Aggressive_Band_Width       # 133.72 - 4.65 = 129.07
+    SET Aggressive_Upper_Bound         = Current_Spot + Aggressive_Band_Width       # 133.72 + 4.65 = 138.37
+
+    # TradeAlgo Macro Zones (Sourced from local JSON)
+    SET Macro_Support_Low              = 128.75
+    SET Macro_Support_High             = 133.25
+    SET Macro_Resistance_Low           = 135.25
+    SET Macro_Resistance_High          = 136.75
+
+    # === 2. OPTION RISK BOX (Sized to ~$85 max risk with 15% stop) ===
+    # Call Side (Bullish)
+    SET PLTR_CALL_Entry_Premium        = 1.65
+    SET PLTR_CALL_Stop_Premium         = PLTR_CALL_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0)  # 1.65 * 0.85 = 1.40
+    SET PLTR_CALL_TP1_Premium          = PLTR_CALL_Entry_Premium * 1.50                                  # 2.475
+
+    SET PLTR_CALL_Risk_Per_Contract    = (PLTR_CALL_Entry_Premium - PLTR_CALL_Stop_Premium) * 100        # (1.65-1.40)*100 = 25
+    SET PLTR_CALL_Max_Contracts        = FLOOR(85.00 / PLTR_CALL_Risk_Per_Contract)                      # 3 Contracts Max
+    SET N_PLTR_CALL                    = PLTR_CALL_Max_Contracts                                         # 3 contracts -> $75 risk
+
+    # Put Side (Bearish)
+    SET PLTR_PUT_Entry_Premium         = 1.80
+    SET PLTR_PUT_Stop_Premium          = PLTR_PUT_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0)   # 1.80 * 0.85 = 1.53
+    SET PLTR_PUT_TP1_Premium           = PLTR_PUT_Entry_Premium * 1.50                                   # 2.70
+
+    SET PLTR_PUT_Risk_Per_Contract     = (PLTR_PUT_Entry_Premium - PLTR_PUT_Stop_Premium) * 100          # (1.80-1.53)*100 = 27
+    SET PLTR_PUT_Max_Contracts         = FLOOR(85.00 / PLTR_PUT_Risk_Per_Contract)                       # 3 Contracts Max
+    SET N_PLTR_PUT                     = PLTR_PUT_Max_Contracts                                          # 3 contracts -> $81 risk
+
+    # === 3. LONG CALL PLAYBOOK (Buy Support Bounce / VWAP Breakout) ===
+    SET PLTR_Long_S1_Entry             = 133.25                     # Top of macro support cluster
+    SET PLTR_Long_S2_Entry             = 131.50                     # Mid-zone structural re-test
+    SET PLTR_Long_VWAP_Reclaim_Min     = 134.90
+    SET PLTR_Long_VWAP_Reclaim_Max     = 135.50
+
+    # Call Entry Logic: VWAP Reclaim
+    IF
+        PLTR_LAST >= PLTR_Long_VWAP_Reclaim_Min
+        AND PLTR_LAST <= PLTR_Long_VWAP_Reclaim_Max
+        AND PLTR_LAST CROSSES ABOVE VWAP
+        AND PLTR_1MIN_VOL >= 1.5 * PLTR_1MIN_VOL_10BAR_AVG
+    THEN
+        BUY_TO_OPEN N_PLTR_CALL PLTR_<NEAR_WEEKLY>_CALL_DELTA50 @ PLTR_CALL_Entry_Premium LMT
+
+    # Call Entry Logic: Support Bounce S1
+    IF
+        PLTR_LAST <= PLTR_Long_S1_Entry
+        AND PLTR_LAST >= Aggressive_Lower_Bound
+        AND PLTR_LAST CROSSES ABOVE PLTR_Long_S1_Entry FROM BELOW
+        AND PLTR_5MIN_VOL >= 1.5 * PLTR_5MIN_VOL_20BAR_AVG
+    THEN
+        BUY_TO_OPEN N_PLTR_CALL PLTR_<NEAR_WEEKLY>_CALL_DELTA50 @ PLTR_CALL_Entry_Premium LMT
+
+    # Long Call Risk Management
+    IF PLTR_<NEAR_WEEKLY>_CALL_DELTA50_LAST <= PLTR_CALL_Stop_Premium THEN
+        SELL_TO_CLOSE ALL PLTR_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    IF PLTR_LAST <= Underlying_Stop_Level_Long THEN
+        SELL_TO_CLOSE ALL PLTR_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    IF PLTR_LAST >= Underlying_Take_Profit_Long OR PLTR_<NEAR_WEEKLY>_CALL_DELTA50_LAST >= PLTR_CALL_TP1_Premium THEN
+        SELL_TO_CLOSE ALL PLTR_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    # === 4. LONG PUT PLAYBOOK (Fade Resistance Breaks) ===
+    SET PLTR_Short_R1_Entry            = 135.25                     # Lower macro resistance line
+    SET PLTR_Short_R2_Entry            = 136.75                     # Upper boundary line
+
+    # Put Entry Logic: VWAP Rejection loop
+    IF
+        PLTR_LAST >= PLTR_Short_R1_Entry
+        AND PLTR_LAST <= PLTR_Short_R2_Entry
+        AND PLTR_LAST CROSSES BELOW VWAP
+        AND PLTR_1MIN_VOL >= 1.5 * PLTR_1MIN_VOL_10BAR_AVG
+    THEN
+        BUY_TO_OPEN N_PLTR_PUT PLTR_<NEAR_WEEKLY>_PUT_DELTA50 @ PLTR_PUT_Entry_Premium LMT
+
+    # Long Put Risk Management
+    IF PLTR_<NEAR_WEEKLY>_PUT_DELTA50_LAST <= PLTR_PUT_Stop_Premium THEN
+        SELL_TO_CLOSE ALL PLTR_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    IF PLTR_LAST >= Underlying_Stop_Level_Short THEN
+        SELL_TO_CLOSE ALL PLTR_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    IF PLTR_LAST <= Underlying_Take_Profit_Short OR PLTR_<NEAR_WEEKLY>_PUT_DELTA50_LAST >= PLTR_PUT_TP1_Premium THEN
+        SELL_TO_CLOSE ALL PLTR_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    # === 5. $0.50 INSTITUTIONAL TRIGGER POINTS ===
+    SET PLTR_Trigger_Long_1            = 130.00      
+    SET PLTR_Trigger_Long_2            = 133.50      
+    SET PLTR_Trigger_Short_1           = 135.00      
+    SET PLTR_Trigger_Short_2           = 136.50      
+
+    # Institutional Volume Router Loops
+    IF PLTR_LAST CROSSES ABOVE PLTR_Trigger_Long_1 AND PLTR_1MIN_VOL >= 1.5 * PLTR_1MIN_VOL_10BAR_AVG AND PLTR_LAST >= Macro_Support_Low THEN
+        FLAG_LONG_ENTRY_PLTR(PLTR_Trigger_Long_1)
+
+    IF PLTR_LAST CROSSES ABOVE PLTR_Trigger_Long_2 AND PLTR_1MIN_VOL >= 1.5 * PLTR_1MIN_VOL_10BAR_AVG AND PLTR_LAST <= VWAP THEN
+        FLAG_LONG_ENTRY_PLTR(PLTR_Trigger_Long_2)
+
+    IF PLTR_LAST CROSSES BELOW PLTR_Trigger_Short_1 AND PLTR_1MIN_VOL >= 1.5 * PLTR_1MIN_VOL_10BAR_AVG AND PLTR_LAST >= VWAP THEN
+        FLAG_SHORT_ENTRY_PLTR(PLTR_Trigger_Short_1)
+END

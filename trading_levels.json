@@ -1,13 +1,36 @@
 {
+  "AAL": {
+    "support_a": 15.1,
+    "support_b": 15.25,
+    "resistance_a": 15.55,
+    "resistance_b": 15.7,
+    "last_price": 15.6,
+    "daily_atr": 0.45,
+    "vwap": 15.42,
+    "aggressive_lower_bound": 14.69,
+    "aggressive_upper_bound": 16.04
+  },
+  "NVDA": {
+    "support_a": 205.1,
+    "support_b": 206.9,
+    "resistance_a": 214.1,
+    "resistance_b": 215.9,
+    "last_price": 206.85,
+    "daily_atr": 5.8,
+    "vwap": 211.5,
+    "aggressive_lower_bound": 203.12,
+    "aggressive_upper_bound": 220.52
+  },
   "TSLA": {
     "support_a": 384.1,
     "support_b": 385.9,
     "resistance_a": 400.1,
     "resistance_b": 401.9,
     "last_price": 390.0,
-    "gamma_flip": 388.0,
-    "call_wall": 415.0,
-    "put_wall": 380.0
+    "daily_atr": 12.4,
+    "vwap": 397.3,
+    "aggressive_lower_bound": 376.88,
+    "aggressive_upper_bound": 414.08
   },
   "AAPL": {
     "support_a": 323.1,
@@ -15,9 +38,10 @@
     "resistance_a": 332.1,
     "resistance_b": 333.9,
     "last_price": 328.0,
-    "gamma_flip": 326.0,
-    "call_wall": 340.0,
-    "put_wall": 320.0
+    "daily_atr": 4.1,
+    "vwap": 321.1,
+    "aggressive_lower_bound": 319.25,
+    "aggressive_upper_bound": 331.55
   },
   "PLTR": {
     "support_a": 128.75,
@@ -25,19 +49,10 @@
     "resistance_a": 135.25,
     "resistance_b": 136.75,
     "last_price": 133.0,
-    "gamma_flip": 132.0,
-    "call_wall": 140.0,
-    "put_wall": 125.0
-  },
-  "NVDA": {
-    "support_a": 205.1,
-    "support_b": 206.9,
-    "resistance_a": 214.1,
-    "resistance_b": 215.9,
-    "last_price": 150.0,
-    "gamma_flip": 210.0,
-    "call_wall": 240.0,
-    "put_wall": 200.0
+    "daily_atr": 3.1,
+    "vwap": 134.8,
+    "aggressive_lower_bound": 129.07,
+    "aggressive_upper_bound": 138.37
   },
   "RIVN": {
     "support_a": 17.11,
@@ -45,9 +60,10 @@
     "resistance_a": 18.51,
     "resistance_b": 18.59,
     "last_price": 17.15,
-    "gamma_flip": 17.5,
-    "call_wall": 20.0,
-    "put_wall": 16.5
+    "daily_atr": 0.95,
+    "vwap": 17.05,
+    "aggressive_lower_bound": 15.35,
+    "aggressive_upper_bound": 18.19
   },
   "SOFI": {
     "support_a": 17.11,
@@ -55,19 +71,10 @@
     "resistance_a": 18.51,
     "resistance_b": 18.59,
     "last_price": 17.15,
-    "gamma_flip": 17.5,
-    "call_wall": 20.0,
-    "put_wall": 16.5
-  },
-  "INTC": {
-    "support_a": 97.85,
-    "support_b": 99.15,
-    "resistance_a": 104.42,
-    "resistance_b": 105.08,
-    "last_price": 70.0,
-    "gamma_flip": 101.0,
-    "call_wall": 115.0,
-    "put_wall": 95.0
+    "daily_atr": 0.85,
+    "vwap": 17.15,
+    "aggressive_lower_bound": 15.63,
+    "aggressive_upper_bound": 18.17
   },
   "F": {
     "support_a": 13.88,
@@ -75,18 +82,20 @@
     "resistance_a": 14.29,
     "resistance_b": 14.42,
     "last_price": 14.15,
-    "gamma_flip": 14.1,
-    "call_wall": 15.5,
-    "put_wall": 13.5
+    "daily_atr": 0.35,
+    "vwap": 14.2,
+    "aggressive_lower_bound": 13.62,
+    "aggressive_upper_bound": 14.68
   },
-  "AAL": {
-    "support_a": 15.18,
-    "support_b": 15.32,
-    "resistance_a": 15.98,
-    "resistance_b": 16.12,
-    "last_price": 15.6,
-    "gamma_flip": 15.5,
-    "call_wall": 17.0,
-    "put_wall": 14.5
+  "INTC": {
+    "support_a": 97.85,
+    "support_b": 99.15,
+    "resistance_a": 104.42,
+    "resistance_b": 105.08,
+    "last_price": 98.4,
+    "daily_atr": 2.45,
+    "vwap": 93.1,
+    "aggressive_lower_bound": 89.21,
+    "aggressive_upper_bound": 96.57
   }
 }

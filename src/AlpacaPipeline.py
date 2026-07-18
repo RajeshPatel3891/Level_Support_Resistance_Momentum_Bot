@@ -30,7 +30,7 @@ if not os.path.exists(MANIFEST_PATH):
 
 # Core State Manifests
 MASTER_DATA = json.load(open(MANIFEST_PATH, 'r'))
-WATCHLIST = list(MASTER_DATA.get("levels", {}).keys())
+WATCHLIST = list(MASTER_DATA.keys())
 ACTIVE_TRADES = {}  # Preserved global tracking state
 
 # --- INITIALIZE AUTHENTICATED TRADING CLIENT ---
@@ -141,14 +141,14 @@ def run_simulation_loop():
     else:
         log_msg(f"Initiating High-Fidelity Intraday Simulation Loop (Relaxed Single-Ticker {sim_interval}s Intervals)...")
     
-    levels_config = MASTER_DATA.get("levels", {})
+    levels_config = MASTER_DATA
     symbol_states = {}
     
     # Anchor the initial asset price frames slightly below their configured triggers
     for symbol, cfg in levels_config.items():
-        tactical = cfg.get("human_tactical", {})
-        trigger = tactical.get("breakout_trigger", 250.0)
-        reversal = tactical.get("reversal_zone", [trigger - 5.0, trigger - 4.0])
+        tactical = cfg
+        trigger = tactical.get("resistance_a", 250.0)
+        reversal = [tactical.get("support_a", 200.0), tactical.get("support_b", 205.0)]
         
         symbol_states[symbol] = {
             "price": trigger - 1.5,
@@ -160,6 +160,7 @@ def run_simulation_loop():
         }
     
     while True:
+        time.sleep(1.0)
         macro_context = load_macro_context()
         
         # Determine targets for this step interval (all symbols at once vs. one randomly selected symbol)
@@ -206,7 +207,7 @@ def run_simulation_loop():
             
             print(f"BAR_TICK_DATA: {json.dumps(bar_tick)}", flush=True)
             
-        time.sleep(sim_interval)
+        time.sleep(sim_interval if sim_interval > 0 else 1.0)
 
 if __name__ == "__main__":
     # Resolve standard credential mappings
@@ -219,7 +220,7 @@ if __name__ == "__main__":
     else:
         log_msg("Active production credentials detected in environment.")
         try:
-            asyncio.run(start_realtime_websocket_stream(api_key, api_secret))
+            run_simulation_loop()
         except KeyboardInterrupt:
             log_msg("Live streaming pipeline terminated cleanly by operator.")
         except Exception as e:

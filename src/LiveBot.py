@@ -1,4 +1,27 @@
 import os
+import requests
+
+def dispatch_discord_alert(symbol, basis, action="ENTRY"):
+    webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
+    if not webhook_url or "your_real_id" in webhook_url:
+        return
+    payload = {
+        "embeds": [{
+            "title": "🦅 HARM.AI // EXECUTION ENGINE SIGNAL",
+            "color": 3066993 if action == "ENTRY" else 15158332,
+            "fields": [
+                {"name": "Asset Ticker", "value": f"`{symbol}`", "inline": True},
+                {"name": "Action Taken", "value": f"**{action}**", "inline": True},
+                {"name": "Execution Price", "value": f"`${basis:.2f}`", "inline": True}
+            ],
+            "footer": {"text": "Harmonized Real-Time Stream Engine Active"}
+        }]
+    }
+    try:
+        requests.post(webhook_url, json=payload, timeout=5)
+    except:
+        pass
+
 import sys
 import json
 import requests
@@ -92,7 +115,11 @@ def execute_order(symbol, ticker, quantity, side, limit_price=None):
         time.sleep(2)
         if get_order_status(order_id) == "filled":
             if "buy" in side.lower():
-                log_trade_to_database(symbol, 131.02)
+                log_trade_to_database(symbol, float(limit_price) if limit_price else 1.00)
+                try:
+                    dispatch_discord_alert(symbol, float(limit_price) if limit_price else 1.00, 'ENTRY')
+                except:
+                    pass
                 ACTIVE_TRADES[symbol] = True
             return True
     return False
@@ -108,21 +135,50 @@ def on_message(ws, message):
                     pass
     except Exception: pass
 
+def get_streaming_session():
+    import os, requests
+    token = os.getenv("TRADIER_SANDBOX_TOKEN")
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    try:
+        # Request a dynamic WebSocket session ticket from the REST engine
+        r = requests.post("https://sandbox.tradier.com/v1/markets/events/session", headers=headers)
+        if r.status_code == 200:
+            return r.json().get("stream", {})
+    except Exception as e:
+        print(f"[-] Session API Request Error: {e}")
+    return {}
+
+def on_ws_open(ws):
+    import json
+    session_info = get_streaming_session()
+    session_id = session_info.get("sessionid")
+    
+    if session_id:
+        # Formulate the explicit Tradier payload layout to subscribe to your core watchlist pool
+        auth_payload = {
+            "filter": ["AAPL", "NVDA", "TSLA", "PLTR", "RIVN", "SOFI", "INTC", "AAL", "F"],
+            "lineage": "true",
+            "sessionid": session_id,
+            "breakdown": "true"
+        }
+        ws.send(json.dumps(auth_payload))
+        print("[✓] Tradier WebSocket Stream Session Authenticated and Channels Armed!")
+    else:
+        print("[❌] Failed to obtain valid session token. Connection unauthenticated.")
+
 def run_ws_loop():
+    import time, sys, websocket
     print("[*] Starting LiveBot WebSocket listener...")
     while True:
         try:
             ws = websocket.WebSocketApp(
                 "wss://ws.tradier.com/v1/markets/events", 
                 on_message=on_message, 
-                on_open=lambda ws: print("### Auth ###")
+                on_open=on_ws_open
             )
             ws.run_forever()
-            
-            # Prevent high-velocity reconnection loops if network rejects session
             print("[-] Connection closed. Retrying connection in 3 seconds...")
             time.sleep(3)
-            
         except Exception as e:
             print(f"[-] WS Error: {e}. Reconnecting in 5s...", file=sys.stderr)
             time.sleep(5)

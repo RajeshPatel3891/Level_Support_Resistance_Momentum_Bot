@@ -1,0 +1,108 @@
+# =========================================================================================================
+# 🛰️ HARM.AI // TRADEGPT OPERATIONAL PLAYBOOK: F
+# Regime: Velocity CLEAN / Range Chop | Risk Budget: $85 Target
+# =========================================================================================================
+
+IF [Symbol] IS "F" AND [HARM.AI Guardrail State] IS "Velocity CLEAN/Range Chop" THEN
+    # === 1. CORE GUARDRAIL PARAMETERS ===
+    SET Current_Spot                   = 14.15
+    SET Daily_ATR                      = 0.35                       # Low-beta equity compression asset
+    SET VWAP                           = 14.20                      # Nearby anchor pivot
+
+    SET Underlying_Stop_Distance       = 1.75 * Daily_ATR           # Tight structural leash = 0.6125
+    SET Underlying_Take_Profit_Dist    = 3.00 * Daily_ATR           # 1.05
+
+    # Target Structural Price Levels
+    SET Underlying_Stop_Level_Long     = Current_Spot - Underlying_Stop_Distance    # 14.15 - 0.61 = 13.54
+    SET Underlying_Take_Profit_Long    = Current_Spot + Underlying_Take_Profit_Dist # 14.15 + 1.05 = 15.20
+
+    SET Underlying_Stop_Level_Short    = Current_Spot + Underlying_Stop_Distance    # 14.15 + 0.61 = 14.76
+    SET Underlying_Take_Profit_Short   = Current_Spot - Underlying_Take_Profit_Dist # 14.15 - 1.05 = 13.10
+
+    # Options Risk Architecture
+    SET Target_Option_Delta            = 0.50
+    SET Position_Sizing_Rule           = "Standard contract allocation up to maximum premium exposure = $85"
+    SET Option_Stop_Loss_Percent       = 15                         # Strict range stop floor
+    SET Support_Resistance_Symmetry    = "Standard bounds capped at 1.5 * ATR of Spot"
+
+    # 1.5 * ATR Volatility Bands
+    SET Aggressive_Band_Width          = 1.5 * Daily_ATR            # 0.525
+    SET Aggressive_Lower_Bound         = Current_Spot - Aggressive_Band_Width       # 14.15 - 0.53 = 13.62
+    SET Aggressive_Upper_Bound         = Current_Spot + Aggressive_Band_Width       # 14.15 + 0.53 = 14.68
+
+    # TradeAlgo Macro Zones (Sourced from local JSON)
+    SET Macro_Support_Low              = 13.88
+    SET Macro_Support_High             = 14.01
+    SET Macro_Resistance_Low           = 14.29
+    SET Macro_Resistance_High          = 14.42
+
+    # === 2. OPTION RISK BOX (Sized to ~$85 max risk with 15% stop) ===
+    # Call Side (Bullish)
+    SET F_CALL_Entry_Premium           = 0.35                       # Cheap fractional contract scale
+    SET F_CALL_Stop_Premium            = F_CALL_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0) # 0.35 * 0.85 = 0.30
+    SET F_CALL_TP1_Premium             = F_CALL_Entry_Premium * 1.50                                 # 0.525
+
+    SET F_CALL_Risk_Per_Contract       = (F_CALL_Entry_Premium - F_CALL_Stop_Premium) * 100        # (0.35-0.30)*100 = $5.00
+    SET F_CALL_Max_Contracts           = FLOOR(85.00 / F_CALL_Risk_Per_Contract)                     # 17 Contracts Max
+    SET N_F_CALL                       = F_CALL_Max_Contracts                                        # 17 contracts -> $85 risk
+
+    # Put Side (Bearish)
+    SET F_PUT_Entry_Premium            = 0.40
+    SET F_PUT_Stop_Premium             = F_PUT_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0)  # 0.40 * 0.85 = 0.34
+    SET F_PUT_TP1_Premium              = F_PUT_Entry_Premium * 1.50                                 # 0.60
+
+    SET F_PUT_Risk_Per_Contract        = (F_PUT_Entry_Premium - F_PUT_Stop_Premium) * 100          # (0.40-0.34)*100 = $6.00
+    SET F_PUT_Max_Contracts            = FLOOR(85.00 / F_PUT_Risk_Per_Contract)                      # 14 Contracts Max
+    SET N_F_PUT                        = F_PUT_Max_Contracts                                         # 14 contracts -> $84 risk
+
+    # === 3. LONG CALL PLAYBOOK (Macro Support Triggers) ===
+    SET F_Long_S1_Entry                = 14.01                      # Top of macro support block
+    SET F_Long_VWAP_Reclaim_Min        = 14.22                      # Confirm above VWAP loop
+    SET F_Long_VWAP_Reclaim_Max        = 14.30
+
+    # Call Entry Logic: Support Hold
+    IF
+        F_LAST <= F_Long_S1_Entry
+        AND F_LAST >= Aggressive_Lower_Bound
+        AND F_LAST CROSSES ABOVE F_Long_S1_Entry FROM BELOW
+        AND F_1MIN_VOL >= 1.5 * F_1MIN_VOL_10BAR_AVG
+    THEN
+        BUY_TO_OPEN N_F_CALL F_<NEAR_WEEKLY>_CALL_DELTA50 @ F_CALL_Entry_Premium LMT
+
+    # Long Call Risk Management
+    IF F_<NEAR_WEEKLY>_CALL_DELTA50_LAST <= F_CALL_Stop_Premium THEN
+        SELL_TO_CLOSE ALL F_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    IF F_LAST <= Underlying_Stop_Level_Long THEN
+        SELL_TO_CLOSE ALL F_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    # === 4. LONG PUT PLAYBOOK (Resistance Failure Loops) ===
+    SET F_Short_R1_Entry               = 14.29                      # Macro resistance low edge
+    SET F_Short_R2_Entry               = 14.42                      # Macro resistance ceiling
+
+    # Put Entry Logic: Rejection Fades
+    IF
+        F_LAST >= F_Short_R1_Entry
+        AND F_LAST <= F_Short_R2_Entry
+        AND F_LAST CROSSES BELOW VWAP
+        AND F_1MIN_VOL >= 1.5 * F_1MIN_VOL_10BAR_AVG
+    THEN
+        BUY_TO_OPEN N_F_PUT F_<NEAR_WEEKLY>_PUT_DELTA50 @ F_PUT_Entry_Premium LMT
+
+    # Long Put Risk Management
+    IF F_<NEAR_WEEKLY>_PUT_DELTA50_LAST <= F_PUT_Stop_Premium THEN
+        SELL_TO_CLOSE ALL F_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    IF F_LAST >= Underlying_Stop_Level_Short THEN
+        SELL_TO_CLOSE ALL F_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    # === 5. $0.50 INSTITUTIONAL TRIGGER POINTS ===
+    SET F_Trigger_Long_1               = 14.00                      # Vital physical whole number wall
+    SET F_Trigger_Short_1              = 14.50                      # Overhead grid tier
+    
+    IF F_LAST CROSSES ABOVE F_Trigger_Long_1 AND F_1MIN_VOL >= 1.5 * F_1MIN_VOL_10BAR_AVG THEN
+        FLAG_LONG_ENTRY_F(F_Trigger_Long_1)
+
+    IF F_LAST CROSSES BELOW F_Trigger_Short_1 AND F_1MIN_VOL >= 1.5 * F_1MIN_VOL_10BAR_AVG THEN
+        FLAG_SHORT_ENTRY_F(F_Trigger_Short_1)
+END

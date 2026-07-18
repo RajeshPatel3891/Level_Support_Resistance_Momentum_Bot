@@ -1,0 +1,148 @@
+# =========================================================================================================
+# 🛰️ HARM.AI // TRADEGPT OPERATIONAL PLAYBOOK: AAL
+# Regime: Velocity CLEAN / Range Chop | Risk Budget: $85 Target
+# =========================================================================================================
+
+IF [Symbol] IS "AAL" AND [HARM.AI Guardrail State] IS "Velocity CLEAN/Range Chop" THEN
+    # === 1. CORE GUARDRAIL PARAMETERS ===
+    SET Daily_ATR                      = 0.45
+    SET Current_Spot                   = 15.36
+    SET VWAP                           = 15.42
+    
+    SET Underlying_Stop_Distance       = 1.75 * Daily_ATR          # = 0.7875
+    SET Underlying_Take_Profit_Dist    = 3.00 * Daily_ATR          # = 1.35
+    
+    # Target Structural Price Levels
+    SET Underlying_Stop_Level_Long     = Current_Spot - Underlying_Stop_Distance    # 15.36 - 0.7875 = 14.57
+    SET Underlying_Take_Profit_Long    = Current_Spot + Underlying_Take_Profit_Dist # 15.36 + 1.35   = 16.71
+    
+    SET Underlying_Stop_Level_Short    = Current_Spot + Underlying_Stop_Distance    # 15.36 + 0.7875 = 16.15
+    SET Underlying_Take_Profit_Short   = Current_Spot - Underlying_Take_Profit_Dist # 15.36 - 1.35   = 14.01
+    
+    # Options Risk Management Mapping
+    SET Target_Option_Delta            = 0.50
+    SET Position_Sizing_Rule           = "Standard contract allocation up to maximum premium exposure = $85"
+    SET Option_Stop_Loss_Percent       = 15
+    SET Support_Resistance_Symmetry    = "Standard bounds capped at 1.5 * ATR of Spot"
+    
+    # 1.5 * ATR Volatility Bands
+    SET Aggressive_Band_Width          = 1.5 * Daily_ATR                            # 0.675
+    SET Aggressive_Lower_Bound         = Current_Spot - Aggressive_Band_Width       # 15.36 - 0.675 = 14.69
+    SET Aggressive_Upper_Bound         = Current_Spot + Aggressive_Band_Width       # 15.36 + 0.675 = 16.04
+    
+    # TradeAlgo Macro Zones (Clipped to Volatility Bands)
+    SET Macro_Support_Low              = 15.10
+    SET Macro_Support_High             = 15.25
+    SET Macro_Resistance_Low           = 15.55
+    SET Macro_Resistance_High          = 15.70
+
+    # === 2. LONG CALL PLAYBOOK (Buy Dips / VWAP Reclaim) ===
+    SET AAL_CALL_Entry_Premium         = 0.85        
+    SET AAL_CALL_Stop_Premium          = AAL_CALL_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0)  # 0.85 * 0.85 = 0.72
+    SET AAL_CALL_TP1_Premium           = AAL_CALL_Entry_Premium * 1.50                                  # 1.275
+    
+    SET AAL_CALL_Risk_Per_Contract     = (AAL_CALL_Entry_Premium - AAL_CALL_Stop_Premium) * 100         # $13.00
+    SET AAL_CALL_Max_Contracts         = FLOOR(85.00 / AAL_CALL_Risk_Per_Contract)                      # 6 Contracts
+    SET N_AAL_CALL                     = AAL_CALL_Max_Contracts
+    
+    SET AAL_Long_S1_Entry              = 15.20      
+    SET AAL_Long_S2_Entry              = 15.10      
+    SET AAL_Long_VWAP_Reclaim_Min      = 15.30
+    SET AAL_Long_VWAP_Reclaim_Max      = 15.50
+    
+    # Call Entry Logic: VWAP Cross
+    IF
+        AAL_LAST >= AAL_Long_VWAP_Reclaim_Min
+        AND AAL_LAST <= AAL_Long_VWAP_Reclaim_Max
+        AND AAL_LAST CROSSES ABOVE VWAP
+        AND AAL_1MIN_VOL >= 1.5 * AAL_1MIN_VOL_10BAR_AVG
+    THEN
+        BUY_TO_OPEN N_AAL_CALL AAL_<NEAR_WEEKLY>_CALL_DELTA50 @ AAL_CALL_Entry_Premium LMT
+    
+    # Call Entry Logic: Support Bounce S1
+    IF
+        AAL_LAST <= AAL_Long_S1_Entry
+        AND AAL_LAST >= Aggressive_Lower_Bound
+        AND AAL_LAST CROSSES ABOVE AAL_Long_S1_Entry FROM BELOW
+        AND AAL_5MIN_VOL >= 1.5 * AAL_5MIN_VOL_20BAR_AVG
+    THEN
+        BUY_TO_OPEN N_AAL_CALL AAL_<NEAR_WEEKLY>_CALL_DELTA50 @ AAL_CALL_Entry_Premium LMT
+    
+    # Call Entry Logic: Support Bounce S2
+    IF
+        AAL_LAST <= AAL_Long_S2_Entry
+        AND AAL_LAST >= Aggressive_Lower_Bound
+        AND AAL_LAST CROSSES ABOVE AAL_Long_S2_Entry FROM BELOW
+        AND AAL_5MIN_VOL >= 1.5 * AAL_5MIN_VOL_20BAR_AVG
+    THEN
+        BUY_TO_OPEN N_AAL_CALL AAL_<NEAR_WEEKLY>_CALL_DELTA50 @ AAL_CALL_Entry_Premium LMT
+    
+    # Long Call Risk Management
+    IF AAL_<NEAR_WEEKLY>_CALL_DELTA50_LAST <= AAL_CALL_Stop_Premium THEN
+        SELL_TO_CLOSE ALL AAL_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+        
+    IF AAL_LAST <= Underlying_Stop_Level_Long THEN
+        SELL_TO_CLOSE ALL AAL_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+        
+    IF AAL_LAST >= Underlying_Take_Profit_Long OR AAL_<NEAR_WEEKLY>_CALL_DELTA50_LAST >= AAL_CALL_TP1_Premium THEN
+        SELL_TO_CLOSE ALL AAL_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    # === 3. LONG PUT PLAYBOOK (Fade Resistance / VWAP Rejection) ===
+    SET AAL_PUT_Entry_Premium          = 0.80        
+    SET AAL_PUT_Stop_Premium           = AAL_PUT_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0)   # 0.80 * 0.85 = 0.68
+    SET AAL_PUT_TP1_Premium            = AAL_PUT_Entry_Premium * 1.50                                   # 1.20
+    
+    SET AAL_PUT_Risk_Per_Contract      = (AAL_PUT_Entry_Premium - AAL_PUT_Stop_Premium) * 100           # $12.00
+    SET AAL_PUT_Max_Contracts          = FLOOR(85.00 / AAL_PUT_Risk_Per_Contract)                       # 7 Contracts
+    SET N_AAL_PUT                      = AAL_PUT_Max_Contracts
+    
+    SET AAL_Short_R1_Entry             = 15.55      
+    SET AAL_Short_R2_Entry             = 15.70      
+    
+    # Put Entry Logic: VWAP Rejection / Resistance Crack
+    IF
+        AAL_LAST >= AAL_Short_R1_Entry
+        AND AAL_LAST <= AAL_Short_R2_Entry
+        AND AAL_LAST CROSSES BELOW VWAP
+        AND AAL_1MIN_VOL >= 1.5 * AAL_1MIN_VOL_10BAR_AVG
+    THEN
+        BUY_TO_OPEN N_AAL_PUT AAL_<NEAR_WEEKLY>_PUT_DELTA50 @ AAL_PUT_Entry_Premium LMT
+    
+    # Put Entry Logic: Resistance Rejection R2
+    IF
+        AAL_LAST >= AAL_Short_R2_Entry
+        AND AAL_LAST <= Aggressive_Upper_Bound
+        AND AAL_LAST CROSSES BELOW AAL_Short_R1_Entry FROM ABOVE
+        AND AAL_5MIN_VOL >= 1.5 * AAL_5MIN_VOL_20BAR_AVG
+    THEN
+        BUY_TO_OPEN N_AAL_PUT AAL_<NEAR_WEEKLY>_PUT_DELTA50 @ AAL_PUT_Entry_Premium LMT
+    
+    # Long Put Risk Management
+    IF AAL_<NEAR_WEEKLY>_PUT_DELTA50_LAST <= AAL_PUT_Stop_Premium THEN
+        SELL_TO_CLOSE ALL AAL_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+        
+    IF AAL_LAST >= Underlying_Stop_Level_Short THEN
+        SELL_TO_CLOSE ALL AAL_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+        
+    IF AAL_LAST <= Underlying_Take_Profit_Short OR AAL_<NEAR_WEEKLY>_PUT_DELTA50_LAST >= AAL_PUT_TP1_Premium THEN
+        SELL_TO_CLOSE ALL AAL_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    # === 4. $0.50 INSTITUTIONAL TRIGGER POINTS ===
+    SET AAL_Trigger_Long_1             = 15.00
+    SET AAL_Trigger_Long_2             = 15.50
+    SET AAL_Trigger_Short_1            = 15.50
+    SET AAL_Trigger_Short_2            = 16.00
+    
+    # Institutional Volume Router Loops
+    IF AAL_LAST CROSSES ABOVE AAL_Trigger_Long_1 AND AAL_1MIN_VOL >= 1.5 * AAL_1MIN_VOL_10BAR_AVG AND AAL_LAST >= Macro_Support_Low AND AAL_LAST <= VWAP THEN
+        FLAG_LONG_ENTRY_AAL(AAL_Trigger_Long_1)
+        
+    IF AAL_LAST CROSSES ABOVE AAL_Trigger_Long_2 AND AAL_1MIN_VOL >= 1.5 * AAL_1MIN_VOL_10BAR_AVG AND AAL_LAST <= Macro_Resistance_Low THEN
+        FLAG_LONG_ENTRY_AAL(AAL_Trigger_Long_2)
+        
+    IF AAL_LAST CROSSES BELOW AAL_Trigger_Short_1 AND AAL_1MIN_VOL >= 1.5 * AAL_1MIN_VOL_10BAR_AVG AND AAL_LAST >= VWAP THEN
+        FLAG_SHORT_ENTRY_AAL(AAL_Trigger_Short_1)
+        
+    IF AAL_LAST CROSSES BELOW AAL_Trigger_Short_2 AND AAL_1MIN_VOL >= 1.5 * AAL_1MIN_VOL_10BAR_AVG AND AAL_LAST >= Macro_Resistance_Low THEN
+        FLAG_SHORT_ENTRY_AAL(AAL_Trigger_Short_2)
+END

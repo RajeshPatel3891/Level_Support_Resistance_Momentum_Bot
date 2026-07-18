@@ -1,0 +1,141 @@
+# =========================================================================================================
+# 🛰️ HARM.AI // TRADEGPT OPERATIONAL PLAYBOOK: TSLA
+# Regime: Velocity ENGAGED / Freefall Detected | Risk Budget: $85 Target
+# =========================================================================================================
+
+IF [Symbol] IS "TSLA" AND [HARM.AI Guardrail State] IS "Velocity ENGAGED/Freefall" THEN
+    # === 1. CORE GUARDRAIL PARAMETERS ===
+    SET Current_Spot                   = 395.48
+    SET Daily_ATR                      = 12.40                      # High-vol regime variance
+    SET VWAP                           = 397.30
+
+    SET Underlying_Stop_Distance       = 2.50 * Daily_ATR           # Expanded volatility buffer = 31.00
+    SET Underlying_Raw_TP_Dist         = 3.50 * Daily_ATR           # 43.40
+    
+    # Velocity Directive: Cap take-profit strictly below active VWAP resistance flip
+    SET Underlying_Stop_Level_Long     = Current_Spot - Underlying_Stop_Distance    # 395.48 - 31.00 = 364.48
+    SET Underlying_Take_Profit_Long    = MIN((Current_Spot + Underlying_Raw_TP_Dist), (VWAP - 0.20)) # Cap below VWAP = 397.10
+    
+    SET Underlying_Stop_Level_Short    = Current_Spot + Underlying_Stop_Distance    # 395.48 + 31.00 = 426.48
+    SET Underlying_Take_Profit_Short   = Current_Spot - Underlying_Raw_TP_Dist      # 395.48 - 43.40 = 352.08
+
+    # Options Volatility Scaling Rules
+    SET Target_Option_Delta            = 0.35                       # Lower delta to defend against premium chop
+    SET Position_Sizing_Rule           = "Scale contract allocation down by 30% or enforce maximum premium exposure = $85"
+    SET Option_Stop_Loss_Percent       = 20                         # Wider 20% option stop threshold for waterfall assets
+    SET Support_Resistance_Symmetry    = "Aggressive bounds capped at 1.5 * ATR of Spot"
+
+    # 1.5 * ATR Volatility Bands
+    SET Aggressive_Band_Width          = 1.5 * Daily_ATR            # 18.60
+    SET Aggressive_Lower_Bound         = Current_Spot - Aggressive_Band_Width  # 395.48 - 18.60 = 376.88
+    SET Aggressive_Upper_Bound         = Current_Spot + Aggressive_Band_Width  # 395.48 + 18.60 = 414.08
+
+    # TradeAlgo Macro Zones
+    SET Macro_Support_Low              = 384.10
+    SET Macro_Support_High             = 385.90
+    SET Macro_Resistance_Low           = 400.10
+    SET Macro_Resistance_High          = 401.90
+
+    # === 2. OPTION RISK BOX (Sized to ~$85 max risk with 20% stop) ===
+    # Call Side (Bullish)
+    SET TSLA_CALL_Entry_Premium        = 3.50
+    SET TSLA_CALL_Stop_Premium         = TSLA_CALL_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0) # 3.50 * 0.80 = 2.80
+    SET TSLA_CALL_TP1_Premium          = TSLA_CALL_Entry_Premium * 1.60                                 # 5.60
+
+    SET TSLA_CALL_Risk_Per_Contract    = (TSLA_CALL_Entry_Premium - TSLA_CALL_Stop_Premium) * 100       # (3.50-2.80)*100 = 70
+    SET TSLA_CALL_Max_Contracts        = FLOOR(85.00 / TSLA_CALL_Risk_Per_Contract)                     # 1 Contract Max
+    SET N_TSLA_CALL                    = TSLA_CALL_Max_Contracts                                        # 1 contract -> $70 risk
+
+    # Put Side (Bearish - Accommodates Waterfall Momentum)
+    SET TSLA_PUT_Entry_Premium         = 4.10
+    SET TSLA_PUT_Stop_Premium          = TSLA_PUT_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0)  # 4.10 * 0.80 = 3.28
+    SET TSLA_PUT_TP1_Premium           = TSLA_PUT_Entry_Premium * 1.60                                  # 6.56
+
+    SET TSLA_PUT_Risk_Per_Contract     = (TSLA_PUT_Entry_Premium - TSLA_PUT_Stop_Premium) * 100         # (4.10-3.28)*100 = 82
+    SET TSLA_PUT_Max_Contracts         = FLOOR(85.00 / TSLA_PUT_Risk_Per_Contract)                      # 1 Contract Max
+    SET N_TSLA_PUT                     = TSLA_PUT_Max_Contracts                                         # 1 contract -> $82 risk
+
+    # === 3. LONG CALL PLAYBOOK (Anti-Trend Pullback / Support Catch) ===
+    SET TSLA_Long_S1_Entry             = 385.50      
+    SET TSLA_Long_S2_Entry             = 384.50      
+    SET TSLA_Long_VWAP_Reclaim_Min     = 397.50                     # Confirmed trade zone break over VWAP
+    
+    # Call Entry Logic: Structural VWAP Reclaim
+    IF
+        TSLA_LAST >= TSLA_Long_VWAP_Reclaim_Min
+        AND TSLA_LAST <= Aggressive_Upper_Bound
+        AND TSLA_LAST CROSSES ABOVE VWAP
+        AND TSLA_1MIN_VOL >= 2.0 * TSLA_1MIN_VOL_10BAR_AVG          # Elevated volume filter for high-velocity assets
+    THEN
+        BUY_TO_OPEN N_TSLA_CALL TSLA_<NEAR_WEEKLY>_CALL_DELTA35 @ TSLA_CALL_Entry_Premium LMT
+
+    # Call Entry Logic: Support Block Bounce
+    IF
+        TSLA_LAST <= TSLA_Long_S1_Entry
+        AND TSLA_LAST >= Aggressive_Lower_Bound
+        AND TSLA_LAST CROSSES ABOVE TSLA_Long_S1_Entry FROM BELOW
+        AND TSLA_5MIN_VOL >= 1.75 * TSLA_5MIN_VOL_20BAR_AVG
+    THEN
+        BUY_TO_OPEN N_TSLA_CALL TSLA_<NEAR_WEEKLY>_CALL_DELTA35 @ TSLA_CALL_Entry_Premium LMT
+
+    # Long Call Risk Management
+    IF TSLA_<NEAR_WEEKLY>_CALL_DELTA35_LAST <= TSLA_CALL_Stop_Premium THEN
+        SELL_TO_CLOSE ALL TSLA_<NEAR_WEEKLY>_CALL_DELTA35 @ MKT
+
+    IF TSLA_LAST <= Underlying_Stop_Level_Long THEN
+        SELL_TO_CLOSE ALL TSLA_<NEAR_WEEKLY>_CALL_DELTA35 @ MKT
+
+    IF TSLA_LAST >= Underlying_Take_Profit_Long OR TSLA_<NEAR_WEEKLY>_CALL_DELTA35_LAST >= TSLA_CALL_TP1_Premium THEN
+        SELL_TO_CLOSE ALL TSLA_<NEAR_WEEKLY>_CALL_DELTA35 @ MKT
+
+    # === 4. LONG PUT PLAYBOOK (Waterfall Expansion / Fade Rejections) ===
+    SET TSLA_Short_R1_Entry            = 397.00                     # Sub-VWAP fade point
+    SET TSLA_Short_R2_Entry            = 400.10                     # Macro resistance lower threshold
+
+    # Put Entry Logic: VWAP Failure Loop
+    IF
+        TSLA_LAST >= TSLA_Short_R1_Entry
+        AND TSLA_LAST <= TSLA_Short_R2_Entry
+        AND TSLA_LAST CROSSES BELOW VWAP
+        AND TSLA_1MIN_VOL >= 1.5 * TSLA_1MIN_VOL_10BAR_AVG
+    THEN
+        BUY_TO_OPEN N_TSLA_PUT TSLA_<NEAR_WEEKLY>_PUT_DELTA35 @ TSLA_PUT_Entry_Premium LMT
+
+    # Put Entry Logic: Resistance Rejection
+    IF
+        TSLA_LAST >= TSLA_Short_R2_Entry
+        AND TSLA_LAST <= Aggressive_Upper_Bound
+        AND TSLA_LAST CROSSES BELOW TSLA_Short_R1_Entry FROM ABOVE
+        AND TSLA_5MIN_VOL >= 1.5 * TSLA_5MIN_VOL_20BAR_AVG
+    THEN
+        BUY_TO_OPEN N_TSLA_PUT TSLA_<NEAR_WEEKLY>_PUT_DELTA35 @ TSLA_PUT_Entry_Premium LMT
+
+    # Long Put Risk Management
+    IF TSLA_<NEAR_WEEKLY>_PUT_DELTA35_LAST <= TSLA_PUT_Stop_Premium THEN
+        SELL_TO_CLOSE ALL TSLA_<NEAR_WEEKLY>_PUT_DELTA35 @ MKT
+
+    IF TSLA_LAST >= Underlying_Stop_Level_Short THEN
+        SELL_TO_CLOSE ALL TSLA_<NEAR_WEEKLY>_PUT_DELTA35 @ MKT
+
+    IF TSLA_LAST <= Underlying_Take_Profit_Short OR TSLA_<NEAR_WEEKLY>_PUT_DELTA35_LAST >= TSLA_PUT_TP1_Premium THEN
+        SELL_TO_CLOSE ALL TSLA_<NEAR_WEEKLY>_PUT_DELTA35 @ MKT
+
+    # === 5. $0.50 INSTITUTIONAL TRIGGER POINTS ===
+    SET TSLA_Trigger_Long_1            = 385.00      
+    SET TSLA_Trigger_Long_2            = 390.00      
+    SET TSLA_Trigger_Short_1           = 396.50      
+    SET TSLA_Trigger_Short_2           = 400.00      
+
+    # Institutional Volume Router Loops
+    IF TSLA_LAST CROSSES ABOVE TSLA_Trigger_Long_1 AND TSLA_1MIN_VOL >= 1.75 * TSLA_1MIN_VOL_10BAR_AVG AND TSLA_LAST >= Macro_Support_Low THEN
+        FLAG_LONG_ENTRY_TSLA(TSLA_Trigger_Long_1)
+
+    IF TSLA_LAST CROSSES ABOVE TSLA_Trigger_Long_2 AND TSLA_1MIN_VOL >= 1.5 * TSLA_1MIN_VOL_10BAR_AVG THEN
+        FLAG_LONG_ENTRY_TSLA(TSLA_Trigger_Long_2)
+
+    IF TSLA_LAST CROSSES BELOW TSLA_Trigger_Short_1 AND TSLA_1MIN_VOL >= 1.5 * TSLA_1MIN_VOL_10BAR_AVG AND TSLA_LAST >= VWAP THEN
+        FLAG_SHORT_ENTRY_TSLA(TSLA_Trigger_Short_1)
+
+    IF TSLA_LAST CROSSES BELOW TSLA_Trigger_Short_2 AND TSLA_1MIN_VOL >= 1.75 * TSLA_1MIN_VOL_10BAR_AVG AND TSLA_LAST >= Macro_Resistance_Low THEN
+        FLAG_SHORT_ENTRY_TSLA(TSLA_Trigger_Short_2)
+END

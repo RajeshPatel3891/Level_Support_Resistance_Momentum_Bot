@@ -1,0 +1,110 @@
+# =========================================================================================================
+# 🛰️ HARM.AI // TRADEGPT OPERATIONAL PLAYBOOK: SOFI
+# Regime: Velocity CLEAN / Range Chop | Risk Budget: $85 Target
+# =========================================================================================================
+
+IF [Symbol] IS "SOFI" AND [HARM.AI Guardrail State] IS "Velocity CLEAN/Range Chop" THEN
+    # === 1. CORE GUARDRAIL PARAMETERS ===
+    SET Current_Spot                   = 16.90                      # Live localized asset spot
+    SET Daily_ATR                      = 0.85                       # High-liquidity retail float variance
+    SET VWAP                           = 17.15                      # Overhead intraday anchor
+
+    SET Underlying_Stop_Distance       = 1.75 * Daily_ATR           # Tight structural leash = 1.4875
+    SET Underlying_Take_Profit_Dist    = 3.00 * Daily_ATR           # 2.55
+
+    # Target Structural Price Levels
+    SET Underlying_Stop_Level_Long     = Current_Spot - Underlying_Stop_Distance    # 16.90 - 1.49 = 15.41
+    SET Underlying_Take_Profit_Long    = Current_Spot + Underlying_Take_Profit_Dist # 16.90 + 2.55 = 19.45
+
+    SET Underlying_Stop_Level_Short    = Current_Spot + Underlying_Stop_Distance    # 16.90 + 1.49 = 18.39
+    SET Underlying_Take_Profit_Short   = Current_Spot - Underlying_Take_Profit_Dist # 16.90 - 2.55 = 14.35
+
+    # Options Risk Architecture
+    SET Target_Option_Delta            = 0.50
+    SET Position_Sizing_Rule           = "Standard contract allocation up to maximum premium exposure = $85"
+    SET Option_Stop_Loss_Percent       = 15                         # Rigid range stop floor
+    SET Support_Resistance_Symmetry    = "Standard bounds capped at 1.5 * ATR of Spot"
+
+    # 1.5 * ATR Volatility Bands
+    SET Aggressive_Band_Width          = 1.5 * Daily_ATR            # 1.275
+    SET Aggressive_Lower_Bound         = Current_Spot - Aggressive_Band_Width       # 16.90 - 1.27 = 15.63
+    SET Aggressive_Upper_Bound         = Current_Spot + Aggressive_Band_Width       # 16.90 + 1.27 = 18.17
+
+    # TradeAlgo Macro Zones (Sourced from local JSON)
+    SET Macro_Support_Low              = 17.11                      
+    SET Macro_Support_High             = 17.19
+    SET Macro_Resistance_Low           = 18.51
+    SET Macro_Resistance_High          = 18.59
+
+    # === 2. OPTION RISK BOX (Sized to ~$85 max risk with 15% stop) ===
+    # Call Side (Bullish)
+    SET SOFI_CALL_Entry_Premium        = 0.55                       # Short-dated near-the-money premium
+    SET SOFI_CALL_Stop_Premium         = SOFI_CALL_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0)  # 0.55 * 0.85 = 0.46
+    SET SOFI_CALL_TP1_Premium          = SOFI_CALL_Entry_Premium * 1.50                                  # 0.825
+
+    SET SOFI_CALL_Risk_Per_Contract    = (SOFI_CALL_Entry_Premium - SOFI_CALL_Stop_Premium) * 100        # (0.55-0.46)*100 = $9.00
+    SET SOFI_CALL_Max_Contracts        = FLOOR(85.00 / SOFI_CALL_Risk_Per_Contract)                      # 9 Contracts Max
+    SET N_SOFI_CALL                    = SOFI_CALL_Max_Contracts                                         # 9 contracts -> $81 risk
+
+    # Put Side (Bearish)
+    SET SOFI_PUT_Entry_Premium         = 0.60
+    SET SOFI_PUT_Stop_Premium          = SOFI_PUT_Entry_Premium * (1 - Option_Stop_Loss_Percent/100.0)   # 0.60 * 0.85 = 0.51
+    SET SOFI_PUT_TP1_Premium           = SOFI_PUT_Entry_Premium * 1.50                                   # 0.90
+
+    SET SOFI_PUT_Risk_Per_Contract     = (SOFI_PUT_Entry_Premium - SOFI_PUT_Stop_Premium) * 100          # (0.60-0.51)*100 = $9.00
+    SET SOFI_PUT_Max_Contracts         = FLOOR(85.00 / SOFI_PUT_Risk_Per_Contract)                       # 9 Contracts Max
+    SET N_SOFI_PUT                     = SOFI_PUT_Max_Contracts                                          # 9 contracts -> $81 risk
+
+    # === 3. LONG CALL PLAYBOOK (VWAP Reclaims / Volume Flags) ===
+    SET SOFI_Long_S1_Entry             = 15.65                      # Lower aggressive band magnet
+    SET SOFI_Long_VWAP_Reclaim_Min     = 17.20                      # Reclaim signal trigger boundary
+    SET SOFI_Long_VWAP_Reclaim_Max     = 17.40
+
+    # Call Entry Logic: VWAP Cross
+    IF
+        SOFI_LAST >= SOFI_Long_VWAP_Reclaim_Min
+        AND SOFI_LAST <= SOFI_Long_VWAP_Reclaim_Max
+        AND SOFI_LAST CROSSES ABOVE VWAP
+        AND SOFI_1MIN_VOL >= 1.5 * SOFI_1MIN_VOL_10BAR_AVG
+    THEN
+        BUY_TO_OPEN N_SOFI_CALL SOFI_<NEAR_WEEKLY>_CALL_DELTA50 @ SOFI_CALL_Entry_Premium LMT
+
+    # Long Call Risk Management
+    IF SOFI_<NEAR_WEEKLY>_CALL_DELTA50_LAST <= SOFI_CALL_Stop_Premium THEN
+        SELL_TO_CLOSE ALL SOFI_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    IF SOFI_LAST <= Underlying_Stop_Level_Long THEN
+        SELL_TO_CLOSE ALL SOFI_<NEAR_WEEKLY>_CALL_DELTA50 @ MKT
+
+    # === 4. LONG PUT PLAYBOOK (Fade Rejections) ===
+    SET SOFI_Short_R1_Entry            = 17.15                      # VWAP test intersection
+    SET SOFI_Short_R2_Entry            = 18.15                      # Aggressive limit barrier
+
+    # Put Entry Logic: VWAP Break down confirmation
+    IF
+        SOFI_LAST <= SOFI_Short_R1_Entry
+        AND SOFI_LAST CROSSES BELOW VWAP
+        AND SOFI_1MIN_VOL >= 1.5 * SOFI_1MIN_VOL_10BAR_AVG
+    THEN
+        BUY_TO_OPEN N_SOFI_PUT SOFI_<NEAR_WEEKLY>_PUT_DELTA50 @ SOFI_PUT_Entry_Premium LMT
+
+    # Long Put Risk Management
+    IF SOFI_<NEAR_WEEKLY>_PUT_DELTA50_LAST <= SOFI_PUT_Stop_Premium THEN
+        SELL_TO_CLOSE ALL SOFI_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    IF SOFI_LAST >= Underlying_Stop_Level_Short THEN
+        SELL_TO_CLOSE ALL SOFI_<NEAR_WEEKLY>_PUT_DELTA50 @ MKT
+
+    # === 5. $0.50 INSTITUTIONAL TRIGGER POINTS ===
+    SET SOFI_Trigger_Long_1            = 16.00      
+    SET SOFI_Trigger_Long_2            = 16.50      
+    SET SOFI_Trigger_Short_1           = 17.00      
+    SET SOFI_Trigger_Short_2           = 17.50      
+
+    # Institutional Volume Router Loops
+    IF SOFI_LAST CROSSES ABOVE SOFI_Trigger_Long_2 AND SOFI_1MIN_VOL >= 1.5 * SOFI_1MIN_VOL_10BAR_AVG THEN
+        FLAG_LONG_ENTRY_SOFI(SOFI_Trigger_Long_2)
+
+    IF SOFI_LAST CROSSES BELOW SOFI_Trigger_Short_1 AND SOFI_1MIN_VOL >= 1.5 * SOFI_1MIN_VOL_10BAR_AVG THEN
+        FLAG_SHORT_ENTRY_SOFI(SOFI_Trigger_Short_1)
+END
