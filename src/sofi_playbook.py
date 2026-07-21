@@ -1,68 +1,66 @@
 # ==============================================================================
-# HARMONIZED AI: DAILY INTRADAY EXECUTION PLAYBOOK (SOFI POOL ACCELERATION)
-# Target Session: Monday, July 20, 2026
-# Active Pool: $17.11 - $17.19 | Spot: $17.28 (+0.75% to Pool)
-# Risk Box: $75.00 - $100.00 Max Premium Risk
+# HARMONIZED AI: DAILY INTRADAY EXECUTION PLAYBOOK (SOFI ACCELERATION MATRIX)
+# Target Session: Tuesday, July 21, 2026
+# Pre-Market Spot: $17.01 | VWAP Anchor: $17.15
+# Support Pool: $16.80 - $17.10 | Resistance Pool: $17.80 - $18.10
+# Risk Box: $75.00 - $100.00 Max Premium Risk ($85.00 Target)
 # ==============================================================================
 
 # --- System & Parameter Initialization (4-DTE Proxy OTM Chain) ---
 TICKER_CALL = "SOFI260724C00018000"  # July 24, 2026 $18.00 Call
 TICKER_PUT  = "SOFI260724P00016500"  # July 24, 2026 $16.50 Put
 
-# 1. BULLISH SCALP: CALL SETUP ON COMPRESSION RECLAIM
-# ------------------------------------------------------------------------------
-def evaluate_call_entry(candles_1m, current_price, current_vwap):
-    """
-    IF: SOFI ticks down into the $17.11 - $17.19 pool structure, finds base stability,
-    and springs back up over active short-term VWAP.
-    """
-    if not candles_1m or len(candles_1m) < 3:
-        candles_1m = [
-            {"low": 17.20, "close": 17.25, "high": 17.30},
-            {"low": 17.15, "close": 17.18, "high": 17.22},
-            {"low": 17.12, "close": current_price, "high": 17.24}
-        ]
-        
-    pool_floor = 17.11
-    pool_ceiling = 17.19
-    
+PLAYBOOK_CONFIG = {
+    "ticker": "SOFI",
+    "date": "2026-07-21",
+    "spot_anchor": 17.01,
+    "vwap_anchor": 17.15,
+    "support_zone": [16.80, 17.10],
+    "resistance_zone": [17.80, 18.10],
+    "risk_per_trade": 85.00,
+    "guardrails": {
+        "velocity_filter_active": False,
+        "momentum_filter_active": True,
+        "allow_execution": False
+    }
+}
+
+def evaluate_call_entry(candles_1m, current_price, current_vwap, velocity_flag=False):
+    if velocity_flag:
+        return False, 0
+    if not candles_1m:
+        candles_1m = [{"low": 16.90, "close": current_price, "high": current_price + 0.10}]
+
+    pool_floor, pool_ceiling = PLAYBOOK_CONFIG["support_zone"]
     trigger_zone = (pool_floor <= current_price <= pool_ceiling)
-    current_candle = candles_1m[-1]
-    
-    vwap_reclaim = (current_candle['close'] >= current_vwap)
+    vwap_reclaim = (candles_1m[-1]['close'] >= current_vwap)
 
     if trigger_zone and vwap_reclaim:
-        # Sizing: Target premium ~$0.32 * 20% risk = $0.064/contract risk.
-        # 14 contracts * $6.40 = $89.60 total risk footprint.
-        return True, 14
-        
+        return True, 10  # 10 contracts to hit $85 risk footprint
+
     return False, 0
 
-# 2. BEARISH SCALP: PUT SETUP
-# ------------------------------------------------------------------------------
-def evaluate_put_entry(candles_1m, current_price, current_vwap):
-    pool_ceiling = 17.19
-    current_candle = candles_1m[-1]
-    
-    rejection_zone = (current_price >= pool_ceiling)
-    below_vwap = (current_candle['close'] < current_vwap)
+def evaluate_put_entry(candles_1m, current_price, current_vwap, velocity_flag=False):
+    if not candles_1m:
+        candles_1m = [{"low": 17.70, "close": current_price, "high": 18.15}]
+
+    res_floor, res_ceiling = PLAYBOOK_CONFIG["resistance_zone"]
+    rejection_zone = (res_floor <= current_price <= res_ceiling)
+    below_vwap = (candles_1m[-1]['close'] < current_vwap)
 
     if rejection_zone and below_vwap:
-        # Sizing: Target premium ~$0.28 * 20% risk = $0.056/contract risk.
-        # 16 contracts * $5.60 = $89.60 total risk footprint.
-        return True, 16
-        
+        return True, 10
+
     return False, 0
 
-# 3. LIVE ORDER LIFECYCLE & RISK MANAGEMENT
-# ------------------------------------------------------------------------------
 def calculate_risk_parameters(entry_fill, option_type):
-    stop_loss = round(entry_fill * 0.80, 2)
-    tp1_target = round(entry_fill * 1.50, 2)
-    underlying_invalidation = 16.95 if option_type == "CALL" else 17.40
-    
     return {
-        "stop_loss": stop_loss,
-        "tp1": tp1_target,
-        "underlying_invalidation": underlying_invalidation
+        "stop_loss": round(entry_fill * 0.80, 2),
+        "tp1": round(entry_fill * 1.40, 2),
+        "underlying_invalidation": 16.50 if option_type == "CALL" else 18.50
     }
+
+if __name__ == "__main__":
+    call_exec, call_qty = evaluate_call_entry([], 17.01, 17.15, velocity_flag=False)
+    put_exec, put_qty = evaluate_put_entry([], 17.01, 17.15, velocity_flag=False)
+    print(f"[SOFI Playbook Self-Test] Spot: $17.01 | Call: {call_exec} ({call_qty} contracts) | Put: {put_exec} ({put_qty} contracts)")
