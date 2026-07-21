@@ -1,0 +1,32 @@
+{% for c_trade in closed_trades %}
+<div class="bg-gray-950/40 border border-gray-800 rounded-xl p-4 flex justify-between items-center opacity-85"
+     {% if loop.last and closed_trades|length == 15 %}
+     hx-get="/api/v1/matrix?page={{ next_page }}"
+     hx-trigger="revealed"
+     hx-swap="afterend"
+     {% endif %}>
+    <div>
+        <div class="flex items-center space-x-2">
+            <span class="font-bold text-sm text-gray-300 tracking-wide">{{ c_trade.ticker }}</span>
+            <span class="text-[9px] bg-gray-900 text-gray-400 border border-gray-800 px-1.5 py-0.2 rounded uppercase font-medium">{{ c_trade.status }}</span>
+        </div>
+        <div class="text-[11px] text-gray-500 mt-1">
+            Reason: 
+            <span class="text-gray-300 font-mono font-semibold">
+                {% if 'TRAILING' in c_trade.status|upper %}Trailing Stop Triggered
+                {% elif 'PROFIT' in c_trade.status|upper %}Target Profit Achieved
+                {% elif 'STOP' in c_trade.status|upper %}Hard Stop Loss Hit
+                {% else %}Manual Execution Exit{% endif %}
+            </span>
+        </div>
+        <div class="text-[11px] text-gray-500 mt-0.5">
+            <span>Exit: <b class="text-gray-400">{{ c_trade.exit_price }}</b></span>
+            <span>Cost: {{ c_trade.basis }}</span>
+        </div>
+    </div>
+    <div class="text-right">
+        <span class="text-xs font-bold block {{ c_trade.pnl_class }}">{{ c_trade.dollar_pnl }}</span>
+        <span class="text-[10px] text-gray-600 block mt-0.5">{{ c_trade.timestamp.split(' ')[1] if ' ' in c_trade.timestamp else c_trade.timestamp }}</span>
+    </div>
+</div>
+{% endfor %}

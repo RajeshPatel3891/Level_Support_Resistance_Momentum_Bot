@@ -1,79 +1,106 @@
 import os
-import sys
 import json
 import sqlite3
-import time
+from datetime import datetime
 
-# Resolve dynamic paths matching the LiveBot directory structure
 current_dir = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(os.path.dirname(current_dir), 'harm_telemetry.db')
 JSON_OUTPUT_PATH = os.path.join(os.path.dirname(current_dir), 'dashboard_data.json')
 
 def fetch_and_compile_telemetry():
-    """Reads transactions from harm_telemetry.db and formats them for the HTML dashboard"""
     if not os.path.exists(DB_PATH):
-        # Create empty fallback JSON if DB does not exist yet to prevent dashboard fetch crashes
-        print(f"[*] database not found at {DB_PATH} yet. Initializing fallback structure.")
-        fallback = {"history": []}
-        with open(JSON_OUTPUT_PATH, 'w') as f:
-            json.dump(fallback, f, indent=4)
+        print(f"[*] Database not found at {DB_PATH}")
         return
 
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
 
-        # Query all records from your trade history table
-        # We wrap in a try/except to auto-detect if your table has a custom schema
+        # 1. Grab everything from your real trades table
         cursor.execute("""
-            SELECT timestamp, ticker, strategy, direction, proximity, status, pnl 
-            FROM trade_history 
-            ORDER BY timestamp DESC
+            SELECT timestamp, ticker, direction, spot_price, exit_status 
+            FROM trades 
+            ORDER BY timestamp ASC
         """)
-        
         rows = cursor.fetchall()
-        history = []
+        conn.close()
+
+        active_positions = []
+        closed_trades_by_day = {}
+        total_closed_pnl = 0.0
+
+        # Process each trade row chronologically
         for r in rows:
-            history.append({
-                "timestamp": r[0],
-                "ticker": r[1],
-                "strategy": r[2],
-                "direction": r[3],
-                "proximity": float(r[4]) if r[4] is not None else 0.0,
-                "status": r[5],
-                "pnl": float(r[6]) if r[6] is not None else 0.0
+            timestamp_str, ticker, direction, spot_price, exit_status = r
+            spot_price = float(spot_price) if spot_price is not None else 0.0
+            
+            # Extract the trading day (YYYY-MM-DD)
+            try:
+                date_key = timestamp_str.split(" ")[0]
+            except Exception:
+                date_key = datetime.now().strftime("%Y-%m-%d")
+
+            trade_obj = {
+                "timestamp": timestamp_str,
+                "ticker": ticker,
+                "direction": direction,
+                "spot_price": spot_price,
+                "exit_status": exit_status
+            }
+
+            if exit_status == "ACTIVE":
+                active_positions.append(trade_obj)
+            else:
+                # If it's a closed trade (e.g., STOP_LOSS, TAKE_PROFIT, TRAILING_STOP)
+                if date_key not in closed_trades_by_day:
+                    closed_trades_by_day[date_key] = {
+                        "trades": [],
+                        "daily_pnl": 0.0
+                    }
+                
+                closed_trades_by_day[date_key]["trades"].append(trade_obj)
+                
+                # Mock or read exact close delta logic if your table doesn't log raw exit credit yet
+                # For safety, let's log the transaction for your UI to parse out 
+                # (You can expand this if you log a explicit 'realized_pnl' column later!)
+
+        # Sort daily stats by date descending for UI display readability
+        sorted_daily_stats = []
+        cumulative_pnl_tracker = 0.0
+        
+        for date in sorted(closed_trades_by_day.keys()):
+            day_data = closed_trades_by_day[date]
+            # Accumulate historical trend lines
+            cumulative_pnl_tracker += day_data["daily_pnl"] 
+            sorted_daily_stats.append({
+                "date": date,
+                "closed_count": len(day_data["trades"]),
+                "trades": day_data["trades"],
+                "cumulative_pnl_to_date": round(cumulative_pnl_tracker, 2)
             })
+        
+        sorted_daily_stats.reverse() # Newest days first
 
-        payload = {"history": history}
+        payload = {
+            "summary": {
+                "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "total_active_count": len(active_positions),
+                "total_closed_days": len(sorted_daily_stats)
+            },
+            "active_positions": active_positions,
+            "daily_closed_history": sorted_daily_stats
+        }
 
-        # Atomic swap to avoid write corruption during concurrent dashboard page loads
+        # Safe atomic swap write
         temp_path = f"{JSON_OUTPUT_PATH}.tmp"
         with open(temp_path, 'w') as f:
             json.dump(payload, f, indent=4)
         os.replace(temp_path, JSON_OUTPUT_PATH)
-        print(f"[✓] Compiled {len(history)} trades into dashboard_data.json successfully.")
+        
+        print(f"[✓] Compiled dashboard: {len(active_positions)} active flights | {len(rows) - len(active_positions)} closed records parsed.")
 
-        conn.close()
     except sqlite3.OperationalError as e:
-        # If the table or schema hasn't been generated by your executions yet, we supply sample data
-        print(f"[!] SQLite Schema check: {e}. Generating target structure.")
-        seed_sample_records()
-    except Exception as e:
-        print(f"[ERROR] Telemetry compile failed: {e}", file=sys.stderr)
+        print(f"[🚨] DB Operational Error: {e}")
 
-def seed_sample_records():
-    """Generates valid mathematical sample records so the dashboard renders on cold boots"""
-    sample_data = {
-        "history": [
-            {"timestamp": "2026-07-15 09:42:15", "ticker": "AAPL", "strategy": "LIVEBOT_HIGH", "direction": "CALL", "proximity": 84.5, "status": "TAKE_PROFIT", "pnl": 120.00},
-            {"timestamp": "2026-07-15 10:15:22", "ticker": "TSLA", "strategy": "REBOUND", "direction": "PUT", "proximity": 55.0, "status": "STOP_LOSS", "pnl": -85.00},
-            {"timestamp": "2026-07-15 11:30:00", "ticker": "NVDA", "strategy": "BREAKOUT", "direction": "CALL", "proximity": 92.1, "status": "TAKE_PROFIT", "pnl": 150.00},
-            {"timestamp": "2026-07-15 13:05:40", "ticker": "AAPL", "strategy": "SIDEKICK_MICRO_SCALP", "direction": "CALL", "proximity": 34.0, "status": "FORCE_CLOSE", "pnl": 15.00}
-        ]
-    }
-    with open(JSON_OUTPUT_PATH, 'w') as f:
-        json.dump(sample_data, f, indent=4)
-    print("[+] Cold start complete. Dummy database payload seeded safely.")
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     fetch_and_compile_telemetry()

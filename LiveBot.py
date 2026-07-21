@@ -134,6 +134,7 @@ def log_trade_to_database(ticker, spot_price):
     except Exception as e:
         print(f"[-] DB Log Error: {e}", file=sys.stderr)
 
+
 # --- NON-BLOCKING TELEMETRY QUEUE ENGINE ---
 tick_queue = queue.Queue()
 
@@ -188,9 +189,8 @@ def execute_order(symbol, ticker, quantity, side, limit_price=None):
     return False
 
 def on_message(ws, message):
-    # Absolute First Line Guard: Silently discard all ticks & prints outside US Market Hours
     if not is_market_hours():
-        return
+        return  # Ignore after-hours synthetic ticks for live order execution
 
     try:
         events = json.loads(message)

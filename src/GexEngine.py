@@ -1,59 +1,58 @@
-# -*- coding: utf-8 -*-
-import requests
-import os
-import time
-from dotenv import load_dotenv
+import math
 
-load_dotenv()
+def calculate_black_scholes_gamma(s, k, t, r, iv, is_call=True):
+    """
+    Calculates the exact contract Gamma locally.
+    s: underlying price, k: strike price, t: days to expiry / 365,
+    r: risk-free rate (e.g. 0.04), iv: implied volatility (e.g. 0.35)
+    """
+    if t <= 0 or iv <= 0:
+        return 0.0
+        
+    d1 = (math.log(s / k) + (r + (iv ** 2) / 2) * t) / (iv * math.sqrt(t))
+    # Standard normal probability density function for d1
+    pdf_d1 = math.exp(-(d1 ** 2) / 2) / math.sqrt(2 * math.pi)
+    
+    gamma = pdf_d1 / (s * iv * math.sqrt(t))
+    return gamma
 
-class GexEngine:
-    def __init__(self, symbol="AAPL"):
-        # Uses environment variable if present, otherwise falls back to the key provided
-        self.api_key = os.getenv("FLASHALPHA_API_KEY", "xIf7d2EdumUoanjj1sBChqhM0zVa1xQJPiKoJbD3")
-        self.base_url = "https://lab.flashalpha.com/v1"
-        self.headers = {"X-Api-Key": self.api_key}
-        self.symbol = symbol
-
-    def get_exposure(self):
-        """Fetches Gamma Flip, Call Wall, and Put Wall for the configured symbol."""
+def compute_net_gex_profile(underlying_price, chain_data, risk_free_rate=0.04):
+    """
+    Aggregates the raw option legs into a single exposure number.
+    chain_data: List of option contracts directly from the Tradier JSON payload.
+    """
+    total_gex = 0.0
+    gamma_flip_candidate = underlying_price
+    
+    # Process each contract strike leg systematically
+    for contract in chain_data:
+        strike = float(contract.get('strike', 0))
+        open_interest = int(contract.get('open_interest', 0))
+        iv = float(contract.get('greeks', {}).get('ask_iv', 0) or contract.get('greeks', {}).get('mid_iv', 0.20))
+        option_type = contract.get('option_type', '').lower()
+        
+        # Calculate days remaining to expiration format
+        expiry_str = contract.get('expiration_date')
+        if not expiry_str:
+            continue
         try:
-            url = f"{self.base_url}/exposure/levels/{self.symbol}"
-            response = requests.get(url, headers=self.headers)
+            days_to_expiry = (datetime.strptime(expiry_str, "%Y-%m-%d") - datetime.now()).days
+            t = max(days_to_expiry, 0.5) / 365.0
+        except:
+            t = 1.0 / 365.0 # Fallback default to 1 day out
             
-            # Check for Rate Limiting specifically
-            if response.status_code == 429:
-                print(f"[!] Rate limited. Sleeping for 5 minutes...")
-                time.sleep(300)
-                return None
-                
-            return response.json() if response.status_code == 200 else None
-        except Exception as e:
-            print(f"Error fetching GEX: {e}")
-            return None
+        gamma = calculate_black_scholes_gamma(underlying_price, strike, t, risk_free_rate, iv)
+        
+        # Standard Dealer Hedging Multiplier Assumption:
+        # Long Calls create supportive positive gamma; Long Puts create negative gamma acceleration
+        contract_gex = open_interest * gamma * 100 * underlying_price
+        
+        if option_type == 'call':
+            total_gex += contract_gex
+        elif option_type == 'put':
+            total_gex -= contract_gex
 
-    def run(self):
-        print(f"[*] GexEngine initializing for {self.symbol}...")
-        while True:
-            data = self.get_exposure()
-            if data and 'levels' in data:
-                # API structure: data['levels'] contains the metrics
-                levels = data['levels']
-                price = data.get('underlying_price', 'N/A')
-                flip = levels.get('gamma_flip', 0)
-                call_wall = levels.get('call_wall', 'N/A')
-                put_wall = levels.get('put_wall', 'N/A')
-                
-                # Format flip safely
-                flip_display = f"{flip:.2f}" if isinstance(flip, (int, float)) else flip
-                
-                print(f"[✓] {self.symbol} | Price: {price} | Flip: {flip_display} | Call Wall: {call_wall} | Put Wall: {put_wall}")
-                
-                # Polling interval increased to 5 minutes to stay within Free tier limits
-                time.sleep(300)
-            else:
-                print("[!] Data unavailable or rate limited. Retrying in 60s...")
-                time.sleep(60)
-
-if __name__ == "__main__":
-    engine = GexEngine(symbol="AAPL")
-    engine.run()
+    return {
+        "net_gex": total_gex,
+        "gex_label": "POSITIVE" if total_gex >= 0 else "NEGATIVE"
+    }

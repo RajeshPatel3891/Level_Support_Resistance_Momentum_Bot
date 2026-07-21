@@ -40,3 +40,5 @@ nohup.out
 
 # Accidentally created junk files
 =
+*.db
+src/*.db
