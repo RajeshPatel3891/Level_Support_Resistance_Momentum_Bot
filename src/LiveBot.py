@@ -9,6 +9,8 @@ import time
 import sqlite3
 import signal
 import pytz
+import numpy as np
+import pandas as pd
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -56,6 +58,120 @@ MASTER_DATA = json.load(open(MANIFEST_PATH, 'r'))
 ACTIVE_TRADES = {}
 TELEMETRY = {}
 PLAYBOOKS = {"AAPL": aapl, "TSLA": tsla, "NVDA": nvda, "RIVN": rivn, "PLTR": pltr}
+
+def calculate_playbook_params(ticker: str, current_price: float, gex_support: float, gex_regime: str, ohlc_df: pd.DataFrame):
+    """
+    Playbook Execution Matrix:
+    - Calculates 14-period ATR for volatility-based breathing room.
+    - Adjusts buffer based on GEX Regime (+GEX vs -GEX).
+    - Caps total account risk at $30.00 per trade.
+    """
+    # 1. Calculate 14-period ATR from OHLC data
+    high_low = ohlc_df['high'] - ohlc_df['low']
+    high_close = np.abs(ohlc_df['high'] - ohlc_df['close'].shift())
+    low_close = np.abs(ohlc_df['low'] - ohlc_df['close'].shift())
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = np.max(ranges, axis=1)
+    atr = true_range.rolling(14).mean().iloc[-1]
+    
+    # Fallback to 1% of price if ATR data is sparse
+    if np.isnan(atr) or atr <= 0:
+        atr = current_price * 0.01
+
+    # 2. Select ATR Buffer Multiplier based on GEX Regime
+    if gex_regime == "POSITIVE_GEX":
+        # Spongy mean-reverting environment: Give extra rebound room
+        atr_multiplier = 0.75
+    else:
+        # Negative GEX / Acceleration environment: Tight stop
+        atr_multiplier = 0.25
+
+    # 3. Calculate technical stop-loss price
+    rebound_buffer = atr * atr_multiplier
+    stop_loss_price = round(gex_support - rebound_buffer, 2)
+    
+    # Risk distance (difference between entry and stop loss)
+    risk_distance = max(abs(current_price - stop_loss_price), 0.10)
+
+    # 4. Target Risk Budget = $30.00 (1.5% of $2,000 account)
+    TARGET_RISK_BUDGET = 30.00
+    
+    # Calculate exact shares to buy
+    calculated_shares = round(TARGET_RISK_BUDGET / risk_distance, 2)
+    
+    # Cap shares at max available account cash
+    max_affordable_shares = int(2000.00 / current_price)
+    shares_to_buy = min(calculated_shares, max_affordable_shares)
+
+    return {
+        "entry_price": current_price,
+        "stop_loss": stop_loss_price,
+        "atr": round(atr, 2),
+        "rebound_buffer": round(rebound_buffer, 2),
+        "shares": shares_to_buy,
+        "max_risk_dollars": round(shares_to_buy * risk_distance, 2)
+    }
+
+def init_account_ledger(db_path="harm_telemetry.db", starting_capital=2000.00):
+    """Ensures account_ledger table exists and seeds today's starting settled capital."""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS account_ledger (
+                date TEXT PRIMARY KEY,
+                starting_settled_cash REAL,
+                available_settled_cash REAL,
+                unsettled_cash REAL
+            )
+        ''')
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        cursor.execute("SELECT available_settled_cash FROM account_ledger WHERE date = ?", (today_str,))
+        row = cursor.fetchone()
+        if not row:
+            cursor.execute('''
+                INSERT INTO account_ledger (date, starting_settled_cash, available_settled_cash, unsettled_cash)
+                VALUES (?, ?, ?, 0.0)
+            ''', (today_str, starting_capital, starting_capital))
+            conn.commit()
+            print(f"[✓] Initialized account ledger for {today_str} with ${starting_capital:,.2f} settled cash.")
+        conn.close()
+    except Exception as e:
+        print(f"[-] Account Ledger Init Error: {e}", file=sys.stderr)
+
+init_account_ledger()
+
+def get_available_settled_cash(db_path="harm_telemetry.db"):
+    """Queries available settled cash for today's session."""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        cursor.execute("SELECT available_settled_cash FROM account_ledger WHERE date = ?", (today_str,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            return float(row[0])
+    except Exception as e:
+        print(f"[-] Ledger Query Error: {e}", file=sys.stderr)
+    return 0.0
+
+def update_settled_cash_balance(deduct_amount, db_path="harm_telemetry.db"):
+    """Deducts used trade capital from available settled cash."""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        cursor.execute('''
+            UPDATE account_ledger 
+            SET available_settled_cash = available_settled_cash - ? 
+            WHERE date = ?
+        ''', (deduct_amount, today_str))
+        conn.commit()
+        conn.close()
+        print(f"[✓] Ledger Updated: Deducted ${deduct_amount:,.2f} settled cash.")
+    except Exception as e:
+        print(f"[-] Ledger Balance Update Error: {e}", file=sys.stderr)
 
 def is_market_hours():
     """Checks if current time is within standard US equity market hours (09:30 - 16:00 EST, Mon-Fri)."""
@@ -117,20 +233,20 @@ def get_order_status(order_id):
     response = requests.get(url, headers=headers)
     return response.json().get("order", {}).get("status") if response.status_code == 200 else "UNKNOWN"
 
-def log_trade_to_database(ticker, spot_price):
+def log_trade_to_database(ticker, spot_price, stop_loss=None, shares=1.0):
     try:
         conn = sqlite3.connect("harm_telemetry.db")
         cursor = conn.cursor()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        stop_loss = round(spot_price - 1.52, 2)
+        sl_val = stop_loss if stop_loss is not None else round(spot_price - 1.52, 2)
         take_profit = round(spot_price + 3.98, 2)
         cursor.execute("""
-            INSERT INTO trades (ticker, timestamp, strategy, direction, spot_level, spot_price, stop_loss, take_profit, net_pnl, exit_status, is_live) 
-            VALUES (?, ?, 'BREAKOUT', 'CALL', ?, ?, ?, ?, 0.0, 'ACTIVE', 1)
-        """, (ticker, timestamp, spot_price, spot_price, stop_loss, take_profit))
+            INSERT INTO trades (ticker, timestamp, strategy, direction, spot_level, spot_price, entry_price, shares, stop_loss, take_profit, net_pnl, exit_status, is_live) 
+            VALUES (?, ?, 'BREAKOUT', 'CALL', ?, ?, ?, ?, ?, ?, 0.0, 'ACTIVE', 1)
+        """, (ticker, timestamp, spot_price, spot_price, spot_price, shares, sl_val, take_profit))
         conn.commit()
         conn.close()
-        print(f"[✓] Logged verified trade for {ticker} to SQLite.")
+        print(f"[✓] Logged verified trade for {ticker} (Shares: {shares}, SL: ${sl_val:.2f}) to SQLite.")
     except Exception as e:
         print(f"[-] DB Log Error: {e}", file=sys.stderr)
 
@@ -166,7 +282,16 @@ def db_batch_worker():
 # Boot the worker immediately as a background daemon thread
 threading.Thread(target=db_batch_worker, daemon=True).start()
 
-def execute_order(symbol, ticker, quantity, side, limit_price=None):
+def execute_order(symbol, ticker, quantity, side, limit_price=None, stop_loss=None):
+    price_val = float(limit_price) if limit_price else 1.00
+    required_capital = float(quantity) * price_val
+    available_settled_cash = get_available_settled_cash()
+
+    # Calculate trade capital required (e.g., share_count * spot_price)
+    if available_settled_cash < required_capital:
+        print(f"[!] REJECTED: Insufficient Settled Cash (${available_settled_cash:.2f} available, ${required_capital:.2f} needed)")
+        return False
+
     token = os.getenv("TRADIER_TOKEN") or os.getenv("TRADIER_SANDBOX_TOKEN")
     account_id = os.getenv("TRADIER_ACCOUNT_ID")
     payload = {"class": "option", "symbol": symbol, "option_symbol": ticker, "side": side.lower(), "quantity": str(int(quantity)), "type": "limit", "price": str(limit_price) if limit_price else "0.01", "duration": "day"}
@@ -178,9 +303,10 @@ def execute_order(symbol, ticker, quantity, side, limit_price=None):
         time.sleep(2)
         if get_order_status(order_id) == "filled":
             if "buy" in side.lower():
-                log_trade_to_database(symbol, float(limit_price) if limit_price else 1.00)
+                update_settled_cash_balance(required_capital)
+                log_trade_to_database(symbol, price_val, stop_loss=stop_loss, shares=float(quantity))
                 try:
-                    dispatch_discord_alert(symbol, float(limit_price) if limit_price else 1.00, 'ENTRY')
+                    dispatch_discord_alert(symbol, price_val, 'ENTRY')
                 except:
                     pass
                 ACTIVE_TRADES[symbol] = True
