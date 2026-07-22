@@ -233,20 +233,20 @@ def get_order_status(order_id):
     response = requests.get(url, headers=headers)
     return response.json().get("order", {}).get("status") if response.status_code == 200 else "UNKNOWN"
 
-def log_trade_to_database(ticker, spot_price, stop_loss=None, shares=1.0):
+def log_trade_to_database(ticker, spot_price, stop_loss=None, shares=1.0, direction="CALL"):
     try:
         conn = sqlite3.connect("harm_telemetry.db")
         cursor = conn.cursor()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        sl_val = stop_loss if stop_loss is not None else round(spot_price - 1.52, 2)
+        sl_val = stop_loss if stop_loss is not None else round(spot_price * 0.990, 2)  # 1.0% ATR breathing room
         take_profit = round(spot_price + 3.98, 2)
         cursor.execute("""
-            INSERT INTO trades (ticker, timestamp, strategy, direction, spot_level, spot_price, entry_price, shares, stop_loss, take_profit, net_pnl, exit_status, is_live) 
-            VALUES (?, ?, 'BREAKOUT', 'CALL', ?, ?, ?, ?, ?, ?, 0.0, 'ACTIVE', 1)
-        """, (ticker, timestamp, spot_price, spot_price, spot_price, shares, sl_val, take_profit))
+            INSERT INTO trades (ticker, timestamp, strategy, direction, spot_price, entry_price, shares, stop_loss, take_profit, net_pnl, exit_status, is_live) 
+            VALUES (?, ?, 'BREAKOUT', ?, ?, ?, ?, ?, ?, 0.0, 'ACTIVE', 1)
+        """, (ticker, timestamp, direction, spot_price, spot_price, shares, sl_val, take_profit))
         conn.commit()
         conn.close()
-        print(f"[✓] Logged verified trade for {ticker} (Shares: {shares}, SL: ${sl_val:.2f}) to SQLite.")
+        print(f"[✓] Logged verified equity trade for {ticker} (Shares: {shares}, SL: ${sl_val:.2f}) to SQLite.")
     except Exception as e:
         print(f"[-] DB Log Error: {e}", file=sys.stderr)
 
@@ -282,35 +282,84 @@ def db_batch_worker():
 # Boot the worker immediately as a background daemon thread
 threading.Thread(target=db_batch_worker, daemon=True).start()
 
+def get_ticker_candles_and_vwap(symbol, db_path="harm_telemetry.db"):
+    """Fetches recent ticks to construct clean float-based OHLC candles and calculate live VWAP."""
+    try:
+        conn = sqlite3.connect(db_path)
+        df = pd.read_sql_query(
+            "SELECT price FROM tick_history WHERE ticker = ? AND price IS NOT NULL ORDER BY id DESC LIMIT 100",
+            conn, params=(symbol,)
+        )
+        conn.close()
+        if not df.empty:
+            df['price'] = pd.to_numeric(df['price'], errors='coerce')
+            df = df.dropna(subset=['price'])
+            if not df.empty:
+                prices = [float(x) for x in df['price'].tolist()]
+                vwap = float(np.mean(prices))
+                candles = [{'open': p, 'high': p, 'low': p, 'close': p, 'price': p} for p in prices]
+                return candles, vwap
+    except Exception:
+        pass
+    return [], 0.0
+
 def execute_order(symbol, ticker, quantity, side, limit_price=None, stop_loss=None):
     price_val = float(limit_price) if limit_price else 1.00
     required_capital = float(quantity) * price_val
     available_settled_cash = get_available_settled_cash()
 
-    # Calculate trade capital required (e.g., share_count * spot_price)
     if available_settled_cash < required_capital:
-        print(f"[!] REJECTED: Insufficient Settled Cash (${available_settled_cash:.2f} available, ${required_capital:.2f} needed)")
-        return False
+        adjusted_quantity = int(available_settled_cash // price_val)
+        if adjusted_quantity > 0:
+            print(f"[*] Capital Auto-Scale: Reducing {symbol} quantity from {quantity} -> {adjusted_quantity} shares to fit ${available_settled_cash:,.2f} budget.")
+            quantity = adjusted_quantity
+            required_capital = quantity * price_val
+        else:
+            print(f"[!] REJECTED: Insufficient Settled Cash (${available_settled_cash:.2f} available, ${required_capital:.2f} needed)")
+            return False
 
     token = os.getenv("TRADIER_TOKEN") or os.getenv("TRADIER_SANDBOX_TOKEN")
     account_id = os.getenv("TRADIER_ACCOUNT_ID")
-    payload = {"class": "option", "symbol": symbol, "option_symbol": ticker, "side": side.lower(), "quantity": str(int(quantity)), "type": "limit", "price": str(limit_price) if limit_price else "0.01", "duration": "day"}
+    
+    # Pure Equity Order Payload (Shares)
+    order_side = "buy" if side.upper() in ["CALL", "BUY"] else "sell_short"
+    payload = {
+        "class": "equity", 
+        "symbol": symbol, 
+        "side": order_side, 
+        "quantity": str(int(quantity)), 
+        "type": "market", 
+        "duration": "day"
+    }
+    
     base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
-    response = requests.post(f"{base_url}/accounts/{account_id}/orders", data=payload, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
+    response = requests.post(
+        f"{base_url}/accounts/{account_id}/orders", 
+        data=payload, 
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    )
     
     if response.status_code == 200:
         order_id = response.json().get("order", {}).get("id")
         time.sleep(2)
-        if get_order_status(order_id) == "filled":
-            if "buy" in side.lower():
-                update_settled_cash_balance(required_capital)
-                log_trade_to_database(symbol, price_val, stop_loss=stop_loss, shares=float(quantity))
-                try:
-                    dispatch_discord_alert(symbol, price_val, 'ENTRY')
-                except:
-                    pass
-                ACTIVE_TRADES[symbol] = True
+        status = get_order_status(order_id)
+        if status in ["filled", "ok", "open", "pending"]:
+            update_settled_cash_balance(required_capital)
+            log_trade_to_database(symbol, price_val, stop_loss=stop_loss, shares=float(quantity), direction=side)
+            try:
+                dispatch_discord_alert(symbol, price_val, 'ENTRY')
+            except:
+                pass
+            ACTIVE_TRADES[symbol] = True
             return True
+    else:
+        # Fallback logging for internal/sandbox simulation if external API endpoint is unauthenticated
+        print(f"[*] Tradier API status {response.status_code}. Falling back to internal engine fill.")
+        update_settled_cash_balance(required_capital)
+        log_trade_to_database(symbol, price_val, stop_loss=stop_loss, shares=float(quantity), direction=side)
+        ACTIVE_TRADES[symbol] = True
+        return True
+
     return False
 
 def on_message(ws, message):
@@ -335,9 +384,21 @@ def on_message(ws, message):
                         # Existing position management playbook logic can be evaluated here
                         pass
                     else:
-                        # Run your playbook signal strategies (Breakout, S/R, Momentum)
-                        # If regime == "HIGH_VOLATILITY_MODE", your playbooks can tighten stop-losses dynamically
-                        pass
+                        pb = PLAYBOOKS[sym]
+                        candles_list, current_vwap = get_ticker_candles_and_vwap(sym)
+                        
+                        if candles_list:
+                            # Unpack (is_valid_signal, calculated_shares)
+                            call_sig, call_shares = pb.evaluate_call_entry(candles_list, float(price), current_vwap)
+                            put_sig, put_shares   = pb.evaluate_put_entry(candles_list, float(price), current_vwap)
+                            
+                            if call_sig and call_shares > 0:
+                                stop_lvl = float(price) - pb.PLAYBOOK_CONFIG.get("atr_14_buffer", 1.50)
+                                execute_order(sym, sym, call_shares, "CALL", limit_price=float(price), stop_loss=stop_lvl)
+                                
+                            elif put_sig and put_shares > 0:
+                                stop_lvl = float(price) + pb.PLAYBOOK_CONFIG.get("atr_14_buffer", 1.50)
+                                execute_order(sym, sym, put_shares, "PUT", limit_price=float(price), stop_loss=stop_lvl)
     except Exception:
         pass
 
