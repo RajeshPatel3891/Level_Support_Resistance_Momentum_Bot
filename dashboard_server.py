@@ -4,8 +4,8 @@ import requests
 import traceback
 import pandas as pd
 from datetime import datetime, date
-from fastapi import FastAPI, Request, Query
-from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
+from fastapi import FastAPI, Request, Query, Form
+from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse, RedirectResponse
 from jinja2 import Template
 from dotenv import load_dotenv
 
@@ -29,7 +29,7 @@ INDEX_HTML_TEMPLATE = """
 </head>
 <body class="bg-gray-950 text-gray-100 font-sans p-4 max-w-lg mx-auto">
 
-    <!-- Top Navigation with Calendar Selector & CSV Export -->
+    <!-- Top Navigation with Calendar Selector, CSV Export & Emergency CLOSE ALL -->
     <div class="flex items-center justify-between mb-4 bg-gray-900 p-3 rounded-xl border border-gray-800">
         <div class="flex items-center space-x-2">
             <span class="text-xl">🚀</span>
@@ -45,6 +45,33 @@ INDEX_HTML_TEMPLATE = """
                class="bg-green-600 hover:bg-green-500 text-white text-xs px-2 py-1 rounded font-bold">
                CSV
             </a>
+            {% if trades %}
+            <form action="/close-all" method="POST" onsubmit="return confirm('⚠️ Close ALL active positions immediately?');">
+                <button type="submit" class="bg-red-600 hover:bg-red-500 text-white text-xs px-2 py-1 rounded font-bold uppercase tracking-wider">
+                    Close All
+                </button>
+            </form>
+            {% endif %}
+        </div>
+    </div>
+
+    <!-- Account Cash Ledger Banner -->
+    <div class="grid grid-cols-4 gap-2 mb-4">
+        <div class="bg-gray-900/80 p-2 rounded-xl border border-gray-800 text-center">
+            <div class="text-[8px] text-gray-400 font-medium uppercase tracking-wider">STARTING</div>
+            <div class="text-xs font-black text-gray-200">{{ ledger.starting_settled_cash }}</div>
+        </div>
+        <div class="bg-gray-900/80 p-2 rounded-xl border border-emerald-500/40 text-center">
+            <div class="text-[8px] text-emerald-400 font-medium uppercase tracking-wider">SETTLED FREE</div>
+            <div class="text-xs font-black text-emerald-400">{{ ledger.available_settled_cash }}</div>
+        </div>
+        <div class="bg-gray-900/80 p-2 rounded-xl border border-amber-500/40 text-center">
+            <div class="text-[8px] text-amber-400 font-medium uppercase tracking-wider">DEPLOYED</div>
+            <div class="text-xs font-black text-amber-400">{{ ledger.deployed_capital }}</div>
+        </div>
+        <div class="bg-gray-900/80 p-2 rounded-xl border border-gray-800 text-center">
+            <div class="text-[8px] text-gray-400 font-medium uppercase tracking-wider">UNSETTLED</div>
+            <div class="text-xs font-black text-gray-400">{{ ledger.unsettled_cash }}</div>
         </div>
     </div>
 
@@ -61,7 +88,10 @@ INDEX_HTML_TEMPLATE = """
     </div>
 
     <!-- Active Positions -->
-    <h2 class="text-xs font-bold text-gray-400 uppercase mb-3 tracking-wider">ACTIVE POSITIONS</h2>
+    <div class="flex items-center justify-between mb-3">
+        <h2 class="text-xs font-bold text-gray-400 uppercase tracking-wider">ACTIVE POSITIONS</h2>
+    </div>
+    
     <div class="space-y-3 mb-6">
         {% for trade in trades %}
         <div class="bg-gray-900/60 p-3 rounded-xl border border-gray-800 flex justify-between items-center">
@@ -72,9 +102,16 @@ INDEX_HTML_TEMPLATE = """
                 </div>
                 <div class="text-xs text-gray-400 mt-1">Live: <b class="text-gray-200">{{ trade.price }}</b> | Cost: <b class="text-gray-200">{{ trade.basis }}</b></div>
             </div>
-            <div class="text-right">
-                <div class="font-bold text-sm {{ trade.pnl_class }}">{{ trade.dollar_pnl }}</div>
-                <div class="text-[10px] {{ trade.pnl_class }}">{{ trade.pnl_pct }}</div>
+            <div class="text-right flex items-center space-x-3">
+                <div>
+                    <div class="font-bold text-sm {{ trade.pnl_class }}">{{ trade.dollar_pnl }}</div>
+                    <div class="text-[10px] {{ trade.pnl_class }}">{{ trade.pnl_pct }}</div>
+                </div>
+                <form action="/close-position/{{ trade.ticker }}" method="POST" onsubmit="return confirm('Close {{ trade.ticker }} position?');">
+                    <button type="submit" class="bg-red-950/80 hover:bg-red-800 text-red-300 border border-red-800 text-[10px] px-2 py-1 rounded font-bold uppercase">
+                        Close
+                    </button>
+                </form>
             </div>
         </div>
         {% endfor %}
@@ -135,7 +172,16 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
     limit = 50
     offset = (page - 1) * limit
 
-    # Sum full realized closed PnL across all executed trades mapped to Eastern Time
+    starting_cash = 2000.00
+    unsettled_cash = 0.0
+    try:
+        ledger_row = conn.execute("SELECT starting_settled_cash, available_settled_cash, unsettled_cash FROM account_ledger WHERE date = ?", (selected_date,)).fetchone()
+        if ledger_row:
+            starting_cash = float(ledger_row[0]) if ledger_row[0] else 2000.00
+            unsettled_cash = float(ledger_row[2]) if ledger_row[2] else 0.0
+    except Exception:
+        pass
+
     sum_row = conn.execute("""
         SELECT SUM(net_pnl) 
         FROM trades
@@ -147,7 +193,6 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
     if sum_row and sum_row[0] is not None:
         total_closed_pnl = float(sum_row[0])
 
-    # Fetch Active State
     db_active = conn.execute("""
         SELECT ticker, spot_price, stop_loss, take_profit, exit_status
         FROM trades 
@@ -155,7 +200,6 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
           AND UPPER(exit_status) = 'ACTIVE'
     """).fetchall()
     
-    # Fetch Closed History List items for selected Eastern date
     db_closed = conn.execute("""
         SELECT ticker, spot_price, exit_price, exit_status, timestamp, net_pnl
         FROM trades
@@ -166,11 +210,15 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
     """, (selected_date, limit, offset)).fetchall()
     conn.close()
     
+    deployed_capital = 0.0
+
     for row in db_active:
         ticker = row[0]
         basis_val = TRUE_BASIS.get(ticker, float(row[1]) if row[1] else 1.0)
         sl = row[2]
         
+        deployed_capital += basis_val
+
         quote = get_live_quote(ticker)
         last_price = float(quote.get('last', 0)) if quote.get('last') else basis_val
         
@@ -202,22 +250,87 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
             "pnl_class": "text-green-400" if realized_pnl >= 0 else "text-red-400", "dollar_pnl": f"${realized_pnl:+.2f}"
         })
 
-    return active_trades, closed_trades, total_pnl, total_closed_pnl, selected_date
+    effective_available = starting_cash - deployed_capital
+
+    ledger_data = {
+        "starting_settled_cash": f"${starting_cash:,.2f}",
+        "available_settled_cash": f"${effective_available:,.2f}",
+        "deployed_capital": f"${deployed_capital:,.2f}",
+        "unsettled_cash": f"${unsettled_cash:,.2f}"
+    }
+
+    return active_trades, closed_trades, total_pnl, total_closed_pnl, selected_date, ledger_data
 
 @app.get("/", response_class=HTMLResponse)
 async def index_view(request: Request, selected_date: str = Query(default=None)):
     try:
-        trades, closed, total_pnl, total_closed_pnl, current_date = fetch_portfolio_state(page=1, selected_date=selected_date)
+        trades, closed, total_pnl, total_closed_pnl, current_date, ledger = fetch_portfolio_state(page=1, selected_date=selected_date)
         
         template = Template(INDEX_HTML_TEMPLATE)
         rendered_html = template.render(
-            trades=trades, closed_trades=closed, selected_date=current_date,
+            trades=trades, closed_trades=closed, selected_date=current_date, ledger=ledger,
             total_pnl=f"${total_pnl:+.2f}", pnl_class="text-green-400" if total_pnl >= 0 else "text-red-400",
             total_closed_pnl=f"${total_closed_pnl:+.2f}", closed_pnl_class="text-green-400" if total_closed_pnl >= 0 else "text-red-400"
         )
         return HTMLResponse(content=rendered_html)
     except Exception as e:
         return PlainTextResponse(f"DEBUG EXCEPTION:\n\n{traceback.format_exc()}", status_code=500)
+
+@app.post("/close-position/{ticker}")
+async def close_position_action(ticker: str):
+    try:
+        conn = get_db_connection()
+        quote = get_live_quote(ticker)
+        basis = TRUE_BASIS.get(ticker, 100.0)
+        exit_price = float(quote.get('last', basis)) if quote.get('last') else basis
+        
+        # Fetch active trade details to calculate realized PnL
+        row = conn.execute("SELECT spot_price, stop_loss FROM trades WHERE ticker = ? AND exit_status = 'ACTIVE'", (ticker,)).fetchone()
+        net_pnl = 0.0
+        if row:
+            entry = float(row[0]) if row[0] else basis
+            sl = float(row[1]) if row[1] else entry * 0.98
+            risk_dist = max(abs(entry - sl), 0.20)
+            shares = min(85.0 / risk_dist, 500.0)
+            net_pnl = round((exit_price - entry) * shares, 2)
+
+        conn.execute("""
+            UPDATE trades 
+            SET exit_price = ?, exit_status = 'MANUAL_CLOSE', net_pnl = ?
+            WHERE ticker = ? AND exit_status = 'ACTIVE'
+        """, (exit_price, net_pnl, ticker))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[!] Close Position Error ({ticker}): {e}")
+    return RedirectResponse(url="/", status_code=303)
+
+@app.post("/close-all")
+async def close_all_positions_action():
+    try:
+        conn = get_db_connection()
+        active_rows = conn.execute("SELECT ticker, spot_price, stop_loss FROM trades WHERE exit_status = 'ACTIVE'").fetchall()
+        
+        for row in active_rows:
+            ticker, entry, sl = row[0], float(row[1]) if row[1] else 100.0, float(row[2]) if row[2] else 98.0
+            quote = get_live_quote(ticker)
+            exit_price = float(quote.get('last', entry)) if quote.get('last') else entry
+            
+            risk_dist = max(abs(entry - sl), 0.20)
+            shares = min(85.0 / risk_dist, 500.0)
+            net_pnl = round((exit_price - entry) * shares, 2)
+
+            conn.execute("""
+                UPDATE trades 
+                SET exit_price = ?, exit_status = 'MANUAL_CLOSE', net_pnl = ?
+                WHERE ticker = ? AND exit_status = 'ACTIVE'
+            """, (exit_price, net_pnl, ticker))
+        
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[!] Close All Error: {e}")
+    return RedirectResponse(url="/", status_code=303)
 
 @app.get("/export/trades")
 async def export_trades_csv(selected_date: str = Query(default=None)):
