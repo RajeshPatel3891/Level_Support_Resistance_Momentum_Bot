@@ -134,10 +134,52 @@ class MicroScalpSidekick:
             rows = cursor.fetchall()
             conn.close()
 
-            if rows:
-                print(f"[*] MasterSentry Active Risk Audit: {len(rows)} live position(s) under surveillance.")
-            else:
+            if not rows:
                 print("[*] MasterSentry Standby: No active positions require risk monitoring.")
+                return
+
+            print(f"[*] MasterSentry Active Risk Audit: {len(rows)} live position(s) under surveillance.")
+
+            from dashboard_server import get_live_quote
+
+            for row in rows:
+                ticker, entry_price, stop_loss, take_profit, timestamp = row[0], row[1], row[2], row[3], row[4]
+                quote = get_live_quote(ticker)
+                if not quote or 'last' not in quote or not quote['last']:
+                    continue
+
+                live_spot = float(quote['last'])
+                entry_spot = float(entry_price) if entry_price else live_spot
+
+                # Delta Options PnL calculation (1 contract = 100 shares, Delta = 0.50)
+                delta = 0.50
+                spot_diff = live_spot - entry_spot
+                option_pnl = spot_diff * delta * 100
+
+                # 1. HARD $30 DOLLAR LOSS CAP
+                if option_pnl <= -30.00:
+                    print(f"[🚨 EMERGENCY STOP] {ticker}: Option loss hit ${option_pnl:.2f} (Breached -$30 Limit). Auto-Closing!")
+                    conn_update = sqlite3.connect(DB_FILE)
+                    conn_update.execute("""
+                        UPDATE trades 
+                        SET exit_status = 'STOP_LOSS_DOLLAR_CAP', exit_price = ?, net_pnl = ? 
+                        WHERE ticker = ? AND exit_status = 'ACTIVE'
+                    """, (live_spot, -30.00, ticker))
+                    conn_update.commit()
+                    conn_update.close()
+
+                # 2. TECHNICAL STOCK SPOT STOP LOSS
+                elif stop_loss and live_spot <= float(stop_loss):
+                    print(f"[⚠️ TECHNICAL STOP] {ticker}: Spot ${live_spot:.2f} hit SL level ${stop_loss}. Auto-Closing!")
+                    conn_update = sqlite3.connect(DB_FILE)
+                    conn_update.execute("""
+                        UPDATE trades 
+                        SET exit_status = 'STOP_LOSS_HIT', exit_price = ?, net_pnl = ? 
+                        WHERE ticker = ? AND exit_status = 'ACTIVE'
+                    """, (live_spot, -30.00, ticker))
+                    conn_update.commit()
+                    conn_update.close()
+
         except Exception as e:
             print(f"[!] MasterSentry Risk Audit Error: {e}")
 

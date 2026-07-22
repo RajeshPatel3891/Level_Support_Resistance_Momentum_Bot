@@ -64,9 +64,17 @@ def fetch_and_compile_telemetry():
             }
 
             if exit_status == "ACTIVE":
+                # For ACTIVE options positions:
+                # spot_price stores option premium cost ($1.60 / $2.48)
+                opt_premium = spot_price
+                
+                # Active PnL stays 0.0 until live delta ticks are calculated or trade closes
+                calc_floating = 0.0 if (net_pnl is None or net_pnl == 0.0) else net_pnl
+                
+                trade_obj["net_pnl"] = calc_floating
                 active_positions.append(trade_obj)
-                deployed_capital += spot_price
-                floating_pnl += net_pnl
+                deployed_capital += opt_premium
+                floating_pnl += calc_floating
             else:
                 if date_key not in closed_trades_by_day:
                     closed_trades_by_day[date_key] = {

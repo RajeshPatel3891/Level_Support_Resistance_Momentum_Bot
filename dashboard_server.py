@@ -266,8 +266,14 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
         quote = get_live_quote(ticker)
         last_price = float(quote.get('last', entry)) if quote.get('last') else entry
         
-        pnl_pct = ((last_price - entry) / entry) * 100 if entry > 0 else 0
-        dollar_pnl = (last_price - entry) * shares
+        # Options Delta PnL Patch
+        delta = 0.50
+        spot_entry = float(row[1]) if (row[1] is not None and float(row[1]) > 0) else last_price
+        spot_diff = last_price - spot_entry if last_price != spot_entry else 0.0
+        
+        # Contract value shift per share via Delta (1 contract = 100 shares multiplier)
+        dollar_pnl = round(spot_diff * delta * 100 * shares, 2)
+        pnl_pct = ((spot_diff * delta) / entry) * 100 if entry > 0 else 0.0
             
         total_pnl += dollar_pnl
         active_trades.append({
@@ -328,7 +334,10 @@ async def close_position_action(ticker: str):
             exit_price = float(quote.get('last', entry)) if quote.get('last') else entry
             
             # Pure execution PnL calculation directly from DB entry & shares
-            net_pnl = round((exit_price - entry) * shares, 2)
+            # Options Delta Close PnL Patch
+            spot_entry = float(row[2]) if (len(row) > 2 and row[2] is not None) else entry
+            spot_diff = exit_price - spot_entry
+            net_pnl = round(spot_diff * 0.50 * 100 * shares, 2)
 
             conn.execute("""
                 UPDATE trades 
@@ -355,7 +364,10 @@ async def close_all_positions_action():
             quote = get_live_quote(ticker)
             exit_price = float(quote.get('last', entry)) if quote.get('last') else entry
             
-            net_pnl = round((exit_price - entry) * shares, 2)
+            # Options Delta Close PnL Patch
+            spot_entry = float(row[2]) if (len(row) > 2 and row[2] is not None) else entry
+            spot_diff = exit_price - spot_entry
+            net_pnl = round(spot_diff * 0.50 * 100 * shares, 2)
 
             conn.execute("""
                 UPDATE trades 

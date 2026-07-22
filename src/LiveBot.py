@@ -59,12 +59,71 @@ ACTIVE_TRADES = {}
 TELEMETRY = {}
 PLAYBOOKS = {"AAPL": aapl, "TSLA": tsla, "NVDA": nvda, "RIVN": rivn, "PLTR": pltr}
 
+# --- OPTIONS MECHANICS & MULTIPLIER CONFIG ---
+CONTRACT_MULTIPLIER = 100
+DEFAULT_DELTA = 0.50  # Estimated ~50 Delta for ATM Call/Put contracts
+
+def fetch_occ_option_symbol(underlying: str, option_type: str, spot_price: float) -> str:
+    """
+    Queries Tradier API for closest ATM option contract expiration and OCC symbol format.
+    Fallback: Builds standard OCC symbol string format (e.g. AAPL260724C00325000).
+    """
+    base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
+    if "sandbox" in base_url.lower():
+        token = os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN")
+    else:
+        token = os.getenv("TRADIER_TOKEN")
+    base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    
+    try:
+        # 1. Fetch Expirations
+        exp_res = requests.get(f"{base_url}/markets/options/expirations", params={"symbol": underlying}, headers=headers, timeout=3)
+        if exp_res.status_code == 200:
+            expirations = exp_res.json().get("expirations", {}).get("date", [])
+            if isinstance(expirations, str):
+                expirations = [expirations]
+            if expirations:
+                target_exp = expirations[0]  # Front-week / 0DTE target
+                
+                # 2. Query Options Chain for nearest ATM Strike
+                chain_res = requests.get(
+                    f"{base_url}/markets/options/chains",
+                    params={"symbol": underlying, "expiration": target_exp, "greeks": "false"},
+                    headers=headers,
+                    timeout=3
+                )
+                if chain_res.status_code == 200:
+                    options = chain_res.json().get("options", {}).get("option", [])
+                    if isinstance(options, dict):
+                        options = [options]
+                    
+                    target_side = "call" if option_type.upper() == "CALL" else "put"
+                    matching_options = [o for o in options if o.get("option_type") == target_side]
+                    
+                    if matching_options:
+                        # Find contract closest to current spot price
+                        best_contract = min(matching_options, key=lambda x: abs(float(x.get("strike", 0)) - spot_price))
+                        occ_symbol = best_contract.get("symbol")
+                        if occ_symbol:
+                            return occ_symbol
+    except Exception as e:
+        print(f"[-] OCC Option Lookup Fallback triggered for {underlying}: {e}", file=sys.stderr)
+
+    # Fallback: Construct synthetic OCC symbol format [Ticker][YYMMDD][C/P][Strike*1000 formatted to 8 digits]
+    now = datetime.now()
+    date_str = now.strftime("%y%m%d")
+    type_code = "C" if option_type.upper() == "CALL" else "P"
+    strike_fmt = f"{int(round(spot_price * 1000)):08d}"
+    return f"{underlying}{date_str}{type_code}{strike_fmt}"
+
 def calculate_playbook_params(ticker: str, current_price: float, gex_support: float, gex_regime: str, ohlc_df: pd.DataFrame):
     """
-    Playbook Execution Matrix:
-    - Calculates 14-period ATR for volatility-based breathing room.
+    Playbook Execution Matrix for Options Contracts:
+    - Calculates 14-period ATR for underlying movement.
     - Adjusts buffer based on GEX Regime (+GEX vs -GEX).
     - Caps total account risk at $30.00 per trade.
+    - Converts share risk distance into equivalent Options Contracts.
     """
     # 1. Calculate 14-period ATR from OHLC data
     high_low = ohlc_df['high'] - ohlc_df['low']
@@ -74,42 +133,38 @@ def calculate_playbook_params(ticker: str, current_price: float, gex_support: fl
     true_range = np.max(ranges, axis=1)
     atr = true_range.rolling(14).mean().iloc[-1]
     
-    # Fallback to 1% of price if ATR data is sparse
     if np.isnan(atr) or atr <= 0:
         atr = current_price * 0.01
 
     # 2. Select ATR Buffer Multiplier based on GEX Regime
-    if gex_regime == "POSITIVE_GEX":
-        # Spongy mean-reverting environment: Give extra rebound room
-        atr_multiplier = 0.75
-    else:
-        # Negative GEX / Acceleration environment: Tight stop
-        atr_multiplier = 0.25
+    atr_multiplier = 0.75 if gex_regime == "POSITIVE_GEX" else 0.25
 
-    # 3. Calculate technical stop-loss price
+    # 3. Calculate technical stop-loss price on underlying
     rebound_buffer = atr * atr_multiplier
     stop_loss_price = round(gex_support - rebound_buffer, 2)
     
-    # Risk distance (difference between entry and stop loss)
     risk_distance = max(abs(current_price - stop_loss_price), 0.10)
 
     # 4. Target Risk Budget = $30.00 (1.5% of $2,000 account)
     TARGET_RISK_BUDGET = 30.00
     
-    # Calculate exact shares to buy
-    calculated_shares = round(TARGET_RISK_BUDGET / risk_distance, 2)
+    # Options Contract Sizing using Delta math
+    # Risk per contract = risk_distance * DEFAULT_DELTA * CONTRACT_MULTIPLIER
+    risk_per_contract = max(risk_distance * DEFAULT_DELTA * CONTRACT_MULTIPLIER, 5.0)
+    calculated_contracts = max(1, int(TARGET_RISK_BUDGET / risk_per_contract))
     
-    # Cap shares at max available account cash
-    max_affordable_shares = int(2000.00 / current_price)
-    shares_to_buy = min(calculated_shares, max_affordable_shares)
+    # Cap contracts based on maximum affordable premium budget ($500 max per option entry)
+    estimated_premium = max(current_price * 0.01, 1.50)  # ~$1.50 - $3.00 option premium estimate
+    max_affordable_contracts = max(1, int(500.00 / (estimated_premium * CONTRACT_MULTIPLIER)))
+    contracts_to_buy = min(calculated_contracts, max_affordable_contracts)
 
     return {
         "entry_price": current_price,
         "stop_loss": stop_loss_price,
         "atr": round(atr, 2),
         "rebound_buffer": round(rebound_buffer, 2),
-        "shares": shares_to_buy,
-        "max_risk_dollars": round(shares_to_buy * risk_distance, 2)
+        "shares": contracts_to_buy,  # Stores contract count for database schema compatibility
+        "max_risk_dollars": round(contracts_to_buy * risk_per_contract, 2)
     }
 
 def init_account_ledger(db_path="harm_telemetry.db", starting_capital=2000.00):
@@ -193,7 +248,6 @@ def evaluate_ticker_risk(symbol):
         print(f"[*] Core Engine reading local matrix for {symbol}: {label} GEX (${net_gex:,.2f})")
         
         if label == "NEGATIVE":
-            # Action: Tighten up risk parameters due to implied dealer hedging loops
             print(f"[!] Warning: High-volatility dealer regime detected for {symbol}. Applying strict risk filters.")
             return "HIGH_VOLATILITY_MODE"
         else:
@@ -206,7 +260,6 @@ def handle_shutdown_signal(signum, frame):
     print("\n🛑 [SHUTDOWN] Intercepted termination signal. Exiting LiveBot safely.")
     sys.exit(0)
 
-# Register signal interception handlers immediately on file load
 signal.signal(signal.SIGINT, handle_shutdown_signal)
 signal.signal(signal.SIGTERM, handle_shutdown_signal)
 
@@ -226,7 +279,11 @@ def sync_active_trades_from_db():
 sync_active_trades_from_db()
 
 def get_order_status(order_id):
-    token = os.getenv("TRADIER_TOKEN") or os.getenv("TRADIER_SANDBOX_TOKEN")
+    base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
+    if "sandbox" in base_url.lower():
+        token = os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN")
+    else:
+        token = os.getenv("TRADIER_TOKEN")
     account_id = os.getenv("TRADIER_ACCOUNT_ID")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     url = f"https://sandbox.tradier.com/v1/accounts/{account_id}/orders/{order_id}"
@@ -238,15 +295,17 @@ def log_trade_to_database(ticker, spot_price, stop_loss=None, shares=1.0, direct
         conn = sqlite3.connect("harm_telemetry.db")
         cursor = conn.cursor()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        sl_val = stop_loss if stop_loss is not None else round(spot_price * 0.990, 2)  # 1.0% ATR breathing room
+        sl_val = stop_loss if stop_loss is not None else round(spot_price * 0.990, 2)
         take_profit = round(spot_price + 3.98, 2)
+        opt_premium = round(max(0.80, spot_price * 0.012), 2)
+        opt_premium = round(max(0.80, spot_price * 0.012), 2)
         cursor.execute("""
             INSERT INTO trades (ticker, timestamp, strategy, direction, spot_price, entry_price, shares, stop_loss, take_profit, net_pnl, exit_status, is_live) 
             VALUES (?, ?, 'BREAKOUT', ?, ?, ?, ?, ?, ?, 0.0, 'ACTIVE', 1)
-        """, (ticker, timestamp, direction, spot_price, spot_price, shares, sl_val, take_profit))
+        """, (ticker, timestamp, direction, spot_price, opt_premium, shares, sl_val, take_profit))
         conn.commit()
         conn.close()
-        print(f"[✓] Logged verified equity trade for {ticker} (Shares: {shares}, SL: ${sl_val:.2f}) to SQLite.")
+        print(f"[✓] Logged verified options trade for {ticker} (Contracts: {shares}, SL: ${sl_val:.2f}) to SQLite.")
     except Exception as e:
         print(f"[-] DB Log Error: {e}", file=sys.stderr)
 
@@ -260,7 +319,6 @@ def db_batch_worker():
     
     while True:
         batch = []
-        # Gather all items currently waiting in the thread queue
         while True:
             try:
                 batch.append(tick_queue.get_nowait())
@@ -277,9 +335,8 @@ def db_batch_worker():
             except Exception as e:
                 print(f"[-] Asynchronous Batch Write Error: {e}", file=sys.stderr)
         
-        time.sleep(5) # Wake up every 5 seconds to clear the queue buffer
+        time.sleep(5)
 
-# Boot the worker immediately as a background daemon thread
 threading.Thread(target=db_batch_worker, daemon=True).start()
 
 def get_ticker_candles_and_vwap(symbol, db_path="harm_telemetry.db"):
@@ -304,28 +361,40 @@ def get_ticker_candles_and_vwap(symbol, db_path="harm_telemetry.db"):
     return [], 0.0
 
 def execute_order(symbol, ticker, quantity, side, limit_price=None, stop_loss=None):
-    price_val = float(limit_price) if limit_price else 1.00
-    required_capital = float(quantity) * price_val
+    """
+    Executes Options Orders via Tradier API using class: 'option' and standard OCC format.
+    """
+    spot_val = float(limit_price) if limit_price else 100.00
+    occ_symbol = fetch_occ_option_symbol(symbol, side, spot_val)
+    
+    # Premium cost estimation for capital allocation (~$2.50 per contract multiplier)
+    estimated_contract_cost = 250.00  # $2.50 premium * 100 multiplier
+    required_capital = float(quantity) * estimated_contract_cost
     available_settled_cash = get_available_settled_cash()
 
     if available_settled_cash < required_capital:
-        adjusted_quantity = int(available_settled_cash // price_val)
+        adjusted_quantity = int(available_settled_cash // estimated_contract_cost)
         if adjusted_quantity > 0:
-            print(f"[*] Capital Auto-Scale: Reducing {symbol} quantity from {quantity} -> {adjusted_quantity} shares to fit ${available_settled_cash:,.2f} budget.")
+            print(f"[*] Capital Auto-Scale: Reducing {symbol} options contracts from {quantity} -> {adjusted_quantity} to fit ${available_settled_cash:,.2f} budget.")
             quantity = adjusted_quantity
-            required_capital = quantity * price_val
+            required_capital = quantity * estimated_contract_cost
         else:
-            print(f"[!] REJECTED: Insufficient Settled Cash (${available_settled_cash:.2f} available, ${required_capital:.2f} needed)")
+            print(f"[!] REJECTED: Insufficient Settled Cash for Options Premium (${available_settled_cash:.2f} available, ${required_capital:.2f} needed)")
             return False
 
-    token = os.getenv("TRADIER_TOKEN") or os.getenv("TRADIER_SANDBOX_TOKEN")
+    base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
+    if "sandbox" in base_url.lower():
+        token = os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN")
+    else:
+        token = os.getenv("TRADIER_TOKEN")
     account_id = os.getenv("TRADIER_ACCOUNT_ID")
     
-    # Pure Equity Order Payload (Shares)
-    order_side = "buy" if side.upper() in ["CALL", "BUY"] else "sell_short"
+    # Options Order Payload Layout for Tradier API
+    order_side = "buy_to_open" if side.upper() in ["CALL", "BUY"] else "sell_to_open"
     payload = {
-        "class": "equity", 
+        "class": "option", 
         "symbol": symbol, 
+        "option_symbol": occ_symbol,
         "side": order_side, 
         "quantity": str(int(quantity)), 
         "type": "market", 
@@ -345,25 +414,24 @@ def execute_order(symbol, ticker, quantity, side, limit_price=None, stop_loss=No
         status = get_order_status(order_id)
         if status in ["filled", "ok", "open", "pending"]:
             update_settled_cash_balance(required_capital)
-            log_trade_to_database(symbol, price_val, stop_loss=stop_loss, shares=float(quantity), direction=side)
+            log_trade_to_database(symbol, spot_val, stop_loss=stop_loss, shares=float(quantity), direction=side)
             try:
-                dispatch_discord_alert(symbol, price_val, 'ENTRY')
+                dispatch_discord_alert(symbol, spot_val, 'ENTRY')
             except:
                 pass
             ACTIVE_TRADES[symbol] = True
             return True
     else:
-        # Fallback logging for internal/sandbox simulation if external API endpoint is unauthenticated
-        print(f"[*] Tradier API status {response.status_code}. Falling back to internal engine fill.")
+        # Internal fill fallback for sandbox/simulation execution
+        print(f"[*] Tradier Option API status {response.status_code}. Falling back to internal engine option fill.")
         update_settled_cash_balance(required_capital)
-        log_trade_to_database(symbol, price_val, stop_loss=stop_loss, shares=float(quantity), direction=side)
+        log_trade_to_database(symbol, spot_val, stop_loss=stop_loss, shares=float(quantity), direction=side)
         ACTIVE_TRADES[symbol] = True
         return True
 
     return False
 
 def on_message(ws, message):
-    # Absolute First Line Guard: Silently discard all ticks & prints outside US Market Hours
     if not is_market_hours():
         return
 
@@ -373,22 +441,18 @@ def on_message(ws, message):
         for e in events:
             if e.get("type") == "trade":
                 sym, price = e.get("symbol"), e.get("price")
-                # Drop raw telemetry into background thread instantly without locking the websocket loop
                 tick_queue.put((sym, datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"), float(price)))
                 print(f"[+] TICKER HIT -> {sym}: ${price}")
                 if sym in PLAYBOOKS:
-                    # Intercept the incoming price tick with our local ultra-low latency GEX matrix
                     regime = evaluate_ticker_risk(sym)
                     
                     if ACTIVE_TRADES.get(sym):
-                        # Existing position management playbook logic can be evaluated here
                         pass
                     else:
                         pb = PLAYBOOKS[sym]
                         candles_list, current_vwap = get_ticker_candles_and_vwap(sym)
                         
                         if candles_list:
-                            # Unpack (is_valid_signal, calculated_shares)
                             call_sig, call_shares = pb.evaluate_call_entry(candles_list, float(price), current_vwap)
                             put_sig, put_shares   = pb.evaluate_put_entry(candles_list, float(price), current_vwap)
                             
@@ -403,12 +467,11 @@ def on_message(ws, message):
         pass
 
 def get_streaming_session():
-    token = os.getenv("TRADIER_TOKEN") or os.getenv("TRADIER_SANDBOX_TOKEN")
+    # Stream session IDs must always be generated via production endpoint
+    token = os.getenv("TRADIER_TOKEN")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     try:
-        # Request a dynamic WebSocket session ticket from the REST engine
-        base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
-        r = requests.post(f"{base_url}/markets/events/session", headers=headers)
+        r = requests.post("https://api.tradier.com/v1/markets/events/session", headers=headers)
         if r.status_code == 200:
             return r.json().get("stream", {})
     except Exception as e:
@@ -420,7 +483,6 @@ def on_ws_open(ws):
     session_id = session_info.get("sessionid")
     
     if session_id:
-        # Formulate the explicit Tradier payload layout to subscribe to your core watchlist pool
         auth_payload = {
             "symbols": ["AAPL", "NVDA", "TSLA", "PLTR", "RIVN", "SOFI", "INTC", "AAL", "F"],
             "lineage": "true",
