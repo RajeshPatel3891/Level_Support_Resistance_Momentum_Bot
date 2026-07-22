@@ -1,128 +1,90 @@
 {
-  "date": "2026-07-21",
+  "date": "2026-07-22",
   "active_strategy": "Hybrid Bridge",
   "guardrails": {
     "velocity_filter": true,
     "momentum_filter": true,
     "vwap_alignment_required": true
   },
-  "levels": {
-    "PLTR": {
-      "spot": 133.0,
-      "vwap": 131.8,
-      "support": [
-        128.75,
-        133.25
-      ],
-      "resistance": [
-        135.25,
-        136.75
-      ],
-      "execution_armed": true
-    },
-    "NVDA": {
-      "spot": 206.85,
-      "vwap": 204.5,
-      "support": [
-        205.1,
-        206.9
-      ],
-      "resistance": [
-        214.1,
-        215.9
-      ],
-      "execution_armed": true
-    },
-    "TSLA": {
-      "spot": 390.0,
-      "vwap": 383.1,
-      "support": [
-        384.1,
-        385.9
-      ],
-      "resistance": [
-        400.1,
-        401.9
-      ],
-      "execution_armed": false
-    },
-    "AAPL": {
-      "spot": 328.0,
-      "vwap": 331.2,
-      "support": [
-        323.1,
-        324.9
-      ],
-      "resistance": [
-        332.1,
-        333.9
-      ],
-      "execution_armed": false
-    },
-    "RIVN": {
-      "spot": 17.15,
-      "vwap": 17.25,
-      "support": [
-        17.11,
-        17.19
-      ],
-      "resistance": [
-        18.51,
-        18.59
-      ],
-      "execution_armed": false
-    },
-    "INTC": {
-      "spot": 97.06,
-      "vwap": 98.2,
-      "support": [
-        96.1,
-        97.5
-      ],
-      "resistance": [
-        100.1,
-        101.5
-      ],
-      "execution_armed": false
-    },
-    "SOFI": {
-      "spot": 17.01,
-      "vwap": 17.15,
-      "support": [
-        16.8,
-        17.1
-      ],
-      "resistance": [
-        17.8,
-        18.1
-      ],
-      "execution_armed": false
-    },
-    "AAL": {
-      "spot": 15.14,
-      "vwap": 15.2,
-      "support": [
-        15.0,
-        15.15
-      ],
-      "resistance": [
-        15.8,
-        16.0
-      ],
-      "execution_armed": false
-    },
-    "F": {
-      "spot": 13.99,
-      "vwap": 14.05,
-      "support": [
-        13.85,
-        14.0
-      ],
-      "resistance": [
-        14.4,
-        14.6
-      ],
-      "execution_armed": false
-    }
+  "TSLA": {
+    "last_price": 390.0,
+    "vwap": 383.1,
+    "support_a": 384.1,
+    "support_b": 385.9,
+    "resistance_a": 400.1,
+    "resistance_b": 401.9,
+    "execution_armed": false
+  },
+  "AAPL": {
+    "last_price": 328.0,
+    "vwap": 331.2,
+    "support_a": 323.1,
+    "support_b": 324.9,
+    "resistance_a": 332.1,
+    "resistance_b": 333.9,
+    "execution_armed": false
+  },
+  "PLTR": {
+    "last_price": 133.0,
+    "vwap": 131.8,
+    "support_a": 128.75,
+    "support_b": 133.25,
+    "resistance_a": 135.25,
+    "resistance_b": 136.75,
+    "execution_armed": true
+  },
+  "NVDA": {
+    "last_price": 206.85,
+    "vwap": 204.5,
+    "support_a": 205.1,
+    "support_b": 206.9,
+    "resistance_a": 214.1,
+    "resistance_b": 215.9,
+    "execution_armed": true
+  },
+  "RIVN": {
+    "last_price": 17.15,
+    "vwap": 17.25,
+    "support_a": 17.11,
+    "support_b": 17.19,
+    "resistance_a": 18.51,
+    "resistance_b": 18.59,
+    "execution_armed": false
+  },
+  "INTC": {
+    "last_price": 98.4,
+    "vwap": 98.2,
+    "support_a": 96.1,
+    "support_b": 97.5,
+    "resistance_a": 100.1,
+    "resistance_b": 101.5,
+    "execution_armed": false
+  },
+  "SOFI": {
+    "last_price": 17.15,
+    "vwap": 17.15,
+    "support_a": 16.8,
+    "support_b": 17.1,
+    "resistance_a": 17.8,
+    "resistance_b": 18.1,
+    "execution_armed": false
+  },
+  "AAL": {
+    "last_price": 15.6,
+    "vwap": 15.2,
+    "support_a": 15.0,
+    "support_b": 15.15,
+    "resistance_a": 15.8,
+    "resistance_b": 16.0,
+    "execution_armed": false
+  },
+  "F": {
+    "last_price": 14.15,
+    "vwap": 14.05,
+    "support_a": 13.85,
+    "support_b": 14.0,
+    "resistance_a": 14.4,
+    "resistance_b": 14.6,
+    "execution_armed": false
   }
 }

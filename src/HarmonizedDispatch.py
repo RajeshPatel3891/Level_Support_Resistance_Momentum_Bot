@@ -4,6 +4,7 @@ import json
 import sqlite3
 import requests
 import time
+from datetime import datetime
 
 def init_db(db_path='harmonized_trades.db'):
     """Ensures database table and unique composite index exist for UPSERT deduplication."""
@@ -28,6 +29,60 @@ def init_db(db_path='harmonized_trades.db'):
     ''')
     conn.commit()
     conn.close()
+
+def sanitize_historical_telemetry(db_paths=['harmonized_trades.db', 'harm_telemetry.db']):
+    """Auto-sanitizes historical telemetry on engine startup by purging duplicate records."""
+    for db in db_paths:
+        if not os.path.exists(db):
+            continue
+        try:
+            conn = sqlite3.connect(db)
+            cursor = conn.cursor()
+            
+            # Identify target table name (harmonized_trades vs trades)
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
+            tables = [row[0] for row in cursor.fetchall()]
+            
+            target_table = None
+            if 'harmonized_trades' in tables:
+                target_table = 'harmonized_trades'
+            elif 'trades' in tables:
+                target_table = 'trades'
+                
+            if target_table:
+                cursor.execute(f'''
+                    DELETE FROM {target_table}
+                    WHERE id NOT IN (
+                        SELECT MIN(id)
+                        FROM {target_table}
+                        GROUP BY ticker, spot_price, exit_price, exit_status
+                    );
+                ''')
+                conn.commit()
+                print(f"[+] Auto-sanitized telemetry in {db} (table: {target_table})")
+            conn.close()
+        except Exception as e:
+            print(f"[!] Warning: Auto-sanitization skipped for {db}: {e}")
+
+def check_cash_availability(required_capital, db_path='harm_telemetry.db'):
+    """Validates if today's available settled cash covers the required trade capital."""
+    try:
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        cursor.execute("SELECT available_settled_cash FROM account_ledger WHERE date = ?", (today_str,))
+        row = cursor.fetchone()
+        conn.close()
+        
+        available = float(row[0]) if row else 0.0
+        if available >= required_capital:
+            return True, available
+            
+        print(f"[!] REJECTED: Insufficient Settled Cash (${available:,.2f} available, ${required_capital:,.2f} required)")
+        return False, available
+    except Exception as e:
+        print(f"[!] Ledger Check Error: {e}")
+        return False, 0.0
 
 def log_trade_event(trade_data, db_path='harmonized_trades.db'):
     """Logs or updates a trade record using SQLite UPSERT pattern to prevent duplicates."""
@@ -105,16 +160,19 @@ def force_exit_all(symbol, limit_price=None, force_market=False):
 if __name__ == "__main__":
     print("=" * 65)
     print("[+] HARMONIZED AI DISPATCH ENGINE INITIALIZED")
-    print("Target Session: July 21, 2026 | Session Bell: Active")
+    print("Target Session: July 22, 2026 | Session Bell: Active")
     print("=" * 65)
 
     # Initialize database tables and deduplication constraints
     init_db()
 
+    # Auto-sanitize historical telemetry on startup
+    sanitize_historical_telemetry()
+
     try:
         with open('trading_levels.json', 'r') as f:
             levels = json.load(f)
-        print(f"[+] Loaded trading_levels.json successfully ({len(levels.get('levels', {}))} tickers tracked)")
+        print(f"[+] Loaded trading_levels.json successfully ({len([k for k, v in levels.items() if isinstance(v, dict) and 'support_a' in v])} tickers tracked)")
     except Exception as e:
         print(f"[!] Warning: Could not load trading_levels.json: {e}")
 

@@ -113,7 +113,56 @@ INDEX_HTML_TEMPLATE = """
     </div>
 
     <!-- Closed Positions -->
-    <h2 class="text-xs font-bold text-gray-400 uppercase mb-3 tracking-wider">CLOSED POSITIONS ({{ selected_date }})</h2>
+    <h2 class="text-xs font-bold text-gray-400 uppercase mb-3 tracking-wider">
+    <!-- LEVEL PROXIMITY MATRIX -->
+    <div style="margin-top: 25px; margin-bottom: 25px;">
+        <h3 style="color: #8f9bba; font-size: 14px; letter-spacing: 1px; margin-bottom: 12px; font-weight: 700;">LEVEL PROXIMITY MATRIX</h3>
+        <div id="proximity-container" style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px;">
+            <!-- Dynamically populated via JS -->
+        </div>
+    </div>
+
+    <script>
+        async function fetchProximity() {
+            try {
+                const res = await fetch('/api/proximity');
+                const data = await res.json();
+                const container = document.getElementById('proximity-container');
+                if (!container) return;
+                
+                let html = '';
+                for (const [ticker, info] of Object.entries(data)) {
+                    const statusBg = info.armed ? 'rgba(0, 230, 118, 0.15)' : 'rgba(255, 255, 255, 0.05)';
+                    const statusColor = info.armed ? '#00e676' : '#8f9bba';
+                    const statusText = info.armed ? 'ARMED' : 'WAITING';
+                    
+                    html += `
+                        <div style="background: #111827; border: 1px solid #1f293d; border-radius: 8px; padding: 12px;">
+                            <div style="display: flex; justify-space-between; align-items: center; margin-bottom: 8px;">
+                                <span style="font-weight: 800; font-size: 16px; color: #ffffff;">${ticker}</span>
+                                <span style="background: ${statusBg}; color: ${statusColor}; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 4px;">${statusText}</span>
+                            </div>
+                            <div style="font-size: 12px; color: #8f9bba; display: flex; justify-content: space-between; margin-bottom: 4px;">
+                                <span>Spot: <strong style="color: #fff;">$${info.spot.toFixed(2)}</strong></span>
+                                <span>VWAP: <strong style="color: #fff;">$${info.vwap.toFixed(2)}</strong></span>
+                            </div>
+                            <div style="font-size: 12px; color: #8f9bba; display: flex; justify-content: space-between;">
+                                <span>Target: <strong style="color: #3b82f6;">${info.target}</strong></span>
+                                <span>Gap: <strong style="color: #ffb74d;">${info.gap_dollars} (${info.gap_pct})</strong></span>
+                            </div>
+                        </div>
+                    `;
+                }
+                container.innerHTML = html;
+            } catch (e) {
+                console.error("Proximity fetch error:", e);
+            }
+        }
+        fetchProximity();
+        setInterval(fetchProximity, 3000);
+    </script>
+
+    CLOSED POSITIONS ({{ selected_date }})</h2>
     <div class="space-y-3">
         {% for trade in closed_trades %}
         <div class="bg-gray-900/40 p-3 rounded-xl border border-gray-800/60 flex justify-between items-center">
@@ -167,12 +216,12 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
     limit = 50
     offset = (page - 1) * limit
 
-    starting_cash = 2000.00
+    starting_cash = 2500.97
     unsettled_cash = 0.0
     try:
         ledger_row = conn.execute("SELECT starting_settled_cash, available_settled_cash, unsettled_cash FROM account_ledger WHERE date = ?", (selected_date,)).fetchone()
         if ledger_row:
-            starting_cash = float(ledger_row[0]) if ledger_row[0] else 2000.00
+            starting_cash = float(ledger_row[0]) if ledger_row[0] else 2500.97
             unsettled_cash = float(ledger_row[2]) if ledger_row[2] else 0.0
     except Exception:
         pass
@@ -339,3 +388,48 @@ async def export_trades_csv(selected_date: str = Query(default=None)):
         media_type="text/csv",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
+
+
+
+@app.get('/api/proximity')
+def get_proximity_data():
+    import json
+    try:
+        with open('trading_levels.json', 'r') as f:
+            levels = json.load(f)
+    except Exception:
+        return {}
+
+    proximity = {}
+    tickers = ["TSLA", "AAPL", "PLTR", "NVDA", "RIVN", "INTC", "SOFI", "AAL", "F"]
+
+    for t in tickers:
+        data = levels.get(t, {})
+        if not data: continue
+        
+        spot = data.get('last_price', 0.0)
+        vwap = data.get('vwap', 0.0)
+        sup_b = data.get('support_b', 0.0)
+        res_a = data.get('resistance_a', 0.0)
+        
+        dist_sup = round(spot - sup_b, 2) if spot > sup_b else 0.0
+        dist_res = round(res_a - spot, 2) if spot < res_a else 0.0
+        
+        target_zone = "SUPPORT" if dist_sup <= dist_res else "RESISTANCE"
+        gap = dist_sup if target_zone == "SUPPORT" else dist_res
+        pct_gap = round((gap / spot) * 100, 2) if spot > 0 else 0.0
+
+        proximity[t] = {
+            "spot": spot,
+            "vwap": vwap,
+            "target": target_zone,
+            "gap_dollars": f"${gap:.2f}",
+            "gap_pct": f"{pct_gap:.2f}%",
+            "armed": data.get("execution_armed", False)
+        }
+
+    return proximity
+
+if __name__ == '__main__':
+    import uvicorn
+    uvicorn.run(app, host='0.0.0.0', port=8000)
