@@ -13,11 +13,6 @@ load_dotenv()
 
 app = FastAPI(title="HARM.AI Mobile Matrix Gateway")
 
-TRUE_BASIS = {
-    "PLTR": 132.42, "INTC": 99.04, "AAPL": 324.86, "RIVN": 17.11,
-    "TSLA": 391.84, "SOFI": 17.11, "NVDA": 209.34, "AAL": 15.18, "F": 14.05
-}
-
 INDEX_HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -194,14 +189,14 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
         total_closed_pnl = float(sum_row[0])
 
     db_active = conn.execute("""
-        SELECT ticker, spot_price, stop_loss, take_profit, exit_status
+        SELECT ticker, spot_price, stop_loss, take_profit, exit_status, entry_price, shares
         FROM trades 
         WHERE id IN (SELECT MAX(id) FROM trades GROUP BY ticker)
           AND UPPER(exit_status) = 'ACTIVE'
     """).fetchall()
     
     db_closed = conn.execute("""
-        SELECT ticker, spot_price, exit_price, exit_status, timestamp, net_pnl
+        SELECT ticker, spot_price, exit_price, exit_status, timestamp, net_pnl, entry_price, shares
         FROM trades
         WHERE UPPER(exit_status) NOT IN ('ACTIVE', 'SIM_TRAILING_STOP')
           AND net_pnl IS NOT NULL
@@ -214,43 +209,37 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
 
     for row in db_active:
         ticker = row[0]
-        basis_val = TRUE_BASIS.get(ticker, float(row[1]) if row[1] else 1.0)
-        sl = row[2]
+        entry = float(row[5]) if row[5] is not None else (float(row[1]) if row[1] else 100.0)
+        shares = float(row[6]) if row[6] is not None else 1.0
         
-        deployed_capital += basis_val
+        deployed_capital += (entry * shares)
 
         quote = get_live_quote(ticker)
-        last_price = float(quote.get('last', 0)) if quote.get('last') else basis_val
+        last_price = float(quote.get('last', entry)) if quote.get('last') else entry
         
-        pnl_pct = ((last_price - basis_val) / basis_val) * 100 if basis_val > 0 else 0
-        raw_risk_dist = abs(basis_val - (float(sl) if sl else 0.0))
-        risk_dist = max(raw_risk_dist, 0.20)
-        
-        shares = min(85.0 / risk_dist, 500.0)
-        dollar_pnl = (last_price - basis_val) * shares
-        if sl and last_price <= float(sl):
-            dollar_pnl = -85.00
+        pnl_pct = ((last_price - entry) / entry) * 100 if entry > 0 else 0
+        dollar_pnl = (last_price - entry) * shares
             
         total_pnl += dollar_pnl
         active_trades.append({
             "ticker": ticker, "status": row[4], "price": f"${last_price:.2f}",
-            "basis": f"${basis_val:.2f}", "pnl_pct": f"{pnl_pct:+.2f}%",
+            "basis": f"${entry:.2f}", "pnl_pct": f"{pnl_pct:+.2f}%",
             "pnl_class": "text-green-400" if dollar_pnl >= 0 else "text-red-400", "dollar_pnl": f"${dollar_pnl:+.2f}"
         })
             
     for row in db_closed:
         ticker = row[0]
-        basis_val = TRUE_BASIS.get(ticker, float(row[1]) if row[1] else 0.0)
-        exit_val = float(row[2]) if row[2] else basis_val
+        entry = float(row[6]) if row[6] is not None else (float(row[1]) if row[1] else 0.0)
+        exit_val = float(row[2]) if row[2] else entry
         realized_pnl = float(row[5]) if row[5] is not None else 0.0
 
         closed_trades.append({
             "ticker": ticker, "status": row[3], "exit_price": f"${exit_val:.2f}",
-            "basis": f"${basis_val:.2f}", "timestamp": str(row[4])[-8:],
+            "basis": f"${entry:.2f}", "timestamp": str(row[4])[-8:],
             "pnl_class": "text-green-400" if realized_pnl >= 0 else "text-red-400", "dollar_pnl": f"${realized_pnl:+.2f}"
         })
 
-    effective_available = starting_cash - deployed_capital
+    effective_available = starting_cash + total_closed_pnl - deployed_capital
 
     ledger_data = {
         "starting_settled_cash": f"${starting_cash:,.2f}",
@@ -280,26 +269,24 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
 async def close_position_action(ticker: str):
     try:
         conn = get_db_connection()
-        quote = get_live_quote(ticker)
-        basis = TRUE_BASIS.get(ticker, 100.0)
-        exit_price = float(quote.get('last', basis)) if quote.get('last') else basis
+        row = conn.execute("SELECT entry_price, shares, spot_price FROM trades WHERE ticker = ? AND exit_status = 'ACTIVE'", (ticker,)).fetchone()
         
-        # Fetch active trade details to calculate realized PnL
-        row = conn.execute("SELECT spot_price, stop_loss FROM trades WHERE ticker = ? AND exit_status = 'ACTIVE'", (ticker,)).fetchone()
-        net_pnl = 0.0
         if row:
-            entry = float(row[0]) if row[0] else basis
-            sl = float(row[1]) if row[1] else entry * 0.98
-            risk_dist = max(abs(entry - sl), 0.20)
-            shares = min(85.0 / risk_dist, 500.0)
+            entry = float(row[0]) if row[0] is not None else float(row[2])
+            shares = float(row[1]) if row[1] is not None else 1.0
+            
+            quote = get_live_quote(ticker)
+            exit_price = float(quote.get('last', entry)) if quote.get('last') else entry
+            
+            # Pure execution PnL calculation directly from DB entry & shares
             net_pnl = round((exit_price - entry) * shares, 2)
 
-        conn.execute("""
-            UPDATE trades 
-            SET exit_price = ?, exit_status = 'MANUAL_CLOSE', net_pnl = ?
-            WHERE ticker = ? AND exit_status = 'ACTIVE'
-        """, (exit_price, net_pnl, ticker))
-        conn.commit()
+            conn.execute("""
+                UPDATE trades 
+                SET exit_price = ?, exit_status = 'MANUAL_CLOSE', net_pnl = ?
+                WHERE ticker = ? AND exit_status = 'ACTIVE'
+            """, (exit_price, net_pnl, ticker))
+            conn.commit()
         conn.close()
     except Exception as e:
         print(f"[!] Close Position Error ({ticker}): {e}")
@@ -309,15 +296,16 @@ async def close_position_action(ticker: str):
 async def close_all_positions_action():
     try:
         conn = get_db_connection()
-        active_rows = conn.execute("SELECT ticker, spot_price, stop_loss FROM trades WHERE exit_status = 'ACTIVE'").fetchall()
+        active_rows = conn.execute("SELECT ticker, entry_price, shares, spot_price FROM trades WHERE exit_status = 'ACTIVE'").fetchall()
         
         for row in active_rows:
-            ticker, entry, sl = row[0], float(row[1]) if row[1] else 100.0, float(row[2]) if row[2] else 98.0
+            ticker = row[0]
+            entry = float(row[1]) if row[1] is not None else float(row[3])
+            shares = float(row[2]) if row[2] is not None else 1.0
+            
             quote = get_live_quote(ticker)
             exit_price = float(quote.get('last', entry)) if quote.get('last') else entry
             
-            risk_dist = max(abs(entry - sl), 0.20)
-            shares = min(85.0 / risk_dist, 500.0)
             net_pnl = round((exit_price - entry) * shares, 2)
 
             conn.execute("""
