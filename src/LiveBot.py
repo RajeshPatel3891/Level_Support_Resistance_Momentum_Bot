@@ -46,9 +46,10 @@ def validate_extrinsic_floor(ticker, option_price, spot_price, strike, side="CAL
             itm_strike = spot_price * 1.03  # 3% In-The-Money for PUT
             
         print(f"[🛡️ ITM SHIFT RE-ROUTE] Shifting {ticker} strike from ${strike:.2f} -> ITM Strike ~${itm_strike:.2f} (Delta ~0.70) to preserve intrinsic value.")
-        return False, itm_strike
+        note = f"[ITM_SHIFT] Premium < $0.20 floor. Re-routed {strike} -> {itm_strike}"
+        return False, itm_strike, note
         
-    return True, strike
+    return True, strike, "STANDARD_PREMIUM"
 
 import os
 import requests
