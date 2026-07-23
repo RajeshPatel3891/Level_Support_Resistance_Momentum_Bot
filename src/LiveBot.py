@@ -1,3 +1,55 @@
+
+# =====================================================================
+# THETA DECAY & 0DTE INTRADAY ROLLOVER PROTECTION ENGINE
+# =====================================================================
+import datetime
+import pytz
+
+def get_target_expiration_date():
+    """
+    Enforces the 1:30 PM EST Cutoff:
+    - Before 1:30 PM EST -> Returns today's date (0DTE)
+    - After 1:30 PM EST  -> Returns tomorrow's date (1DTE)
+    """
+    tz = pytz.timezone('US/Eastern')
+    now_et = datetime.now(tz)
+    cutoff = now_et.replace(hour=13, minute=30, second=0, microsecond=0)
+    
+    if now_et >= cutoff:
+        # Roll over to next business day
+        target_date = now_et + timedelta(days=1)
+        if target_date.weekday() == 5:  # Saturday -> Monday
+            target_date += timedelta(days=2)
+        elif target_date.weekday() == 6:  # Sunday -> Monday
+            target_date += timedelta(days=1)
+        print(f"[🕒 ROLLOVER ENGINE] After 1:30 PM EST ({now_et.strftime('%H:%M EST')}). Bypassing 0DTE -> Target Expiration: {target_date.strftime('%Y-%m-%d')} (1DTE)")
+        return target_date.strftime('%Y-%m-%d')
+    else:
+        print(f"[🕒 ROLLOVER ENGINE] Before 1:30 PM EST ({now_et.strftime('%H:%M EST')}). Standard 0DTE Target Expiration: {now_et.strftime('%Y-%m-%d')}")
+        return now_et.strftime('%Y-%m-%d')
+
+def validate_extrinsic_floor(ticker, option_price, spot_price, strike, side="CALL"):
+    """
+    Low-Nominal ($10-$20) Extrinsic Floor Filter:
+    Rejects OTM contracts under $0.20 premium and forces ITM delta selection.
+    """
+    LOW_NOMINAL_TICKERS = {"F", "SOFI", "AAL", "RIVN"}
+    MIN_PREMIUM_FLOOR = 0.20
+    
+    if ticker in LOW_NOMINAL_TICKERS and option_price < MIN_PREMIUM_FLOOR:
+        print(f"[⚠️ THETA FLOOR BREACH] {ticker} option premium (${option_price:.2f}) is below ${MIN_PREMIUM_FLOOR:.2f} floor!")
+        
+        # Calculate In-The-Money (ITM) Strike Shift
+        if side.upper() == "CALL":
+            itm_strike = spot_price * 0.97  # 3% In-The-Money
+        else:
+            itm_strike = spot_price * 1.03  # 3% In-The-Money for PUT
+            
+        print(f"[🛡️ ITM SHIFT RE-ROUTE] Shifting {ticker} strike from ${strike:.2f} -> ITM Strike ~${itm_strike:.2f} (Delta ~0.70) to preserve intrinsic value.")
+        return False, itm_strike
+        
+    return True, strike
+
 import os
 import requests
 import queue
@@ -11,7 +63,7 @@ import signal
 import pytz
 import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 def dispatch_discord_alert(symbol, basis, action="ENTRY"):
