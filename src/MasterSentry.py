@@ -23,12 +23,23 @@ MACRO_STATE_FILE = os.path.join(PARENT_DIR, 'macro_state.json')
 LEVELS_FILE = os.path.join(PARENT_DIR, 'trading_levels.json')
 DB_FILE = os.path.join(PARENT_DIR, 'harm_telemetry.db')
 
+# Import Gemini CSO Evaluator
+try:
+    from src.gemini_cso_evaluator import evaluate_macro_rebound
+except ImportError:
+    try:
+        from gemini_cso_evaluator import evaluate_macro_rebound
+    except ImportError:
+        evaluate_macro_rebound = None
+
 class MicroScalpSidekick:
     def __init__(self):
         self.active_windows = {} 
         self.levels_cache = {}
         self.last_levels_mtime = 0
         self.active_positions = {}
+        self.cso_cooldowns = {}  # Suppresses repeat Gemini API calls (ticker: timestamp)
+
         try:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
@@ -38,8 +49,9 @@ class MicroScalpSidekick:
             conn.close()
         except Exception as e:
             print(f"[!] Recovery Error: {e}")
+
         self.load_tactical_levels()
-        print("[✓] HARM.AI Sidekick Engine: Production-Grade Orchestrator Loaded with CSO Context.")
+        print("[✓] HARM.AI Sidekick Engine: Production-Grade Orchestrator Loaded with Dual-Stage CSO Context.")
 
     def load_tactical_levels(self):
         try:
@@ -124,7 +136,7 @@ class MicroScalpSidekick:
             print(f"[!] Critical SQL Write Error: {e}")
 
     def audit_active_positions(self):
-        """Monitors live active positions and enforces stop loss / take profit rules."""
+        """Monitors live active positions with Dual-Stage ATR + Gemini CSO risk rules."""
         if not os.path.exists(DB_FILE):
             return
         try:
@@ -143,32 +155,93 @@ class MicroScalpSidekick:
             from dashboard_server import get_live_quote
 
             for row in rows:
-                ticker, entry_price, stop_loss, take_profit, timestamp = row[0], row[1], row[2], row[3], row[4]
+                ticker = row[0]
+                entry_price = float(row[1]) if row[1] else 0.0
+                stop_loss = row[2]
+                take_profit = row[3]
+
                 quote = get_live_quote(ticker)
                 if not quote or 'last' not in quote or not quote['last']:
                     continue
 
                 live_spot = float(quote['last'])
-                entry_spot = float(entry_price) if entry_price else live_spot
+                if entry_price == 0.0:
+                    entry_price = live_spot
 
-                # Delta Options PnL calculation (1 contract = 100 shares, Delta = 0.50)
+                # Option pricing estimation (Delta = 0.50, 1 contract = $100 per $1 spot move)
                 delta = 0.50
-                spot_diff = live_spot - entry_spot
-                option_pnl = spot_diff * delta * 100
+                spot_diff = live_spot - entry_price
+                option_pnl = spot_diff * delta * 100.0
 
-                # 1. HARD $30 DOLLAR LOSS CAP
-                if option_pnl <= -30.00:
-                    print(f"[🚨 EMERGENCY STOP] {ticker}: Option loss hit ${option_pnl:.2f} (Breached -$30 Limit). Auto-Closing!")
+                # Estimated Contract Basis ($250 per contract baseline if unavailable)
+                estimated_basis = max(100.0, entry_price * 0.50 * 100.0)
+                pnl_pct = option_pnl / estimated_basis
+
+                # Dynamic ATR Loss Threshold Calculation
+                ticker_data = self.levels_cache.get(ticker, {}) if isinstance(self.levels_cache.get(ticker), dict) else {}
+                atr_14 = float(ticker_data.get("atr", live_spot * 0.035))  # Default to 3.5% ATR if unlisted
+                atr_pct = atr_14 / live_spot
+                
+                # Scale ATR Hard Stop % (Min 20% for low beta, Max 42% for high beta)
+                max_loss_pct = max(0.20, min(0.42, atr_pct * 10.0))
+                hard_stop_dollars = -1.0 * (estimated_basis * max_loss_pct)
+
+                # STAGE 1: DYNAMIC ATR HARD STOP BREACHED
+                if option_pnl <= hard_stop_dollars:
+                    print(f"[🚨 EMERGENCY ATR HARD STOP] {ticker}: Option loss ${option_pnl:.2f} reached ATR limit ${hard_stop_dollars:.2f} ({pnl_pct*100:.1f}%). Auto-Closing!")
                     conn_update = sqlite3.connect(DB_FILE)
                     conn_update.execute("""
                         UPDATE trades 
-                        SET exit_status = 'STOP_LOSS_DOLLAR_CAP', exit_price = ?, net_pnl = ? 
+                        SET exit_status = 'STOP_LOSS_ATR_HARD_CAP', exit_price = ?, net_pnl = ? 
                         WHERE ticker = ? AND exit_status = 'ACTIVE'
-                    """, (live_spot, -30.00, ticker))
+                    """, (live_spot, option_pnl, ticker))
                     conn_update.commit()
                     conn_update.close()
+                    continue
 
-                # 2. TECHNICAL STOCK SPOT STOP LOSS
+                # STAGE 2: SOFT STOP (-20%) -> GEMINI CSO EVALUATION
+                elif pnl_pct <= -0.20 and evaluate_macro_rebound is not None:
+                    now_ts = time.time()
+                    last_cso_call = self.cso_cooldowns.get(ticker, 0)
+
+                    # 3-Minute Cooldown window per ticker
+                    if now_ts - last_cso_call > 180:
+                        self.cso_cooldowns[ticker] = now_ts
+                        print(f"[🧠 CSO ESCALATION] {ticker} hit -20% soft stop ({pnl_pct*100:.1f}%). Requesting Gemini CSO Evaluation...")
+
+                        override, regime, catalyst, directive, market_bias, asset_biases, risk_score = self.get_macro_safety_state()
+                        
+                        telemetry_payload = {
+                            "ticker": ticker,
+                            "entry_premium": estimated_basis / 100.0,
+                            "current_premium": (estimated_basis + option_pnl) / 100.0,
+                            "drawdown_pct": pnl_pct * 100.0,
+                            "spot_price": live_spot,
+                            "vwap": float(ticker_data.get("vwap", live_spot)),
+                            "support_zone": str(ticker_data.get("support_a", "N/A")),
+                            "resistance_zone": str(ticker_data.get("resistance_a", "N/A")),
+                            "market_trend": f"Regime: {regime} | Market Bias: {market_bias}"
+                        }
+
+                        cso_verdict = evaluate_macro_rebound(telemetry_payload)
+                        verdict = cso_verdict.get("verdict", "HOLD_REBOUND")
+                        reasoning = cso_verdict.get("reasoning", "No reasoning provided.")
+
+                        if verdict == "CUT_EARLY":
+                            print(f"[🛑 CSO MACRO CUT] {ticker}: Gemini CSO advised CUT_EARLY. Rationale: {reasoning}")
+                            conn_update = sqlite3.connect(DB_FILE)
+                            conn_update.execute("""
+                                UPDATE trades 
+                                SET exit_status = 'CSO_MACRO_CUT', exit_price = ?, net_pnl = ? 
+                                WHERE ticker = ? AND exit_status = 'ACTIVE'
+                            """, (live_spot, option_pnl, ticker))
+                            conn_update.commit()
+                            conn_update.close()
+                            continue
+                        else:
+                            print(f"[🟢 CSO HOLD REBOUND] {ticker}: Gemini CSO advised HOLD_REBOUND. Rationale: {reasoning}")
+
+                # STAGE 3: TECHNICAL SPOT STOP LOSS
                 elif stop_loss and live_spot <= float(stop_loss):
                     print(f"[⚠️ TECHNICAL STOP] {ticker}: Spot ${live_spot:.2f} hit SL level ${stop_loss}. Auto-Closing!")
                     conn_update = sqlite3.connect(DB_FILE)
@@ -176,7 +249,7 @@ class MicroScalpSidekick:
                         UPDATE trades 
                         SET exit_status = 'STOP_LOSS_HIT', exit_price = ?, net_pnl = ? 
                         WHERE ticker = ? AND exit_status = 'ACTIVE'
-                    """, (live_spot, -30.00, ticker))
+                    """, (live_spot, option_pnl, ticker))
                     conn_update.commit()
                     conn_update.close()
 
@@ -194,7 +267,7 @@ if __name__ == "__main__":
 
     print("=" * 65)
     print("[⚙️] MASTERSENTRY ACTIVE RISK MONITOR INITIALIZED")
-    print("Target Session: Pure Tradier Stream & Execution Engine")
+    print("Target Session: Pure Tradier Stream & Gemini CSO Risk Engine")
     print("=" * 65)
 
     sidekick = MicroScalpSidekick()
