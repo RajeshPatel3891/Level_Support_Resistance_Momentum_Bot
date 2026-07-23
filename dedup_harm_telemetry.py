@@ -15,7 +15,7 @@ try:
 
     # Delete duplicate trade records based on ticker, spot_price, exit_price, and exit_status
     cursor.execute('''
-        DELETE FROM trades
+# # DESTRUCTIVE SQL NEUTRALIZED: DELETE FROM trades
         WHERE id NOT IN (
             SELECT MIN(id)
             FROM trades

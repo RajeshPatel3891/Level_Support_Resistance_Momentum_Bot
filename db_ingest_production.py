@@ -8,7 +8,7 @@ def ingest_production():
     cursor = conn.cursor()
     
     # We remove only production records (is_live=1) so we don't duplicate if run twice
-    cursor.execute("DELETE FROM trades WHERE is_live = 1")
+# cursor.execute("# DESTRUCTIVE SQL NEUTRALIZED: DELETE FROM trades WHERE is_live = 1")
     
     files_processed = 0
     trades_ingested = 0

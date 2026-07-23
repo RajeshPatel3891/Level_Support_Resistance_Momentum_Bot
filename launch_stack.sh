@@ -1,4 +1,20 @@
 #!/bin/bash
+
+# --- AUTOMATIC DB BACKUP SNAPSHOT ---
+mkdir -p backups
+if [ -f harm_telemetry.db ]; then
+    BACKUP_NAME="backups/harm_telemetry_$(date +%Y%m%d_%H%M%S).db"
+    cp harm_telemetry.db "$BACKUP_NAME"
+    echo "[🛡️ DB PROTECT] Snapshot saved to $BACKUP_NAME"
+fi
+
+# --- AUTOMATIC PORT & PROCESS CLEANUP ---
+echo "[*] Cleaning up orphaned dashboard/uvicorn processes and old tmux sessions..."
+pkill -f dashboard_server.py 2>/dev/null
+pkill -f uvicorn 2>/dev/null
+tmux kill-session -t harm_live_stack 2>/dev/null
+sleep 1
+
 SESSION="harm_live_stack"
 
 # Kill existing session completely

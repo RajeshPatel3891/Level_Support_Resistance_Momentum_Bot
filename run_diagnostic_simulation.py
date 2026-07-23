@@ -203,7 +203,7 @@ class HarmonizedAnalyticsEngine:
                 is_live INTEGER DEFAULT 1
             )
         """)
-        cursor.execute("DELETE FROM trades WHERE is_live = 0")
+# cursor.execute("# DESTRUCTIVE SQL NEUTRALIZED: DELETE FROM trades WHERE is_live = 0")
         conn.commit()
         conn.close()
 

@@ -7,7 +7,7 @@ conn = sqlite3.connect(DB_FILE)
 cursor = conn.cursor()
 
 # 1. Clear previous attempts
-cursor.execute("DELETE FROM trades WHERE is_live = 0")
+# cursor.execute("# DESTRUCTIVE SQL NEUTRALIZED: DELETE FROM trades WHERE is_live = 0")
 conn.commit()
 
 for filepath in glob.glob("*_audit.csv"):

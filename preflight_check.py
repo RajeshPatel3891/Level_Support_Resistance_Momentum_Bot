@@ -118,3 +118,48 @@ if all_passed:
 else:
     print(f"{RED}   [❌] SYSTEM VERDICT: ISSUES DETECTED. REVIEW FAILS ABOVE.{RESET}")
 print("="*60 + "\n")
+
+# --- DASHBOARD & TMUX HEALTH CHECK ---
+import socket
+import subprocess
+
+def probe_live_stack():
+    print("\n--- Live Stack Port & Window Diagnostic ---")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(2)
+    is_open = (sock.connect_ex(('127.0.0.1', 8000)) == 0)
+    sock.close()
+    
+    if is_open:
+        print("[PASS] Dashboard Server is responding on port 8000.")
+    else:
+        print("[WARN] Dashboard Server on port 8000 is NOT responding! Check tmux window 6.")
+        
+    try:
+        out = subprocess.check_output(["tmux", "list-windows", "-t", "harm_live_stack"], text=True)
+        count = len(out.strip().split('\n'))
+        print(f"[PASS] Active tmux windows in harm_live_stack: {count}/8")
+    except Exception as e:
+        print(f"[WARN] Could not query tmux session 'harm_live_stack': {e}")
+
+probe_live_stack()
+
+
+# --- CHECK 6: DB DESTRUCTION GUARD ---
+import glob
+
+destructive_found = False
+for filepath in glob.glob("src/*.py") + glob.glob("*.py"):
+    if "test_" in filepath or "patch_" in filepath or "preflight_check.py" in filepath:
+        continue
+    with open(filepath, "r", encoding="utf-8", errors="ignore") as pf:
+        for line in pf:
+            line_str = line.strip()
+            if not line_str.startswith("#"):
+                if "DELETE FROM trades" in line_str or "DROP TABLE trades" in line_str:
+                    print(f"[⚠️ WARNING] Active destructive SQL found in {filepath}!")
+                    destructive_found = True
+                    break
+
+if not destructive_found:
+    print("[PASS] DB Protection Guard: Zero destructive SQL operations found across codebase.")

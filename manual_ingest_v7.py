@@ -5,7 +5,7 @@ import glob
 def ingest():
     conn = sqlite3.connect("harm_telemetry.db")
     cursor = conn.cursor()
-    cursor.execute("DELETE FROM trades") 
+# cursor.execute("# DESTRUCTIVE SQL NEUTRALIZED: DELETE FROM trades") 
     
     for filepath in glob.glob("*_audit.csv"):
         ticker = filepath.split('_')[0]

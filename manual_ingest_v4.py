@@ -32,7 +32,7 @@ cursor.execute("""
 conn.commit()
 
 # 2. Clear old historical data (is_live=0)
-cursor.execute("DELETE FROM trades WHERE is_live = 0")
+# cursor.execute("# DESTRUCTIVE SQL NEUTRALIZED: DELETE FROM trades WHERE is_live = 0")
 conn.commit()
 
 for filepath in glob.glob("*_audit.csv"):
