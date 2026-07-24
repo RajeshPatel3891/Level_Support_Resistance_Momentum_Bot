@@ -1,6 +1,6 @@
 {
   "AAPL": {
-    "last_price": 332.65,
+    "last_price": 332.55,
     "support": [
       330.0,
       331.5
@@ -17,7 +17,7 @@
     "resistance_b": 335.0
   },
   "TSLA": {
-    "last_price": 308.65,
+    "last_price": 310.19,
     "support": [
       300.0,
       305.0
@@ -28,13 +28,13 @@
     ],
     "support_a": 300.0,
     "resistance_a": 310.0,
-    "execution_armed": false,
-    "status": "WAITING",
+    "execution_armed": true,
+    "status": "ARMED",
     "support_b": 305.0,
     "resistance_b": 315.0
   },
   "NVDA": {
-    "last_price": 209.315,
+    "last_price": 205.64708,
     "support": [
       205.0,
       208.0
@@ -45,13 +45,13 @@
     ],
     "support_a": 205.0,
     "resistance_a": 212.0,
-    "execution_armed": false,
-    "status": "WAITING",
+    "execution_armed": true,
+    "status": "ARMED",
     "support_b": 208.0,
     "resistance_b": 215.0
   },
   "PLTR": {
-    "last_price": 123.69,
+    "last_price": 123.15,
     "support": [
       120.0,
       122.0
@@ -68,7 +68,7 @@
     "resistance_b": 128.0
   },
   "RIVN": {
-    "last_price": 15.775,
+    "last_price": 15.815,
     "support": [
       15.5,
       15.8
@@ -79,13 +79,13 @@
     ],
     "support_a": 15.5,
     "resistance_a": 16.5,
-    "execution_armed": true,
-    "status": "ARMED",
+    "execution_armed": false,
+    "status": "WAITING",
     "support_b": 15.8,
     "resistance_b": 17.0
   },
   "SOFI": {
-    "last_price": 16.575,
+    "last_price": 16.405,
     "support": [
       16.0,
       16.3
@@ -102,7 +102,7 @@
     "resistance_b": 17.5
   },
   "INTC": {
-    "last_price": 95.19,
+    "last_price": 92.24,
     "support": [
       94.0,
       95.5
@@ -113,13 +113,13 @@
     ],
     "support_a": 94.0,
     "resistance_a": 97.0,
-    "execution_armed": true,
-    "status": "ARMED",
+    "execution_armed": false,
+    "status": "WAITING",
     "support_b": 95.5,
     "resistance_b": 99.0
   },
   "AAL": {
-    "last_price": 14.375,
+    "last_price": 14.2868,
     "support": [
       14.0,
       14.2
@@ -136,7 +136,7 @@
     "resistance_b": 15.2
   },
   "F": {
-    "last_price": 14.34,
+    "last_price": 14.3299,
     "support": [
       14.0,
       14.1
