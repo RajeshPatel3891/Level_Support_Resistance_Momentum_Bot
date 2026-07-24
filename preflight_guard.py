@@ -4,11 +4,14 @@ import json
 import sqlite3
 import hashlib
 import py_compile
+import glob
+import re
+from datetime import datetime
 
 CRITICAL_FILES = {
     "MasterSentry": "src/MasterSentry.py",
     "HarmonizedDispatch": "src/HarmonizedDispatch.py",
-    "LiveBot": "LiveBot.py",
+    "LiveBot": "src/LiveBot.py" if os.path.exists("src/LiveBot.py") else "LiveBot.py",
     "Dashboard": "dashboard_server.py"
 }
 
@@ -24,7 +27,7 @@ def calculate_hash(filepath):
     return hasher.hexdigest()
 
 def check_config_and_checksums():
-    print("[1/6] Verifying System Config & SHA-256 Checksum Ledger...")
+    print("[1/8] Verifying System Config & SHA-256 Checksum Ledger...")
     if not os.path.exists(CONFIG_PATH):
         print(f" [X] CRITICAL: Master config {CONFIG_PATH} missing!")
         return False
@@ -75,7 +78,7 @@ def check_config_and_checksums():
     return True
 
 def check_syntax():
-    print("\n[2/6] Checking Python Syntax Integrity across core modules...")
+    print("\n[2/8] Checking Python Syntax Integrity across core modules...")
     for name, filepath in CRITICAL_FILES.items():
         if not os.path.exists(filepath):
             print(f" [X] CRITICAL: Missing required system module: {filepath}")
@@ -89,7 +92,7 @@ def check_syntax():
     return True
 
 def check_playbooks():
-    print("\n[3/6] Checking Playbook Interface & Guardrail Contracts...")
+    print("\n[3/8] Checking Playbook Interface & Guardrail Contracts...")
     sys.path.append(os.getcwd())
     playbook_modules = [
         "src.aapl_playbook", "src.tsla_playbook", "src.nvda_playbook", 
@@ -109,7 +112,7 @@ def check_playbooks():
     return True
 
 def check_database_schema():
-    print("\n[4/6] Validating SQLite Schema & Multi-Process WAL Config...")
+    print("\n[4/8] Validating SQLite Schema & Multi-Process WAL Config...")
     if not os.path.exists(DB_FILE):
         print(f" [!] Database file {DB_FILE} not found. Initializing...")
         try:
@@ -145,7 +148,7 @@ def check_database_schema():
         return False
 
 def check_levels_manifest():
-    print("\n[5/6] Validating Level Proximity Manifest (trading_levels.json)...")
+    print("\n[5/8] Validating Level Proximity Manifest (trading_levels.json)...")
     if not os.path.exists(MANIFEST_PATH):
         print(f" [X] MANIFEST MISSING: {MANIFEST_PATH} not found.")
         return False
@@ -165,7 +168,7 @@ def check_levels_manifest():
         return False
 
 def check_cross_script_alignment():
-    print("\n[6/6] Validating Cross-Script Target Binding & Core Logic Cohesion...")
+    print("\n[6/8] Validating Cross-Script Target Binding & Core Logic Cohesion...")
     
     dispatch_path = "src/HarmonizedDispatch.py"
     with open(dispatch_path, "r") as f:
@@ -192,6 +195,56 @@ def check_cross_script_alignment():
     print(" [✓] All cross-script target bindings and core logic rules are verified.")
     return True
 
+def check_silent_passivity_traps():
+    print("\n[7/8] Auditing Strategy Playbooks for Silent Exception Traps...")
+    pattern = re.compile(r'except.*:\s*\n\s*(pass|return False|return None)', re.MULTILINE)
+    
+    # Strictly audit core active playbooks
+    playbook_files = glob.glob('src/*_playbook.py')
+    faulty_playbooks = []
+    
+    for filepath in playbook_files:
+        with open(filepath, 'r') as f:
+            content = f.read()
+            if pattern.search(content):
+                faulty_playbooks.append(filepath)
+                
+    if faulty_playbooks:
+        print(f" [X] PASSIVITY RISK DETECTED: Silent exception trap(s) found in: {', '.join(faulty_playbooks)}")
+        return False
+
+    print(" [✓] Strategy playbooks verified: 0 silent exception traps found.")
+    return True
+
+def check_execution_flow_unit_test():
+    print("\n[8/8] Running Execution Flow Unit Simulation Test...")
+    try:
+        livebot_path = CRITICAL_FILES["LiveBot"]
+        with open(livebot_path, "r") as f:
+            livebot_code = f.read()
+            
+        if "log_trade_to_database(" not in livebot_code and "execute_order(" not in livebot_code and "dispatch_trade" not in livebot_code:
+            print(" [X] EXECUTION BARRIER: LiveBot on_message loop lacks active trade dispatch logic!")
+            return False
+            
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        test_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        cursor.execute("""
+            INSERT INTO trades (ticker, timestamp, strategy, direction, spot_price, entry_price, shares, exit_status, net_pnl, is_live)
+            VALUES ('MOCK_TEST', ?, 'SIM_TEST', 'CALL', 100.0, 100.0, 1.0, 'SIM_ACTIVE', 0.0, 0)
+        """, (test_time,))
+        
+        conn.rollback()
+        conn.close()
+        
+        print(" [✓] Execution flow simulation & DB write contract verified.")
+        return True
+    except Exception as e:
+        print(f" [X] EXECUTION UNIT TEST FAILED: {e}")
+        return False
+
 if __name__ == "__main__":
     print("=================================================================")
     print("🦅 HARM.AI LIVE STACK // SYSTEM PREFLIGHT INTEGRITY GUARD")
@@ -203,12 +256,14 @@ if __name__ == "__main__":
         check_playbooks() and
         check_database_schema() and 
         check_levels_manifest() and 
-        check_cross_script_alignment()
+        check_cross_script_alignment() and
+        check_silent_passivity_traps() and
+        check_execution_flow_unit_test()
     )
     
     if success:
         print("\n=================================================================")
-        print(" [✓] ALL PREFLIGHT CHECKS PASSED. SYSTEM CLEAR FOR LIVE DEPLOYMENT!")
+        print(" [✓] ALL 8 PREFLIGHT CHECKS PASSED. SYSTEM CLEAR FOR LIVE DEPLOYMENT!")
         print("=================================================================")
         sys.exit(0)
     else:

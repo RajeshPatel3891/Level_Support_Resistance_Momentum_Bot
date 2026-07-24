@@ -1,182 +1,155 @@
 {
-  "TSLA": {
-    "support": [
-      384.1,
-      385.9
-    ],
-    "resistance": [
-      400.1,
-      401.9
-    ],
-    "vwap": 383.1,
-    "spot": 316.27,
-    "velocity_lockout": true,
-    "last_price": 311.36,
-    "support_a": 384.1,
-    "support_b": 385.9,
-    "resistance_a": 400.1,
-    "resistance_b": 401.9,
-    "execution_armed": false,
-    "status": "WAITING"
-  },
   "AAPL": {
+    "last_price": 332.65,
     "support": [
-      323.1,
-      324.9
+      330.0,
+      331.5
     ],
     "resistance": [
-      332.1,
-      333.9
+      333.0,
+      335.0
     ],
-    "vwap": 331.2,
-    "spot": 321.02,
-    "velocity_lockout": false,
-    "last_price": 332.73,
-    "support_a": 323.1,
-    "support_b": 324.9,
-    "resistance_a": 332.1,
-    "resistance_b": 333.9,
-    "execution_armed": true,
-    "status": "ARMED"
-  },
-  "PLTR": {
-    "support": [
-      128.75,
-      133.25
-    ],
-    "resistance": [
-      135.25,
-      136.75
-    ],
-    "vwap": 131.8,
-    "spot": 122.14,
-    "velocity_lockout": false,
-    "last_price": 123.69,
-    "support_a": 128.75,
-    "support_b": 133.25,
-    "resistance_a": 135.25,
-    "resistance_b": 136.75,
+    "support_a": 330.0,
+    "resistance_a": 333.0,
     "execution_armed": false,
-    "status": "WAITING"
+    "status": "WAITING",
+    "support_b": 331.5,
+    "resistance_b": 335.0
+  },
+  "TSLA": {
+    "last_price": 308.65,
+    "support": [
+      300.0,
+      305.0
+    ],
+    "resistance": [
+      310.0,
+      315.0
+    ],
+    "support_a": 300.0,
+    "resistance_a": 310.0,
+    "execution_armed": false,
+    "status": "WAITING",
+    "support_b": 305.0,
+    "resistance_b": 315.0
   },
   "NVDA": {
+    "last_price": 209.315,
     "support": [
-      205.1,
-      206.9
+      205.0,
+      208.0
     ],
     "resistance": [
-      214.1,
-      215.9
+      212.0,
+      215.0
     ],
-    "vwap": 204.5,
-    "spot": 207.0,
-    "velocity_lockout": false,
-    "last_price": 211.255,
-    "support_a": 205.1,
-    "support_b": 206.9,
-    "resistance_a": 214.1,
-    "resistance_b": 215.9,
+    "support_a": 205.0,
+    "resistance_a": 212.0,
     "execution_armed": false,
-    "status": "WAITING"
+    "status": "WAITING",
+    "support_b": 208.0,
+    "resistance_b": 215.0
+  },
+  "PLTR": {
+    "last_price": 123.69,
+    "support": [
+      120.0,
+      122.0
+    ],
+    "resistance": [
+      125.0,
+      128.0
+    ],
+    "support_a": 120.0,
+    "resistance_a": 125.0,
+    "execution_armed": false,
+    "status": "WAITING",
+    "support_b": 122.0,
+    "resistance_b": 128.0
   },
   "RIVN": {
+    "last_price": 15.775,
     "support": [
-      17.11,
-      17.19
+      15.5,
+      15.8
     ],
     "resistance": [
-      18.51,
-      18.59
+      16.5,
+      17.0
     ],
-    "vwap": 17.25,
-    "spot": 16.41,
-    "velocity_lockout": false,
-    "last_price": 16.035,
-    "support_a": 17.11,
-    "support_b": 17.19,
-    "resistance_a": 18.51,
-    "resistance_b": 18.59,
-    "execution_armed": false,
-    "status": "WAITING"
+    "support_a": 15.5,
+    "resistance_a": 16.5,
+    "execution_armed": true,
+    "status": "ARMED",
+    "support_b": 15.8,
+    "resistance_b": 17.0
   },
   "SOFI": {
+    "last_price": 16.575,
     "support": [
-      16.2,
-      16.35
+      16.0,
+      16.3
     ],
     "resistance": [
-      17.2,
-      17.4
+      17.0,
+      17.5
     ],
-    "vwap": 16.8,
-    "spot": 16.51,
-    "velocity_lockout": false,
-    "last_price": 16.705,
-    "support_a": 16.2,
-    "support_b": 16.35,
-    "resistance_a": 17.2,
-    "resistance_b": 17.4,
+    "support_a": 16.0,
+    "resistance_a": 17.0,
     "execution_armed": false,
-    "status": "WAITING"
+    "status": "WAITING",
+    "support_b": 16.3,
+    "resistance_b": 17.5
   },
   "INTC": {
+    "last_price": 95.19,
     "support": [
-      33.2,
-      33.5
+      94.0,
+      95.5
     ],
     "resistance": [
-      35.5,
-      35.8
+      97.0,
+      99.0
     ],
-    "vwap": 34.1,
-    "spot": 34.02,
-    "velocity_lockout": false,
-    "last_price": 97.0399,
-    "support_a": 33.2,
-    "support_b": 33.5,
-    "resistance_a": 35.5,
-    "resistance_b": 35.8,
-    "execution_armed": false,
-    "status": "WAITING"
-  },
-  "F": {
-    "support": [
-      11.9,
-      12.05
-    ],
-    "resistance": [
-      12.8,
-      12.95
-    ],
-    "vwap": 12.3,
-    "spot": 12.25,
-    "velocity_lockout": false,
-    "last_price": 14.4491,
-    "support_a": 11.9,
-    "support_b": 12.05,
-    "resistance_a": 12.8,
-    "resistance_b": 12.95,
-    "execution_armed": false,
-    "status": "WAITING"
+    "support_a": 94.0,
+    "resistance_a": 97.0,
+    "execution_armed": true,
+    "status": "ARMED",
+    "support_b": 95.5,
+    "resistance_b": 99.0
   },
   "AAL": {
+    "last_price": 14.375,
     "support": [
-      11.4,
-      11.55
+      14.0,
+      14.2
     ],
     "resistance": [
-      12.5,
-      12.65
+      14.8,
+      15.2
     ],
-    "vwap": 12.0,
-    "spot": 11.95,
-    "velocity_lockout": false,
-    "last_price": 14.485,
-    "support_a": 11.4,
-    "support_b": 11.55,
-    "resistance_a": 12.5,
-    "resistance_b": 12.65,
+    "support_a": 14.0,
+    "resistance_a": 14.8,
     "execution_armed": false,
-    "status": "WAITING"
+    "status": "WAITING",
+    "support_b": 14.2,
+    "resistance_b": 15.2
+  },
+  "F": {
+    "last_price": 14.34,
+    "support": [
+      14.0,
+      14.1
+    ],
+    "resistance": [
+      14.6,
+      15.0
+    ],
+    "support_a": 14.0,
+    "resistance_a": 14.6,
+    "execution_armed": false,
+    "status": "WAITING",
+    "support_b": 14.1,
+    "resistance_b": 15.0
   }
 }

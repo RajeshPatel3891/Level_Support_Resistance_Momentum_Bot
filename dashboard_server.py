@@ -1,13 +1,21 @@
+import sys
 import sqlite3
 import os
 import requests
 import traceback
+import json
 import pandas as pd
 from datetime import datetime, date
 from fastapi import FastAPI, Request, Query, Form
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse, RedirectResponse
 from jinja2 import Template
 from dotenv import load_dotenv
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.append(CURRENT_DIR)
+
+from src.GexReader import get_latest_gex_context
 
 load_dotenv()
 
@@ -33,12 +41,12 @@ INDEX_HTML_TEMPLATE = """
         <div class="flex items-center space-x-2">
             <form action="/" method="GET" class="flex items-center">
                 <input type="date" name="selected_date" value="{{ selected_date }}" 
-                       onchange="this.form.submit()" 
-                       class="bg-gray-800 text-xs text-white px-2 py-1 rounded border border-gray-700 focus:outline-none">
+                      onchange="this.form.submit()" 
+                      class="bg-gray-800 text-xs text-white px-2 py-1 rounded border border-gray-700 focus:outline-none">
             </form>
             <a href="/export/trades?selected_date={{ selected_date }}" 
-               class="bg-green-600 hover:bg-green-500 text-white text-xs px-2 py-1 rounded font-bold">
-               CSV
+              class="bg-green-600 hover:bg-green-500 text-white text-xs px-2 py-1 rounded font-bold">
+              CSV
             </a>
             {% if trades %}
             <form action="/close-all" method="POST" onsubmit="return confirm('⚠️ Close ALL active positions immediately?');">
@@ -84,18 +92,24 @@ INDEX_HTML_TEMPLATE = """
 
     <!-- Active Positions -->
     <div class="flex items-center justify-between mb-3">
-        <h2 class="text-xs font-bold text-gray-400 uppercase tracking-wider">ACTIVE POSITIONS</h2>
+        <h2 class="text-xs font-bold text-gray-400 uppercase tracking-wider">ACTIVE POSITIONS & GEX EXIT TARGETS</h2>
     </div>
     
     <div class="space-y-3 mb-6">
         {% for trade in trades %}
-        <div class="bg-gray-900/60 p-3 rounded-xl border border-gray-800 flex justify-between items-center">
+        <div class="bg-gray-900/60 p-3 rounded-xl border {% if trade.near_target %}border-emerald-500 shadow-lg shadow-emerald-950/50{% else %}border-gray-800{% endif %} flex justify-between items-center">
             <div>
                 <div class="flex items-center space-x-2">
                     <span class="font-black text-sm">{{ trade.ticker }}</span>
                     <span class="text-[10px] bg-gray-800 text-gray-300 px-1.5 py-0.5 rounded uppercase">{{ trade.status }}</span>
+                    {% if trade.near_target %}
+                    <span class="text-[9px] bg-emerald-950 text-emerald-400 border border-emerald-800 px-1.5 py-0.5 rounded font-bold animate-pulse">⚡ NEAR GEX TARGET</span>
+                    {% endif %}
                 </div>
                 <div class="text-xs text-gray-400 mt-1">Live: <b class="text-gray-200">{{ trade.price }}</b> | Cost: <b class="text-gray-200">{{ trade.basis }}</b></div>
+                <div class="text-[11px] text-purple-400 mt-1">
+                    GEX Target: <strong class="text-purple-300">{{ trade.gex_target_str }}</strong> (Dist: {{ trade.gex_dist }})
+                </div>
             </div>
             <div class="text-right flex items-center space-x-3">
                 <div>
@@ -191,10 +205,13 @@ def get_db_connection():
     return conn
 
 def get_live_quote(symbol):
-    token = os.getenv("TRADIER_SANDBOX_TOKEN")
+    token = os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN")
     headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
+    base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
+    if "sandbox" in base_url.lower():
+        base_url = "https://sandbox.tradier.com/v1"
     try:
-        r = requests.get(f"https://sandbox.tradier.com/v1/markets/quotes?symbols={symbol}", headers=headers)
+        r = requests.get(f"{base_url}/markets/quotes?symbols={symbol}", headers=headers, timeout=3)
         if r.status_code == 200:
             quote = r.json().get('quotes', {}).get('quote', {})
             return quote[0] if isinstance(quote, list) else quote
@@ -238,7 +255,7 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
         total_closed_pnl = float(sum_row[0])
 
     db_active = conn.execute("""
-        SELECT ticker, spot_price, stop_loss, take_profit, exit_status, entry_price, shares
+        SELECT ticker, spot_price, stop_loss, take_profit, exit_status, entry_price, shares, direction
         FROM trades 
         WHERE id IN (SELECT MAX(id) FROM trades GROUP BY ticker)
           AND UPPER(exit_status) = 'ACTIVE'
@@ -257,29 +274,54 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
     deployed_capital = 0.0
 
     for row in db_active:
-        ticker = row[0]
-        entry = float(row[5]) if row[5] is not None else (float(row[1]) if row[1] else 100.0)
-        shares = float(row[6]) if row[6] is not None else 1.0
+        ticker = row['ticker']
+        entry = float(row['entry_price']) if row['entry_price'] is not None else (float(row['spot_price']) if row['spot_price'] else 100.0)
+        shares = float(row['shares']) if row['shares'] is not None else 1.0
+        direction = row['direction'] if 'direction' in row.keys() else 'CALL'
+        stored_spot = float(row['spot_price']) if row['spot_price'] is not None else 100.0
         
         deployed_capital += (entry * shares)
 
         quote = get_live_quote(ticker)
-        last_price = float(quote.get('last', entry)) if quote.get('last') else entry
+        last_price = float(quote.get('last', stored_spot)) if quote.get('last') else stored_spot
         
-        # Options Delta PnL Patch
         delta = 0.50
-        spot_entry = float(row[1]) if (row[1] is not None and float(row[1]) > 0) else last_price
+        spot_entry = stored_spot if stored_spot > 0 else last_price
         spot_diff = last_price - spot_entry if last_price != spot_entry else 0.0
         
-        # Contract value shift per share via Delta (1 contract = 100 shares multiplier)
         dollar_pnl = round(spot_diff * delta * 100 * shares, 2)
         pnl_pct = ((spot_diff * delta) / entry) * 100 if entry > 0 else 0.0
             
         total_pnl += dollar_pnl
+
+        # --- GEX Target Injection with Robust Fallback ---
+        gex_ctx = get_latest_gex_context(ticker)
+        gex_target = None
+        target_label = "GEX REGIME"
+        if gex_ctx:
+            gex_target = (
+                gex_ctx.get('call_wall') or 
+                gex_ctx.get('put_wall') or 
+                gex_ctx.get('gamma_flip') or 
+                gex_ctx.get('underlying_price')
+            )
+            target_label = f"GEX ({gex_ctx.get('gex_label', 'NEUTRAL')})"
+
+        gex_target_str = f"${gex_target:,.2f} [{target_label}]" if gex_target else "Regime Active"
+        gex_dist_val = None
+        near_target = False
+        if gex_target and last_price > 0:
+            diff_pct = ((last_price - gex_target) / last_price) * 100
+            gex_dist_val = f"{diff_pct:+.2f}%"
+            near_target = abs(diff_pct) <= 0.50
+        else:
+            gex_dist_val = "N/A"
+
         active_trades.append({
-            "ticker": ticker, "status": row[4], "price": f"${last_price:.2f}",
+            "ticker": ticker, "status": row['exit_status'], "price": f"${last_price:.2f}",
             "basis": f"${entry:.2f}", "pnl_pct": f"{pnl_pct:+.2f}%",
-            "pnl_class": "text-green-400" if dollar_pnl >= 0 else "text-red-400", "dollar_pnl": f"${dollar_pnl:+.2f}"
+            "pnl_class": "text-green-400" if dollar_pnl >= 0 else "text-red-400", "dollar_pnl": f"${dollar_pnl:+.2f}",
+            "gex_target_str": gex_target_str, "gex_dist": gex_dist_val, "near_target": near_target
         })
             
     for row in db_closed:
@@ -324,26 +366,24 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
 async def close_position_action(ticker: str):
     try:
         conn = get_db_connection()
-        row = conn.execute("SELECT entry_price, shares, spot_price FROM trades WHERE ticker = ? AND exit_status = 'ACTIVE'", (ticker,)).fetchone()
+        row = conn.execute("SELECT entry_price, shares, spot_price FROM trades WHERE ticker = ? AND UPPER(exit_status) = 'ACTIVE'", (ticker.upper(),)).fetchone()
         
         if row:
-            entry = float(row[0]) if row[0] is not None else float(row[2])
-            shares = float(row[1]) if row[1] is not None else 1.0
+            entry = float(row['entry_price']) if row['entry_price'] is not None else float(row['spot_price'])
+            shares = float(row['shares']) if row['shares'] is not None else 1.0
             
             quote = get_live_quote(ticker)
             exit_price = float(quote.get('last', entry)) if quote.get('last') else entry
             
-            # Pure execution PnL calculation directly from DB entry & shares
-            # Options Delta Close PnL Patch
-            spot_entry = float(row[2]) if (len(row) > 2 and row[2] is not None) else entry
+            spot_entry = float(row['spot_price']) if row['spot_price'] is not None else entry
             spot_diff = exit_price - spot_entry
             net_pnl = round(spot_diff * 0.50 * 100 * shares, 2)
 
             conn.execute("""
                 UPDATE trades 
                 SET exit_price = ?, exit_status = 'MANUAL_CLOSE', net_pnl = ?
-                WHERE ticker = ? AND exit_status = 'ACTIVE'
-            """, (exit_price, net_pnl, ticker))
+                WHERE ticker = ? AND UPPER(exit_status) = 'ACTIVE'
+            """, (exit_price, net_pnl, ticker.upper()))
             conn.commit()
         conn.close()
     except Exception as e:
@@ -354,27 +394,26 @@ async def close_position_action(ticker: str):
 async def close_all_positions_action():
     try:
         conn = get_db_connection()
-        active_rows = conn.execute("SELECT ticker, entry_price, shares, spot_price FROM trades WHERE exit_status = 'ACTIVE'").fetchall()
+        active_rows = conn.execute("SELECT ticker, entry_price, shares, spot_price FROM trades WHERE UPPER(exit_status) = 'ACTIVE'").fetchall()
         
         for row in active_rows:
-            ticker = row[0]
-            entry = float(row[1]) if row[1] is not None else float(row[3])
-            shares = float(row[2]) if row[2] is not None else 1.0
+            ticker = row['ticker']
+            entry = float(row['entry_price']) if row['entry_price'] is not None else float(row['spot_price'])
+            shares = float(row['shares']) if row['shares'] is not None else 1.0
             
             quote = get_live_quote(ticker)
             exit_price = float(quote.get('last', entry)) if quote.get('last') else entry
             
-            # Options Delta Close PnL Patch
-            spot_entry = float(row[2]) if (len(row) > 2 and row[2] is not None) else entry
+            spot_entry = float(row['spot_price']) if row['spot_price'] is not None else entry
             spot_diff = exit_price - spot_entry
             net_pnl = round(spot_diff * 0.50 * 100 * shares, 2)
 
             conn.execute("""
                 UPDATE trades 
                 SET exit_price = ?, exit_status = 'MANUAL_CLOSE', net_pnl = ?
-                WHERE ticker = ? AND exit_status = 'ACTIVE'
+                WHERE ticker = ? AND UPPER(exit_status) = 'ACTIVE'
             """, (exit_price, net_pnl, ticker))
-        
+         
         conn.commit()
         conn.close()
     except Exception as e:
@@ -401,11 +440,8 @@ async def export_trades_csv(selected_date: str = Query(default=None)):
         headers={"Content-Disposition": f"attachment; filename={filename}"}
     )
 
-
-
 @app.get('/api/proximity')
 def get_proximity_data():
-    import json
     try:
         with open('trading_levels.json', 'r') as f:
             levels = json.load(f)

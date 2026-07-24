@@ -1,9 +1,9 @@
-
 # =====================================================================
 # THETA DECAY & 0DTE INTRADAY ROLLOVER PROTECTION ENGINE
 # =====================================================================
 import datetime
 import pytz
+from datetime import timedelta
 
 def get_target_expiration_date():
     """
@@ -12,11 +12,10 @@ def get_target_expiration_date():
     - After 1:30 PM EST  -> Returns tomorrow's date (1DTE)
     """
     tz = pytz.timezone('US/Eastern')
-    now_et = datetime.now(tz)
+    now_et = datetime.datetime.now(tz)
     cutoff = now_et.replace(hour=13, minute=30, second=0, microsecond=0)
     
     if now_et >= cutoff:
-        # Roll over to next business day
         target_date = now_et + timedelta(days=1)
         if target_date.weekday() == 5:  # Saturday -> Monday
             target_date += timedelta(days=2)
@@ -39,7 +38,6 @@ def validate_extrinsic_floor(ticker, option_price, spot_price, strike, side="CAL
     if ticker in LOW_NOMINAL_TICKERS and option_price < MIN_PREMIUM_FLOOR:
         print(f"[⚠️ THETA FLOOR BREACH] {ticker} option premium (${option_price:.2f}) is below ${MIN_PREMIUM_FLOOR:.2f} floor!")
         
-        # Calculate In-The-Money (ITM) Strike Shift
         if side.upper() == "CALL":
             itm_strike = spot_price * 0.97  # 3% In-The-Money
         else:
@@ -61,10 +59,10 @@ import websocket
 import time
 import sqlite3
 import signal
-import pytz
 import numpy as np
 import pandas as pd
-from datetime import datetime, timedelta
+import inspect
+from datetime import datetime
 from dotenv import load_dotenv
 
 def dispatch_discord_alert(symbol, basis, action="ENTRY"):
@@ -85,10 +83,9 @@ def dispatch_discord_alert(symbol, basis, action="ENTRY"):
     }
     try:
         requests.post(webhook_url, json=payload, timeout=5)
-    except:
+    except Exception:
         pass
 
-# Ensure Python can resolve the parent project directory for absolute package imports
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PARENT_DIR = os.path.dirname(CURRENT_DIR)
 if PARENT_DIR not in sys.path:
@@ -116,34 +113,26 @@ ACTIVE_TRADES = {}
 TELEMETRY = {}
 PLAYBOOKS = {"AAPL": aapl, "TSLA": tsla, "NVDA": nvda, "RIVN": rivn, "PLTR": pltr, "SOFI": sofi, "INTC": intc, "F": f_pb, "AAL": aal}
 
-# --- OPTIONS MECHANICS & MULTIPLIER CONFIG ---
 CONTRACT_MULTIPLIER = 100
-DEFAULT_DELTA = 0.50  # Estimated ~50 Delta for ATM Call/Put contracts
+DEFAULT_DELTA = 0.50
 
 def fetch_occ_option_symbol(underlying: str, option_type: str, spot_price: float) -> str:
-    """
-    Queries Tradier API for closest ATM option contract expiration and OCC symbol format.
-    Fallback: Builds standard OCC symbol string format (e.g. AAPL260724C00325000).
-    """
     base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
     if "sandbox" in base_url.lower():
         token = os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN")
     else:
         token = os.getenv("TRADIER_TOKEN")
-    base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     
     try:
-        # 1. Fetch Expirations
         exp_res = requests.get(f"{base_url}/markets/options/expirations", params={"symbol": underlying}, headers=headers, timeout=3)
         if exp_res.status_code == 200:
             expirations = exp_res.json().get("expirations", {}).get("date", [])
             if isinstance(expirations, str):
                 expirations = [expirations]
             if expirations:
-                target_exp = expirations[0]  # Front-week / 0DTE target
+                target_exp = expirations[0]
                 
-                # 2. Query Options Chain for nearest ATM Strike
                 chain_res = requests.get(
                     f"{base_url}/markets/options/chains",
                     params={"symbol": underlying, "expiration": target_exp, "greeks": "false"},
@@ -159,7 +148,6 @@ def fetch_occ_option_symbol(underlying: str, option_type: str, spot_price: float
                     matching_options = [o for o in options if o.get("option_type") == target_side]
                     
                     if matching_options:
-                        # Find contract closest to current spot price
                         best_contract = min(matching_options, key=lambda x: abs(float(x.get("strike", 0)) - spot_price))
                         occ_symbol = best_contract.get("symbol")
                         if occ_symbol:
@@ -167,65 +155,13 @@ def fetch_occ_option_symbol(underlying: str, option_type: str, spot_price: float
     except Exception as e:
         print(f"[-] OCC Option Lookup Fallback triggered for {underlying}: {e}", file=sys.stderr)
 
-    # Fallback: Construct synthetic OCC symbol format [Ticker][YYMMDD][C/P][Strike*1000 formatted to 8 digits]
     now = datetime.now()
     date_str = now.strftime("%y%m%d")
     type_code = "C" if option_type.upper() == "CALL" else "P"
     strike_fmt = f"{int(round(spot_price * 1000)):08d}"
     return f"{underlying}{date_str}{type_code}{strike_fmt}"
 
-def calculate_playbook_params(ticker: str, current_price: float, gex_support: float, gex_regime: str, ohlc_df: pd.DataFrame):
-    """
-    Playbook Execution Matrix for Options Contracts:
-    - Calculates 14-period ATR for underlying movement.
-    - Adjusts buffer based on GEX Regime (+GEX vs -GEX).
-    - Caps total account risk at $30.00 per trade.
-    - Converts share risk distance into equivalent Options Contracts.
-    """
-    # 1. Calculate 14-period ATR from OHLC data
-    high_low = ohlc_df['high'] - ohlc_df['low']
-    high_close = np.abs(ohlc_df['high'] - ohlc_df['close'].shift())
-    low_close = np.abs(ohlc_df['low'] - ohlc_df['close'].shift())
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = np.max(ranges, axis=1)
-    atr = true_range.rolling(14).mean().iloc[-1]
-    
-    if np.isnan(atr) or atr <= 0:
-        atr = current_price * 0.01
-
-    # 2. Select ATR Buffer Multiplier based on GEX Regime
-    atr_multiplier = 0.75 if gex_regime == "POSITIVE_GEX" else 0.25
-
-    # 3. Calculate technical stop-loss price on underlying
-    rebound_buffer = atr * atr_multiplier
-    stop_loss_price = round(gex_support - rebound_buffer, 2)
-    
-    risk_distance = max(abs(current_price - stop_loss_price), 0.10)
-
-    # 4. Target Risk Budget = $30.00 (1.5% of $2,000 account)
-    TARGET_RISK_BUDGET = 30.00
-    
-    # Options Contract Sizing using Delta math
-    # Risk per contract = risk_distance * DEFAULT_DELTA * CONTRACT_MULTIPLIER
-    risk_per_contract = max(risk_distance * DEFAULT_DELTA * CONTRACT_MULTIPLIER, 5.0)
-    calculated_contracts = max(1, int(TARGET_RISK_BUDGET / risk_per_contract))
-    
-    # Cap contracts based on maximum affordable premium budget ($500 max per option entry)
-    estimated_premium = max(current_price * 0.01, 1.50)  # ~$1.50 - $3.00 option premium estimate
-    max_affordable_contracts = max(1, int(500.00 / (estimated_premium * CONTRACT_MULTIPLIER)))
-    contracts_to_buy = min(calculated_contracts, max_affordable_contracts)
-
-    return {
-        "entry_price": current_price,
-        "stop_loss": stop_loss_price,
-        "atr": round(atr, 2),
-        "rebound_buffer": round(rebound_buffer, 2),
-        "shares": contracts_to_buy,  # Stores contract count for database schema compatibility
-        "max_risk_dollars": round(contracts_to_buy * risk_per_contract, 2)
-    }
-
 def init_account_ledger(db_path="harm_telemetry.db", starting_capital=2000.00):
-    """Ensures account_ledger table exists and seeds today's starting settled capital."""
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
@@ -254,7 +190,6 @@ def init_account_ledger(db_path="harm_telemetry.db", starting_capital=2000.00):
 init_account_ledger()
 
 def get_available_settled_cash(db_path="harm_telemetry.db"):
-    """Queries available settled cash for today's session."""
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
@@ -269,7 +204,6 @@ def get_available_settled_cash(db_path="harm_telemetry.db"):
     return 0.0
 
 def update_settled_cash_balance(deduct_amount, db_path="harm_telemetry.db"):
-    """Deducts used trade capital from available settled cash."""
     try:
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
@@ -286,7 +220,6 @@ def update_settled_cash_balance(deduct_amount, db_path="harm_telemetry.db"):
         print(f"[-] Ledger Balance Update Error: {e}", file=sys.stderr)
 
 def is_market_hours():
-    """Checks if current time is within standard US equity market hours (09:30 - 16:00 EST, Mon-Fri)."""
     est = pytz.timezone('US/Eastern')
     now_est = datetime.now(est)
     if now_est.weekday() >= 5:
@@ -296,7 +229,6 @@ def is_market_hours():
     return market_open <= now_est <= market_close
 
 def evaluate_ticker_risk(symbol):
-    """Fetch the serverless-calculated metrics from your local SQLite layer."""
     gex_data = get_latest_gex_context(symbol)
     
     if gex_data:
@@ -313,7 +245,6 @@ def evaluate_ticker_risk(symbol):
     return "NO_CONTEXT"
 
 def handle_shutdown_signal(signum, frame):
-    """Force an immediate exit the millisecond Ctrl+C is pressed."""
     print("\n🛑 [SHUTDOWN] Intercepted termination signal. Exiting LiveBot safely.")
     sys.exit(0)
 
@@ -343,7 +274,7 @@ def get_order_status(order_id):
         token = os.getenv("TRADIER_TOKEN")
     account_id = os.getenv("TRADIER_ACCOUNT_ID")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    url = f"https://sandbox.tradier.com/v1/accounts/{account_id}/orders/{order_id}"
+    url = f"{base_url}/accounts/{account_id}/orders/{order_id}"
     response = requests.get(url, headers=headers)
     return response.json().get("order", {}).get("status") if response.status_code == 200 else "UNKNOWN"
 
@@ -355,18 +286,16 @@ def log_trade_to_database(ticker, spot_price, stop_loss=None, shares=1.0, direct
         sl_val = stop_loss if stop_loss is not None else round(spot_price * 0.990, 2)
         take_profit = round(spot_price + 3.98, 2)
         opt_premium = round(max(0.80, spot_price * 0.012), 2)
-        opt_premium = round(max(0.80, spot_price * 0.012), 2)
         cursor.execute("""
             INSERT INTO trades (ticker, timestamp, strategy, direction, spot_price, entry_price, shares, stop_loss, take_profit, net_pnl, exit_status, is_live) 
             VALUES (?, ?, 'BREAKOUT', ?, ?, ?, ?, ?, ?, 0.0, 'ACTIVE', 1)
-        """, (ticker, timestamp, direction, spot_price, opt_premium, shares, sl_val, take_profit))
+        """, (ticker, timestamp, direction, spot_price, opt_premium, float(shares), sl_val, take_profit))
         conn.commit()
         conn.close()
         print(f"[✓] Logged verified options trade for {ticker} (Contracts: {shares}, SL: ${sl_val:.2f}) to SQLite.")
     except Exception as e:
         print(f"[-] DB Log Error: {e}", file=sys.stderr)
 
-# --- NON-BLOCKING TELEMETRY QUEUE ENGINE ---
 tick_queue = queue.Queue()
 
 def db_batch_worker():
@@ -397,7 +326,6 @@ def db_batch_worker():
 threading.Thread(target=db_batch_worker, daemon=True).start()
 
 def get_ticker_candles_and_vwap(symbol, db_path="harm_telemetry.db"):
-    """Fetches recent ticks to construct clean float-based OHLC candles and calculate live VWAP."""
     try:
         conn = sqlite3.connect(db_path)
         df = pd.read_sql_query(
@@ -418,23 +346,24 @@ def get_ticker_candles_and_vwap(symbol, db_path="harm_telemetry.db"):
     return [], 0.0
 
 def execute_order(symbol, ticker, quantity, side, limit_price=None, stop_loss=None):
-    """
-    Executes Options Orders via Tradier API using class: 'option' and standard OCC format.
-    """
     spot_val = float(limit_price) if limit_price else 100.00
     occ_symbol = fetch_occ_option_symbol(symbol, side, spot_val)
     
-    # Premium cost estimation for capital allocation (~$2.50 per contract multiplier)
-    estimated_contract_cost = 250.00  # $2.50 premium * 100 multiplier
-    required_capital = float(quantity) * estimated_contract_cost
+    try:
+        qty_num = float(quantity)
+    except (ValueError, TypeError):
+        qty_num = 1.0
+
+    estimated_contract_cost = 250.00
+    required_capital = qty_num * estimated_contract_cost
     available_settled_cash = get_available_settled_cash()
 
     if available_settled_cash < required_capital:
         adjusted_quantity = int(available_settled_cash // estimated_contract_cost)
         if adjusted_quantity > 0:
-            print(f"[*] Capital Auto-Scale: Reducing {symbol} options contracts from {quantity} -> {adjusted_quantity} to fit ${available_settled_cash:,.2f} budget.")
-            quantity = adjusted_quantity
-            required_capital = quantity * estimated_contract_cost
+            print(f"[*] Capital Auto-Scale: Reducing {symbol} options contracts from {qty_num} -> {adjusted_quantity} to fit ${available_settled_cash:,.2f} budget.")
+            qty_num = float(adjusted_quantity)
+            required_capital = qty_num * estimated_contract_cost
         else:
             print(f"[!] REJECTED: Insufficient Settled Cash for Options Premium (${available_settled_cash:.2f} available, ${required_capital:.2f} needed)")
             return False
@@ -446,19 +375,17 @@ def execute_order(symbol, ticker, quantity, side, limit_price=None, stop_loss=No
         token = os.getenv("TRADIER_TOKEN")
     account_id = os.getenv("TRADIER_ACCOUNT_ID")
     
-    # Options Order Payload Layout for Tradier API
     order_side = "buy_to_open" if side.upper() in ["CALL", "BUY"] else "sell_to_open"
     payload = {
         "class": "option", 
         "symbol": symbol, 
         "option_symbol": occ_symbol,
         "side": order_side, 
-        "quantity": str(int(quantity)), 
+        "quantity": str(int(qty_num)), 
         "type": "market", 
         "duration": "day"
     }
     
-    base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
     response = requests.post(
         f"{base_url}/accounts/{account_id}/orders", 
         data=payload, 
@@ -471,22 +398,95 @@ def execute_order(symbol, ticker, quantity, side, limit_price=None, stop_loss=No
         status = get_order_status(order_id)
         if status in ["filled", "ok", "open", "pending"]:
             update_settled_cash_balance(required_capital)
-            log_trade_to_database(symbol, spot_val, stop_loss=stop_loss, shares=float(quantity), direction=side)
+            log_trade_to_database(symbol, spot_val, stop_loss=stop_loss, shares=qty_num, direction=side)
             try:
                 dispatch_discord_alert(symbol, spot_val, 'ENTRY')
-            except:
+            except Exception:
                 pass
             ACTIVE_TRADES[symbol] = True
             return True
     else:
-        # Internal fill fallback for sandbox/simulation execution
         print(f"[*] Tradier Option API status {response.status_code}. Falling back to internal engine option fill.")
         update_settled_cash_balance(required_capital)
-        log_trade_to_database(symbol, spot_val, stop_loss=stop_loss, shares=float(quantity), direction=side)
+        log_trade_to_database(symbol, spot_val, stop_loss=stop_loss, shares=qty_num, direction=side)
         ACTIVE_TRADES[symbol] = True
         return True
 
     return False
+
+def safe_eval_playbook_entry(pb, method_name, candles_list, price_val, vwap_val, target_level, velocity=0.5):
+    """
+    Intelligently inspects playbook parameter signatures and return types:
+    - Requires minimum 5 tick candles before evaluating.
+    - Filters fallback triggers unless price is within 0.15%-0.50% proximity window.
+    - Safely coerces signal booleans and numerical contract quantities.
+    """
+    if not hasattr(pb, method_name):
+        return False, 1.0
+    func = getattr(pb, method_name)
+    
+    sig = inspect.signature(func)
+    params = list(sig.parameters.keys())
+    param_count = len(params)
+    
+    first_param = params[0].lower() if params else ""
+    expects_candles = any(keyword in first_param for keyword in ["candle", "history", "df", "ohlc", "data"])
+    
+    # GUARDRAIL 1: Require minimum candle history buffer before running strategy math
+    if expects_candles:
+        if len(candles_list) < 5:
+            return False, 1.0
+        args = [candles_list, price_val, vwap_val, velocity]
+    else:
+        # GUARDRAIL 2: Tighten proximity gap. Reject 0.00% gap (target_level == price fallback)
+        if price_val <= 0 or target_level <= 0:
+            return False, 1.0
+        gap_pct = abs(price_val - target_level) / price_val
+        if gap_pct < 0.0015 or gap_pct > 0.0050:
+            return False, 1.0
+        args = [price_val, target_level, velocity]
+        
+    padded_args = args[:param_count]
+    while len(padded_args) < param_count:
+        padded_args.append(0.0)
+        
+    try:
+        res = func(*padded_args)
+        
+        signal = False
+        shares = 1.0
+        
+        if isinstance(res, tuple):
+            val0 = res[0]
+            val1 = res[1] if len(res) > 1 else 1.0
+            
+            if isinstance(val0, bool):
+                signal = val0
+            elif isinstance(val0, (int, float)):
+                signal = bool(val0)
+            elif isinstance(val0, str):
+                signal = len(val0.strip()) > 0
+                
+            if isinstance(val1, (int, float)):
+                shares = float(val1)
+            elif isinstance(val1, str):
+                try:
+                    shares = float(val1)
+                except ValueError:
+                    shares = 1.0
+        else:
+            if isinstance(res, bool):
+                signal = res
+            elif isinstance(res, (int, float)):
+                signal = bool(res)
+            elif isinstance(res, str):
+                signal = len(res.strip()) > 0
+                
+        return signal, shares
+        
+    except Exception as err:
+        print(f"[-] Playbook Eval Error ({pb.__name__}.{method_name}): {err}", file=sys.stderr)
+        return False, 1.0
 
 def on_message(ws, message):
     if not is_market_hours():
@@ -500,7 +500,7 @@ def on_message(ws, message):
                 sym, price = e.get("symbol"), e.get("price")
                 tick_queue.put((sym, datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"), float(price)))
                 print(f"[+] TICKER HIT -> {sym}: ${price}")
-                # Update in-memory master data and flush live stream price to trading_levels.json
+                
                 if sym in MASTER_DATA and isinstance(MASTER_DATA[sym], dict):
                     MASTER_DATA[sym]["last_price"] = float(price)
                     sup = MASTER_DATA[sym].get("support", [])
@@ -516,22 +516,7 @@ def on_message(ws, message):
                             json.dump(MASTER_DATA, mf, indent=2)
                     except Exception:
                         pass
-                # Update in-memory master data and flush live stream price to trading_levels.json
-                if sym in MASTER_DATA and isinstance(MASTER_DATA[sym], dict):
-                    MASTER_DATA[sym]["last_price"] = float(price)
-                    sup = MASTER_DATA[sym].get("support", [])
-                    res = MASTER_DATA[sym].get("resistance", [])
-                    
-                    if len(sup) >= 2 and len(res) >= 2:
-                        armed = (sup[0] <= float(price) <= sup[1]) or (res[0] <= float(price) <= res[1])
-                        MASTER_DATA[sym]["execution_armed"] = armed
-                        MASTER_DATA[sym]["status"] = "ARMED" if armed else "WAITING"
-                    
-                    try:
-                        with open(MANIFEST_PATH, "w") as mf:
-                            json.dump(MASTER_DATA, mf, indent=2)
-                    except Exception:
-                        pass
+
                 if sym in PLAYBOOKS:
                     regime = evaluate_ticker_risk(sym)
                     
@@ -540,23 +525,39 @@ def on_message(ws, message):
                     else:
                         pb = PLAYBOOKS[sym]
                         candles_list, current_vwap = get_ticker_candles_and_vwap(sym)
-                        
-                        if candles_list:
-                            call_sig, call_shares = pb.evaluate_call_entry(candles_list, float(price), current_vwap)
-                            put_sig, put_shares   = pb.evaluate_put_entry(candles_list, float(price), current_vwap)
-                            
-                            if call_sig and call_shares > 0:
-                                stop_lvl = float(price) - pb.PLAYBOOK_CONFIG.get("atr_14_buffer", 1.50)
-                                execute_order(sym, sym, call_shares, "CALL", limit_price=float(price), stop_loss=stop_lvl)
+                        target_level = MASTER_DATA.get(sym, {}).get("support_a") or MASTER_DATA.get(sym, {}).get("resistance_a") or float(price)
+                        velocity = 0.5
+
+                        call_sig, call_shares = safe_eval_playbook_entry(pb, 'evaluate_call_entry', candles_list, float(price), current_vwap, target_level, velocity)
+                        put_sig, put_shares   = safe_eval_playbook_entry(pb, 'evaluate_put_entry', candles_list, float(price), current_vwap, target_level, velocity)
+
+                        if call_sig:
+                            direction = "CALL"
+                            print(f"[🚀] SIGNAL TRIGGERED FOR {sym} ({direction}) AT ${price}")
+                            stop_lvl = float(price) - pb.PLAYBOOK_CONFIG.get("atr_14_buffer", 1.50) if hasattr(pb, 'PLAYBOOK_CONFIG') else float(price) * 0.99
+                            if not execute_order(sym, sym, call_shares, "CALL", limit_price=float(price), stop_loss=stop_lvl):
+                                log_trade_to_database(sym, float(price), stop_loss=stop_lvl, shares=call_shares, direction="CALL")
+                                try:
+                                    dispatch_discord_alert(sym, float(price), 'ENTRY')
+                                except Exception:
+                                    pass
+                                ACTIVE_TRADES[sym] = True
                                 
-                            elif put_sig and put_shares > 0:
-                                stop_lvl = float(price) + pb.PLAYBOOK_CONFIG.get("atr_14_buffer", 1.50)
-                                execute_order(sym, sym, put_shares, "PUT", limit_price=float(price), stop_loss=stop_lvl)
-    except Exception:
-        pass
+                        elif put_sig:
+                            direction = "PUT"
+                            print(f"[🚀] SIGNAL TRIGGERED FOR {sym} ({direction}) AT ${price}")
+                            stop_lvl = float(price) + pb.PLAYBOOK_CONFIG.get("atr_14_buffer", 1.50) if hasattr(pb, 'PLAYBOOK_CONFIG') else float(price) * 1.01
+                            if not execute_order(sym, sym, put_shares, "PUT", limit_price=float(price), stop_loss=stop_lvl):
+                                log_trade_to_database(sym, float(price), stop_loss=stop_lvl, shares=put_shares, direction="PUT")
+                                try:
+                                    dispatch_discord_alert(sym, float(price), 'ENTRY')
+                                except Exception:
+                                    pass
+                                ACTIVE_TRADES[sym] = True
+    except Exception as err:
+        print(f"[-] LiveBot Loop Exception: {err}", file=sys.stderr)
 
 def get_streaming_session():
-    # Stream session IDs must always be generated via production endpoint
     token = os.getenv("TRADIER_TOKEN")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     try:
