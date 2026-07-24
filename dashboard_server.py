@@ -4,10 +4,9 @@ import os
 import requests
 import traceback
 import json
-import math
 import pandas as pd
 from datetime import datetime, date
-from fastapi import FastAPI, Request, Query, Form
+from fastapi import FastAPI, Request, Query
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse, RedirectResponse
 from jinja2 import Template
 from dotenv import load_dotenv
@@ -16,7 +15,12 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.append(CURRENT_DIR)
 
-from src.GexReader import get_latest_gex_context
+from src.RiskEngine import (
+    calculate_gex_hit_probability,
+    calculate_risk_return_dollars,
+    resolve_direction_targets,
+    evaluate_cso_informed_exit
+)
 
 load_dotenv()
 
@@ -106,13 +110,13 @@ INDEX_HTML_TEMPLATE = """
                     <span class="text-[9px] bg-purple-950 text-purple-300 border border-purple-800 px-1.5 py-0.5 rounded font-bold">
                         PROB: {{ trade.hit_probability }}
                     </span>
-                    <!-- Color-Coded Risk/Reward Ratio -->
                     <span class="text-[9px] {{ trade.rr_bg }} {{ trade.rr_text }} {{ trade.rr_border }} border px-1.5 py-0.5 rounded font-bold">
                         R:R {{ trade.rr_ratio }}
                     </span>
-                    {% if trade.near_target %}
-                    <span class="text-[9px] bg-emerald-950 text-emerald-400 border border-emerald-800 px-1.5 py-0.5 rounded font-bold animate-pulse">⚡ NEAR TARGET</span>
-                    {% endif %}
+                    <!-- CSO Dynamic Recommendation Badge -->
+                    <span class="text-[9px] {{ trade.cso_badge_bg }} {{ trade.cso_badge_text }} px-1.5 py-0.5 rounded font-black tracking-wide">
+                        CSO: {{ trade.cso_recommendation }}
+                    </span>
                 </div>
                 
                 <div class="text-xs text-gray-400">
@@ -219,28 +223,6 @@ INDEX_HTML_TEMPLATE = """
 </html>
 """
 
-def calculate_gex_hit_probability(spot: float, target: float, gex_label: str = 'POSITIVE', default_daily_vol_pct: float = 0.015) -> float:
-    if spot <= 0 or target <= 0:
-        return 50.0
-
-    gap_pct = abs(spot - target) / spot
-    z_score = gap_pct / default_daily_vol_pct
-    raw_prob = (1.0 - math.erf(z_score / math.sqrt(2))) * 100.0
-
-    regime_boost = 1.15 if 'POSITIVE' in str(gex_label).upper() else 0.85
-    final_prob = min(max(raw_prob * regime_boost, 5.0), 95.0)
-    return round(final_prob, 1)
-
-def calculate_risk_return_dollars(spot: float, target: float, stop_loss: float, shares: float = 1.0, delta: float = 0.50):
-    multiplier = delta * 100.0 * shares
-    tp_diff = target - spot
-    sl_diff = spot - stop_loss if stop_loss > 0 else spot * 0.02
-
-    potential_tp_dollar = round(tp_diff * multiplier, 2)
-    potential_sl_dollar = round(-abs(sl_diff * multiplier), 2)
-
-    return potential_tp_dollar, potential_sl_dollar
-
 def get_db_connection():
     conn = sqlite3.connect("harm_telemetry.db")
     conn.row_factory = sqlite3.Row
@@ -337,26 +319,8 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
             
         total_pnl += dollar_pnl
 
-        # --- Direction-Aware GEX & Risk Target Resolution ---
-        gex_ctx = get_latest_gex_context(ticker)
-        gex_target = None
-        gex_label = "NEUTRAL"
-        if gex_ctx:
-            call_wall = gex_ctx.get('call_wall')
-            put_wall = gex_ctx.get('put_wall')
-            gamma_flip = gex_ctx.get('gamma_flip')
-            gex_label = gex_ctx.get('gex_label', 'NEUTRAL')
-
-            if str(direction).upper() == 'CALL':
-                # TP target must be ABOVE live spot price
-                gex_target = call_wall if (call_wall and call_wall > last_price) else (gamma_flip if (gamma_flip and gamma_flip > last_price) else round(last_price * 1.015, 2))
-                if stop_loss_val <= 0 or stop_loss_val >= last_price:
-                    stop_loss_val = put_wall if (put_wall and put_wall < last_price) else round(last_price * 0.985, 2)
-            else:
-                # PUT: TP target must be BELOW live spot price
-                gex_target = put_wall if (put_wall and put_wall < last_price) else (gamma_flip if (gamma_flip and gamma_flip < last_price) else round(last_price * 0.985, 2))
-                if stop_loss_val <= 0 or stop_loss_val <= last_price:
-                    stop_loss_val = call_wall if (call_wall and call_wall > last_price) else round(last_price * 1.015, 2)
+        # Direction-aware GEX target resolution
+        gex_target, stop_loss_val, gex_label = resolve_direction_targets(ticker, last_price, direction, stop_loss_val)
 
         target_label = f"GEX ({gex_label})"
         gex_target_str = f"${gex_target:,.2f} [{target_label}]" if gex_target else "Regime Active"
@@ -367,6 +331,7 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
         tp_dollar = 0.0
         sl_dollar = 0.0
         rr_value = 1.0
+        cso_eval = {"recommendation": "HOLD", "cso_badge_bg": "bg-gray-800", "cso_badge_text": "text-gray-300"}
 
         if gex_target and last_price > 0:
             diff_pct = ((last_price - gex_target) / last_price) * 100
@@ -376,10 +341,11 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
             hit_prob = calculate_gex_hit_probability(last_price, gex_target, gex_label)
             tp_dollar, sl_dollar = calculate_risk_return_dollars(last_price, gex_target, stop_loss_val, shares, delta)
 
-            # --- Risk / Reward Ratio Calculation & Color Coding ---
             abs_tp = abs(tp_dollar)
             abs_sl = abs(sl_dollar) if abs(sl_dollar) > 0 else 1.0
             rr_value = round(abs_tp / abs_sl, 2)
+
+            cso_eval = evaluate_cso_informed_exit(last_price, gex_target, stop_loss_val, hit_prob, dollar_pnl, shares, delta)
 
         if rr_value >= 1.50:
             rr_bg, rr_text, rr_border = "bg-emerald-950", "text-emerald-400", "border-emerald-800"
@@ -397,7 +363,10 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
             "potential_tp_return": f"+${tp_dollar:,.2f}" if tp_dollar >= 0 else f"-${abs(tp_dollar):,.2f}",
             "potential_sl_risk": f"-${abs(sl_dollar):,.2f}",
             "rr_ratio": f"1:{rr_value:.2f}",
-            "rr_bg": rr_bg, "rr_text": rr_text, "rr_border": rr_border
+            "rr_bg": rr_bg, "rr_text": rr_text, "rr_border": rr_border,
+            "cso_recommendation": cso_eval["recommendation"],
+            "cso_badge_bg": cso_eval["cso_badge_bg"],
+            "cso_badge_text": cso_eval["cso_badge_text"]
         })
             
     for row in db_closed:
