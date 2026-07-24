@@ -43,7 +43,7 @@ class MicroScalpSidekick:
         try:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
-            cursor.execute("SELECT ticker, spot_price, stop_loss, take_profit, timestamp FROM trades WHERE exit_status = 'ACTIVE' OR exit_status = 'SIM_TRAILING_STOP'")
+            cursor.execute("SELECT ticker, spot_price, stop_loss, take_profit, timestamp, entry_price, shares FROM trades WHERE exit_status = 'ACTIVE' OR exit_status = 'SIM_TRAILING_STOP'")
             for row in cursor.fetchall():
                 self.active_positions[row[0]] = {"entry_price": row[1], "stop_loss": row[2], "take_profit": row[3], "timestamp": row[4]}
             conn.close()
@@ -142,7 +142,7 @@ class MicroScalpSidekick:
         try:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
-            cursor.execute("SELECT ticker, spot_price, stop_loss, take_profit, timestamp FROM trades WHERE exit_status = 'ACTIVE'")
+            cursor.execute("SELECT ticker, spot_price, stop_loss, take_profit, timestamp, entry_price, shares FROM trades WHERE exit_status = 'ACTIVE'")
             rows = cursor.fetchall()
             conn.close()
 
@@ -171,10 +171,11 @@ class MicroScalpSidekick:
                 # Option pricing estimation (Delta = 0.50, 1 contract = $100 per $1 spot move)
                 delta = 0.50
                 spot_diff = live_spot - entry_price
-                option_pnl = spot_diff * delta * 100.0
+                shares_cnt = float(row[7]) if (len(row) > 7 and row[7]) else 1.0
+                option_pnl = spot_diff * delta * 100.0 * shares_cnt
 
                 # Estimated Contract Basis ($250 per contract baseline if unavailable)
-                estimated_basis = max(100.0, entry_price * 0.50 * 100.0)
+                estimated_basis = max(30.0, entry_price * 100.0 * shares_cnt)
                 pnl_pct = option_pnl / estimated_basis
 
                 # Dynamic ATR Loss Threshold Calculation
@@ -240,6 +241,35 @@ class MicroScalpSidekick:
                             continue
                         else:
                             print(f"[🟢 CSO HOLD REBOUND] {ticker}: Gemini CSO advised HOLD_REBOUND. Rationale: {reasoning}")
+
+                # STAGE 4: DYNAMIC SCALED SCALE-OUT (TRIM 50% + TRAIL RUNNER)
+                # Dynamic Capital-Proportional Trim Check (+15% ROI on total entry outlay)
+                elif pnl_pct >= 0.15 or option_pnl >= max(30.0, (contract_cost_total if "contract_cost_total" in locals() else entry_price * shares_cnt * 100) * 0.15):
+                    conn_update = sqlite3.connect(DB_FILE)
+                    cursor_u = conn_update.cursor()
+                    cursor_u.execute("SELECT shares FROM trades WHERE ticker = ? AND exit_status = 'ACTIVE'", (ticker,))
+                    row_s = cursor_u.fetchone()
+                    curr_shares = row_s[0] if row_s else 1.0
+                    
+                    if curr_shares > 1.0:
+                        trim_shares = round(curr_shares / 2.0, 1)
+                        remain_shares = curr_shares - trim_shares
+                        print(f"[💰 SCALED TRIM EXECUTED] {ticker}: Trimming {trim_shares} contracts. Holding {remain_shares} runner contracts.")
+                        cursor_u.execute("""
+                            UPDATE trades 
+                            SET shares = ?, stop_loss = ?, exit_status = 'SIM_TRAILING_STOP'
+                            WHERE ticker = ? AND exit_status = 'ACTIVE'
+                        """, (remain_shares, live_spot - 0.50, ticker))
+                    else:
+                        print(f"[🏁 FULL EXIT EXECUTED] {ticker}: Closing position at ${live_spot}.")
+                        cursor_u.execute("""
+                            UPDATE trades 
+                            SET exit_status = 'TAKE_PROFIT_ROI', exit_price = ?, net_pnl = ? 
+                            WHERE ticker = ? AND exit_status IN ('ACTIVE', 'SIM_TRAILING_STOP')
+                        """, (live_spot, option_pnl, ticker))
+                    conn_update.commit()
+                    conn_update.close()
+                    continue
 
                 # STAGE 3: TECHNICAL SPOT STOP LOSS
                 elif stop_loss and live_spot <= float(stop_loss):

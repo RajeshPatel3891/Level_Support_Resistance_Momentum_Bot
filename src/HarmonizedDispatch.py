@@ -6,12 +6,12 @@ import requests
 import time
 from datetime import datetime
 
-def init_db(db_path='harmonized_trades.db'):
+def init_db(db_path='harm_telemetry.db'):
     """Ensures database table and unique composite index exist for UPSERT deduplication."""
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS harmonized_trades (
+        CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ticker TEXT,
             timestamp TEXT,
@@ -25,12 +25,12 @@ def init_db(db_path='harmonized_trades.db'):
     ''')
     cursor.execute('''
         CREATE UNIQUE INDEX IF NOT EXISTS idx_dedup_trades 
-        ON harmonized_trades(ticker, spot_price, exit_price, exit_status)
+        ON trades(ticker, spot_price, exit_price, exit_status)
     ''')
     conn.commit()
     conn.close()
 
-def sanitize_historical_telemetry(db_paths=['harmonized_trades.db', 'harm_telemetry.db']):
+def sanitize_historical_telemetry(db_paths=['harm_telemetry.db', 'harm_telemetry.db']):
     """Auto-sanitizes historical telemetry on engine startup by purging duplicate records."""
     for db in db_paths:
         if not os.path.exists(db):
@@ -39,13 +39,13 @@ def sanitize_historical_telemetry(db_paths=['harmonized_trades.db', 'harm_teleme
             conn = sqlite3.connect(db)
             cursor = conn.cursor()
             
-            # Identify target table name (harmonized_trades vs trades)
+            # Identify target table name (trades vs trades)
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
             tables = [row[0] for row in cursor.fetchall()]
             
             target_table = None
-            if 'harmonized_trades' in tables:
-                target_table = 'harmonized_trades'
+            if 'trades' in tables:
+                target_table = 'trades'
             elif 'trades' in tables:
                 target_table = 'trades'
                 
@@ -84,12 +84,12 @@ def check_cash_availability(required_capital, db_path='harm_telemetry.db'):
         print(f"[!] Ledger Check Error: {e}")
         return False, 0.0
 
-def log_trade_event(trade_data, db_path='harmonized_trades.db'):
+def log_trade_event(trade_data, db_path='harm_telemetry.db'):
     """Logs or updates a trade record using SQLite UPSERT pattern to prevent duplicates."""
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
     query = '''
-        INSERT INTO harmonized_trades (
+        INSERT INTO trades (
             ticker, timestamp, strategy, direction, 
             spot_price, exit_price, exit_status, net_pnl
         ) VALUES (

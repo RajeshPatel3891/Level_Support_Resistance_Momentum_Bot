@@ -216,12 +216,12 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
     limit = 50
     offset = (page - 1) * limit
 
-    starting_cash = 2500.97
+    starting_cash = 3430.22
     unsettled_cash = 0.0
     try:
         ledger_row = conn.execute("SELECT starting_settled_cash, available_settled_cash, unsettled_cash FROM account_ledger WHERE date = ?", (selected_date,)).fetchone()
         if ledger_row:
-            starting_cash = float(ledger_row[0]) if ledger_row[0] else 2500.97
+            starting_cash = float(ledger_row[0]) if ledger_row[0] else 3430.22
             unsettled_cash = float(ledger_row[2]) if ledger_row[2] else 0.0
     except Exception:
         pass
@@ -421,10 +421,11 @@ def get_proximity_data():
         
         spot = data.get('last_price', 0.0)
         vwap = data.get('vwap', 0.0)
-        sup_b = data.get('support_b', 0.0)
+        support_val = (data.get('support_a') or (data.get('support')[0] if isinstance(data.get('support'), list) and data.get('support') else data.get('support_b', 0.0)))
+        sup_b = float(support_val) if support_val is not None else 0.0
         res_a = data.get('resistance_a', 0.0)
         
-        dist_sup = round(spot - sup_b, 2) if spot > sup_b else 0.0
+        dist_sup = round(abs(spot - sup_b), 2)
         dist_res = round(res_a - spot, 2) if spot < res_a else 0.0
         
         target_zone = "SUPPORT" if dist_sup <= dist_res else "RESISTANCE"

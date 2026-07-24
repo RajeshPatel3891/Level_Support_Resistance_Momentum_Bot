@@ -99,6 +99,10 @@ import src.tsla_playbook as tsla
 import src.nvda_playbook as nvda
 import src.rivn_playbook as rivn
 import src.pltr_playbook as pltr
+import src.sofi_playbook as sofi
+import src.intc_playbook as intc
+import src.f_playbook as f_pb
+import src.aal_playbook as aal
 from src.GexReader import get_latest_gex_context
 
 load_dotenv()
@@ -110,7 +114,7 @@ if not os.path.exists(MANIFEST_PATH):
 MASTER_DATA = json.load(open(MANIFEST_PATH, 'r'))
 ACTIVE_TRADES = {}
 TELEMETRY = {}
-PLAYBOOKS = {"AAPL": aapl, "TSLA": tsla, "NVDA": nvda, "RIVN": rivn, "PLTR": pltr}
+PLAYBOOKS = {"AAPL": aapl, "TSLA": tsla, "NVDA": nvda, "RIVN": rivn, "PLTR": pltr, "SOFI": sofi, "INTC": intc, "F": f_pb, "AAL": aal}
 
 # --- OPTIONS MECHANICS & MULTIPLIER CONFIG ---
 CONTRACT_MULTIPLIER = 100
@@ -496,6 +500,38 @@ def on_message(ws, message):
                 sym, price = e.get("symbol"), e.get("price")
                 tick_queue.put((sym, datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"), float(price)))
                 print(f"[+] TICKER HIT -> {sym}: ${price}")
+                # Update in-memory master data and flush live stream price to trading_levels.json
+                if sym in MASTER_DATA and isinstance(MASTER_DATA[sym], dict):
+                    MASTER_DATA[sym]["last_price"] = float(price)
+                    sup = MASTER_DATA[sym].get("support", [])
+                    res = MASTER_DATA[sym].get("resistance", [])
+                    
+                    if len(sup) >= 2 and len(res) >= 2:
+                        armed = (sup[0] <= float(price) <= sup[1]) or (res[0] <= float(price) <= res[1])
+                        MASTER_DATA[sym]["execution_armed"] = armed
+                        MASTER_DATA[sym]["status"] = "ARMED" if armed else "WAITING"
+                    
+                    try:
+                        with open(MANIFEST_PATH, "w") as mf:
+                            json.dump(MASTER_DATA, mf, indent=2)
+                    except Exception:
+                        pass
+                # Update in-memory master data and flush live stream price to trading_levels.json
+                if sym in MASTER_DATA and isinstance(MASTER_DATA[sym], dict):
+                    MASTER_DATA[sym]["last_price"] = float(price)
+                    sup = MASTER_DATA[sym].get("support", [])
+                    res = MASTER_DATA[sym].get("resistance", [])
+                    
+                    if len(sup) >= 2 and len(res) >= 2:
+                        armed = (sup[0] <= float(price) <= sup[1]) or (res[0] <= float(price) <= res[1])
+                        MASTER_DATA[sym]["execution_armed"] = armed
+                        MASTER_DATA[sym]["status"] = "ARMED" if armed else "WAITING"
+                    
+                    try:
+                        with open(MANIFEST_PATH, "w") as mf:
+                            json.dump(MASTER_DATA, mf, indent=2)
+                    except Exception:
+                        pass
                 if sym in PLAYBOOKS:
                     regime = evaluate_ticker_risk(sym)
                     
