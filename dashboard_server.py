@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta
 import sys
 import sqlite3
 import os
@@ -380,7 +381,7 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
 
         closed_trades.append({
             "ticker": ticker, "status": row[3], "exit_price": f"${exit_val:.2f}",
-            "basis": f"${entry:.2f}", "timestamp": str(row[4])[-8:],
+            "basis": f"${entry:.2f}", "timestamp": (datetime.strptime(str(row[4]), "%Y-%m-%d %H:%M:%S") - timedelta(hours=4)).strftime("%m/%d %I:%M:%S %p EDT") if str(row[4]) else "",
             "pnl_class": "text-green-400" if realized_pnl >= 0 else "text-red-400", "dollar_pnl": f"${realized_pnl:+.2f}"
         })
 
