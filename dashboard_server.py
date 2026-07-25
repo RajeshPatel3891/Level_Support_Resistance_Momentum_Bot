@@ -312,7 +312,10 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
         
         delta = 0.50
         spot_entry = stored_spot if stored_spot > 0 else last_price
-        spot_diff = last_price - spot_entry if last_price != spot_entry else 0.0
+        if str(direction).upper() == 'PUT':
+            spot_diff = entry - last_price
+        else:
+            spot_diff = last_price - entry
         
         dollar_pnl = round(spot_diff * delta * 100 * shares, 2)
         pnl_pct = ((spot_diff * delta) / entry) * 100 if entry > 0 else 0.0

@@ -47,7 +47,7 @@ class MicroScalpSidekick:
         try:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
-            cursor.execute("SELECT ticker, spot_price, stop_loss, take_profit, timestamp, entry_price, shares FROM trades WHERE exit_status = 'ACTIVE' OR exit_status = 'SIM_TRAILING_STOP'")
+            cursor.execute("SELECT ticker, spot_price, stop_loss, take_profit, timestamp, entry_price, shares, direction, id FROM trades WHERE exit_status = 'ACTIVE' OR exit_status = 'SIM_TRAILING_STOP'")
             for row in cursor.fetchall():
                 self.active_positions[row[0]] = {"entry_price": row[1], "stop_loss": row[2], "take_profit": row[3], "timestamp": row[4]}
             conn.close()
@@ -87,7 +87,7 @@ class MicroScalpSidekick:
             print(f"[!] Warning reading macro state in Sentry: {e}")
         return (False, "UNKNOWN", "Fallback Mode", "Unable to read macro state.", "NEUTRAL", {}, 50)
 
-    def process_cso_ev_guard(self, ticker: str, live_spot: float, stop_loss_val: float, direction: str, shares_cnt: float, option_pnl: float):
+    def process_cso_ev_guard(self, trade_id: int, ticker: str, live_spot: float, stop_loss_val: float, direction: str, shares_cnt: float, option_pnl: float):
         """State Transition Guard for CSO Expected Value (EV) exits."""
         gex_target, stop_loss_val, gex_label = resolve_direction_targets(ticker, live_spot, direction, stop_loss_val)
         
@@ -111,14 +111,15 @@ class MicroScalpSidekick:
 
                 if recommendation == "TAKE_PROFIT_NOW":
                     print(f"[🎯 CSO AUTO-LOCK GAINS] Closing {ticker} to secure ${option_pnl:+.2f} profit!")
-                    conn_u = sqlite3.connect(DB_FILE)
-                    conn_u.execute("""
-                        UPDATE trades 
-                        SET exit_status = 'CSO_TAKE_PROFIT_LOCK', exit_price = ?, net_pnl = ?
-                        WHERE ticker = ? AND exit_status = 'ACTIVE'
-                    """, (live_spot, option_pnl, ticker))
-                    conn_u.commit()
-                    conn_u.close()
+                    with sqlite3.connect(DB_FILE, timeout=30.0) as conn_u:
+                        conn_u.execute('PRAGMA busy_timeout = 30000;')
+                        conn_u.execute('PRAGMA journal_mode = WAL;')
+                        conn_u.execute("""
+                            UPDATE trades 
+                            SET exit_status = 'CSO_TAKE_PROFIT_LOCK', exit_price = ? + (? * 0.0001), net_pnl = ?
+                            WHERE id = ? AND exit_status = 'ACTIVE'
+                        """, (live_spot, trade_id, option_pnl, trade_id))
+                        conn_u.commit()
 
     def audit_active_positions(self):
         if not os.path.exists(DB_FILE):
@@ -126,7 +127,7 @@ class MicroScalpSidekick:
         try:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
-            cursor.execute("SELECT ticker, spot_price, stop_loss, take_profit, timestamp, entry_price, shares, direction FROM trades WHERE exit_status = 'ACTIVE'")
+            cursor.execute("SELECT ticker, spot_price, stop_loss, take_profit, timestamp, entry_price, shares, direction, id FROM trades WHERE exit_status = 'ACTIVE'")
             rows = cursor.fetchall()
             conn.close()
 
@@ -137,11 +138,14 @@ class MicroScalpSidekick:
 
             for row in rows:
                 ticker = row[0]
-                entry_price = float(row[1]) if row[1] else 0.0
+                spot_price = row[1]
                 stop_loss = row[2]
                 take_profit = row[3]
+                timestamp = row[4]
+                entry_price = float(row[5]) if (len(row) > 5 and row[5] is not None) else (float(row[1]) if row[1] else 0.0)
                 shares_cnt = float(row[6]) if (len(row) > 6 and row[6]) else 1.0
                 direction = row[7] if (len(row) > 7 and row[7]) else 'CALL'
+                trade_id = row[8]
 
                 quote = get_live_quote(ticker)
                 if not quote or 'last' not in quote or not quote['last']:
@@ -159,7 +163,7 @@ class MicroScalpSidekick:
                 pnl_pct = option_pnl / estimated_basis
 
                 # 1. Process CSO Expected Value Exit Guard
-                self.process_cso_ev_guard(ticker, live_spot, float(stop_loss or 0.0), direction, shares_cnt, option_pnl)
+                self.process_cso_ev_guard(trade_id, ticker, live_spot, float(stop_loss or 0.0), direction, shares_cnt, option_pnl)
 
                 # 2. STAGE 1: DYNAMIC ATR HARD STOP BREACHED
                 ticker_data = self.levels_cache.get(ticker, {}) if isinstance(self.levels_cache.get(ticker), dict) else {}
@@ -172,10 +176,10 @@ class MicroScalpSidekick:
                     print(f"[🚨 EMERGENCY ATR HARD STOP] {ticker}: Option loss ${option_pnl:.2f} reached ATR limit. Auto-Closing!")
                     conn_update = sqlite3.connect(DB_FILE)
                     conn_update.execute("""
-                        UPDATE trades 
+                        UPDATE OR IGNORE trades 
                         SET exit_status = 'STOP_LOSS_ATR_HARD_CAP', exit_price = ?, net_pnl = ? 
-                        WHERE ticker = ? AND exit_status = 'ACTIVE'
-                    """, (live_spot, option_pnl, ticker))
+                        WHERE id = ?
+                    """, (live_spot, trade_id, option_pnl, trade_id))
                     conn_update.commit()
                     conn_update.close()
                     continue
@@ -211,10 +215,10 @@ class MicroScalpSidekick:
                             print(f"[🛑 CSO MACRO CUT] {ticker}: Gemini CSO advised CUT_EARLY. Rationale: {reasoning}")
                             conn_update = sqlite3.connect(DB_FILE)
                             conn_update.execute("""
-                                UPDATE trades 
+                                UPDATE OR IGNORE trades 
                                 SET exit_status = 'CSO_MACRO_CUT', exit_price = ?, net_pnl = ? 
-                                WHERE ticker = ? AND exit_status = 'ACTIVE'
-                            """, (live_spot, option_pnl, ticker))
+                                WHERE id = ?
+                            """, (live_spot, trade_id, option_pnl, trade_id))
                             conn_update.commit()
                             conn_update.close()
                             continue
