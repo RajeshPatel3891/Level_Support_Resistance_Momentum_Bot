@@ -116,7 +116,7 @@ class MicroScalpSidekick:
                         conn_u.execute('PRAGMA journal_mode = WAL;')
                         conn_u.execute("""
                             UPDATE trades 
-                            SET exit_status = 'CSO_TAKE_PROFIT_LOCK', exit_price = ? + (? * 0.0001), net_pnl = ?, cso_notes = ?
+                            SET exit_status = 'CSO_TAKE_PROFIT_LOCK', exit_price = CASE WHEN entry_price < 50.0 THEN round(entry_price + (spot_diff * 0.5), 2) ELSE ? END + (? * 0.0001), net_pnl = ?, cso_notes = ?
                             WHERE id = ? AND exit_status = 'ACTIVE'
                         """, (live_spot, trade_id, option_pnl, f"Reason: {cso_eval['reason']}", trade_id))
                         conn_u.commit()
