@@ -176,7 +176,7 @@ INDEX_HTML_TEMPLATE = """
                     
                     html += `
                         <div style="background: #111827; border: 1px solid #1f293d; border-radius: 8px; padding: 12px;">
-                            <div style="display: flex; justify-space-between; align-items: center; margin-bottom: 8px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                                 <span style="font-weight: 800; font-size: 16px; color: #ffffff;">${ticker}</span>
                                 <span style="background: ${statusBg}; color: ${statusColor}; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 4px;">${statusText}</span>
                             </div>
@@ -200,22 +200,30 @@ INDEX_HTML_TEMPLATE = """
         setInterval(fetchProximity, 3000);
     </script>
 
-    <!-- Closed Positions -->
+    <!-- CLOSED POSITIONS WITH RICH TELEMETRY PANEL -->
     <h2 class="text-xs font-bold text-gray-400 uppercase mb-3 tracking-wider">CLOSED POSITIONS ({{ selected_date }})</h2>
     <div class="space-y-3">
         {% for trade in closed_trades %}
-        <div class="bg-gray-900/40 p-3 rounded-xl border border-gray-800/60 flex justify-between items-center">
-            <div>
-                <div class="flex items-center space-x-2">
-                    <span class="font-bold text-xs text-gray-300">{{ trade.ticker }}</span>
-                    <span class="text-[9px] bg-gray-800/80 text-gray-400 px-1 py-0.5 rounded">{{ trade.status }}</span>
-                </div>
-                <div class="text-[11px] text-gray-500 mt-0.5">Exit: {{ trade.exit_price }} | Cost: {{ trade.basis }}</div>
+        <div class="bg-slate-900 border border-slate-800 rounded-lg p-3 mb-2 flex flex-col gap-2">
+          <div class="flex justify-between items-center">
+            <div class="flex items-center gap-2">
+              <span class="font-bold text-white text-lg">{{ trade.ticker }}</span>
+              <span class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">{{ trade.direction }}</span>
+              <span class="text-xs px-2 py-0.5 rounded bg-blue-950 text-blue-400 font-mono border border-blue-800">{{ trade.status }}</span>
             </div>
             <div class="text-right">
-                <div class="font-bold text-xs {{ trade.pnl_class }}">{{ trade.dollar_pnl }}</div>
-                <div class="text-[9px] text-gray-500">{{ trade.timestamp }}</div>
+              <span class="font-bold {{ trade.pnl_class }} text-lg">{{ trade.dollar_pnl }}</span>
+              <div class="text-xs text-slate-400">{{ trade.timestamp }}</div>
             </div>
+          </div>
+
+          <!-- Rich Telemetry Sub-Panel -->
+          <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs bg-slate-950 p-2 rounded border border-slate-800/60 font-mono">
+            <div><span class="text-slate-500">Strategy:</span> <span class="text-slate-300">{{ trade.strategy }}</span></div>
+            <div><span class="text-slate-500">Entry/Exit:</span> <span class="text-slate-300">{{ trade.basis }} / {{ trade.exit_price }}</span></div>
+            <div><span class="text-slate-500">Stop Loss:</span> <span class="text-red-400">{{ trade.stop_loss }}</span></div>
+            <div><span class="text-slate-500">Target:</span> <span class="text-emerald-400">{{ trade.take_profit }}</span></div>
+          </div>
         </div>
         {% endfor %}
     </div>
@@ -287,7 +295,8 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
     """).fetchall()
     
     db_closed = conn.execute("""
-        SELECT ticker, spot_price, exit_price, exit_status, timestamp, net_pnl, entry_price, shares
+        SELECT ticker, spot_price, exit_price, exit_status, timestamp, net_pnl, entry_price, shares,
+               strategy, stop_loss, take_profit, cso_cleared, cso_notes, direction
         FROM trades
         WHERE UPPER(exit_status) NOT IN ('ACTIVE', 'SIM_TRAILING_STOP')
           AND net_pnl IS NOT NULL
@@ -374,15 +383,30 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
         })
             
     for row in db_closed:
-        ticker = row[0]
-        entry = float(row[6]) if row[6] is not None else (float(row[1]) if row[1] else 0.0)
-        exit_val = float(row[2]) if row[2] else entry
-        realized_pnl = float(row[5]) if row[5] is not None else 0.0
+        ticker = row['ticker'] if isinstance(row, sqlite3.Row) or hasattr(row, 'keys') else row[0]
+        entry = float(row['entry_price']) if row['entry_price'] is not None else (float(row['spot_price']) if row['spot_price'] else 0.0)
+        exit_val = float(row['exit_price']) if row['exit_price'] else entry
+        realized_pnl = float(row['net_pnl']) if row['net_pnl'] is not None else 0.0
+        
+        sl_val = float(row['stop_loss']) if row['stop_loss'] is not None else 0.0
+        tp_val = float(row['take_profit']) if row['take_profit'] is not None else 0.0
+        strategy = row['strategy'] if row['strategy'] else "TACTICAL_FORCE"
+        cso_notes = row['cso_notes'] if row['cso_notes'] else "None recorded"
+        direction = row['direction'] if row['direction'] else "CALL"
 
         closed_trades.append({
-            "ticker": ticker, "status": row[3], "exit_price": f"${exit_val:.2f}",
-            "basis": f"${entry:.2f}", "timestamp": (datetime.strptime(str(row[4]), "%Y-%m-%d %H:%M:%S") - timedelta(hours=4)).strftime("%m/%d %I:%M:%S %p EDT") if str(row[4]) else "",
-            "pnl_class": "text-green-400" if realized_pnl >= 0 else "text-red-400", "dollar_pnl": f"${realized_pnl:+.2f}"
+            "ticker": ticker,
+            "direction": direction,
+            "status": row['exit_status'],
+            "strategy": strategy,
+            "exit_price": f"${exit_val:.2f}",
+            "basis": f"${entry:.2f}",
+            "stop_loss": f"${sl_val:.2f}",
+            "take_profit": f"${tp_val:.2f}",
+            "cso_notes": cso_notes,
+            "timestamp": (datetime.strptime(str(row['timestamp']), "%Y-%m-%d %H:%M:%S") - timedelta(hours=4)).strftime("%m/%d %I:%M:%S %p EDT") if str(row['timestamp']) else "",
+            "pnl_class": "text-green-400" if realized_pnl >= 0 else "text-red-400",
+            "dollar_pnl": f"${realized_pnl:+.2f}"
         })
 
     effective_available = starting_cash + total_closed_pnl - deployed_capital
@@ -462,7 +486,7 @@ async def close_all_positions_action():
                 SET exit_price = ?, exit_status = 'MANUAL_CLOSE', net_pnl = ?
                 WHERE ticker = ? AND UPPER(exit_status) = 'ACTIVE'
             """, (exit_price, net_pnl, ticker))
-         
+          
         conn.commit()
         conn.close()
     except Exception as e:
