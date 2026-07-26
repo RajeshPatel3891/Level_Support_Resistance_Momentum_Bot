@@ -322,20 +322,25 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
         stored_spot = float(row['spot_price']) if row['spot_price'] is not None else 100.0
         stop_loss_val = float(row['stop_loss']) if row['stop_loss'] is not None else 0.0
         
-        deployed_capital += (entry * shares)
+        position_cost = entry * shares
+        deployed_capital += position_cost
 
         quote = get_live_quote(ticker)
         last_price = float(quote.get('last', stored_spot)) if quote.get('last') else stored_spot
         
         delta = 0.50
-        spot_entry = stored_spot if stored_spot > 0 else last_price
         if str(direction).upper() == 'PUT':
             spot_diff = entry - last_price
         else:
             spot_diff = last_price - entry
         
         dollar_pnl = round(spot_diff * delta * 100 * shares, 2)
-        pnl_pct = ((spot_diff * delta) / entry) * 100 if entry > 0 else 0.0
+        
+        # Position Cost Basis PnL % Calculation
+        if position_cost > 0:
+            pnl_pct = (dollar_pnl / position_cost) * 100.0
+        else:
+            pnl_pct = 0.0
             
         total_pnl += dollar_pnl
 
@@ -374,14 +379,18 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
         else:
             rr_bg, rr_text, rr_border = "bg-red-950", "text-red-400", "border-red-800"
 
+        # Direction-Aware TP Return & SL Risk Formatting
+        tp_return_str = f"+${abs(tp_dollar):,.2f}"
+        sl_risk_str = f"-${abs(sl_dollar):,.2f}"
+
         active_trades.append({
             "ticker": ticker, "status": row['exit_status'], "price": f"${last_price:.2f}",
             "basis": f"${entry:.2f}", "pnl_pct": f"{pnl_pct:+.2f}%",
             "pnl_class": "text-green-400" if dollar_pnl >= 0 else "text-red-400", "dollar_pnl": f"${dollar_pnl:+.2f}",
             "gex_target_str": gex_target_str, "gex_dist": gex_dist_val, "near_target": near_target,
             "hit_probability": f"{hit_prob}%",
-            "potential_tp_return": f"+${tp_dollar:,.2f}" if tp_dollar >= 0 else f"-${abs(tp_dollar):,.2f}",
-            "potential_sl_risk": f"-${abs(sl_dollar):,.2f}",
+            "potential_tp_return": tp_return_str,
+            "potential_sl_risk": sl_risk_str,
             "rr_ratio": f"1:{rr_value:.2f}",
             "rr_bg": rr_bg, "rr_text": rr_text, "rr_border": rr_border,
             "cso_recommendation": cso_eval["recommendation"],
