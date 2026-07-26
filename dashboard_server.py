@@ -224,6 +224,12 @@ INDEX_HTML_TEMPLATE = """
             <div><span class="text-slate-500">Stop Loss:</span> <span class="text-red-400">{{ trade.stop_loss }}</span></div>
             <div><span class="text-slate-500">Target:</span> <span class="text-emerald-400">{{ trade.take_profit }}</span></div>
           </div>
+
+          <!-- CSO Reason Overlay -->
+          <div class="text-xs bg-slate-950/80 px-2 py-1 rounded border border-slate-800/40 text-slate-400 font-mono flex items-center gap-1">
+            <span class="text-amber-400 font-bold">📝 CSO Reason:</span> 
+            <span class="text-slate-300">{{ trade.cso_notes }}</span>
+          </div>
         </div>
         {% endfor %}
     </div>
