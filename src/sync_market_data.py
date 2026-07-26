@@ -1,5 +1,6 @@
 import json
 import requests
+from atomic_writer import save_json_atomically
 
 # Baseline fallbacks (Used ONLY if live price stream is absent)
 FALLBACK_PRICES = {
@@ -50,8 +51,7 @@ def sync():
                 val["status"] = "ARMED" if armed else "WAITING"
 
     try:
-        with open("trading_levels.json", "w") as f:
-            json.dump(data, f, indent=2)
+        save_json_atomically(data, "trading_levels.json")
         print("[✓] Market prices preserved and dynamic arming states synced.")
     except Exception as e:
         print(f"[!] Error writing trading_levels.json: {e}")
