@@ -329,10 +329,12 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
         last_price = float(quote.get('last', stored_spot)) if quote.get('last') else stored_spot
         
         delta = 0.50
+        # If entry is an option premium (< 0), compute stock movement against stored_spot
+        base_entry = stored_spot if (entry < 50.0 and stored_spot > 50.0) else entry
         if str(direction).upper() == 'PUT':
-            spot_diff = entry - last_price
+            spot_diff = base_entry - last_price
         else:
-            spot_diff = last_price - entry
+            spot_diff = last_price - base_entry
         
         dollar_pnl = round(spot_diff * delta * 100 * shares, 2)
         
@@ -465,7 +467,7 @@ async def close_position_action(ticker: str):
             exit_price = float(quote.get('last', entry)) if quote.get('last') else entry
             
             spot_entry = float(row['spot_price']) if row['spot_price'] is not None else entry
-            spot_diff = exit_price - spot_entry
+            spot_diff = (exit_price - spot_entry) if spot_entry > 0 else 0.0
             net_pnl = round(spot_diff * 0.50 * 100 * shares, 2)
 
             conn.execute("""
@@ -494,7 +496,7 @@ async def close_all_positions_action():
             exit_price = float(quote.get('last', entry)) if quote.get('last') else entry
             
             spot_entry = float(row['spot_price']) if row['spot_price'] is not None else entry
-            spot_diff = exit_price - spot_entry
+            spot_diff = (exit_price - spot_entry) if spot_entry > 0 else 0.0
             net_pnl = round(spot_diff * 0.50 * 100 * shares, 2)
 
             conn.execute("""
