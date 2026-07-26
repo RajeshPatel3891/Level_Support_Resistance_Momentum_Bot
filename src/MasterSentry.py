@@ -127,7 +127,15 @@ class MicroScalpSidekick:
         try:
             conn = sqlite3.connect(DB_FILE)
             cursor = conn.cursor()
-            cursor.execute("SELECT ticker, spot_price, stop_loss, take_profit, timestamp, entry_price, shares, direction, id FROM trades WHERE exit_status = 'ACTIVE'")
+            
+            # Ensure peak_pnl column exists in trades table
+            try:
+                cursor.execute("ALTER TABLE trades ADD COLUMN peak_pnl REAL DEFAULT 0.0")
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass # Column already exists
+                
+            cursor.execute("SELECT ticker, spot_price, stop_loss, take_profit, timestamp, entry_price, shares, direction, id, peak_pnl FROM trades WHERE exit_status = 'ACTIVE'")
             rows = cursor.fetchall()
             conn.close()
 
@@ -146,6 +154,7 @@ class MicroScalpSidekick:
                 shares_cnt = float(row[6]) if (len(row) > 6 and row[6]) else 1.0
                 direction = row[7] if (len(row) > 7 and row[7]) else 'CALL'
                 trade_id = row[8]
+                peak_pnl_val = float(row[9]) if (len(row) > 9 and row[9] is not None) else 0.0
 
                 quote = get_live_quote(ticker)
                 if not quote or 'last' not in quote or not quote['last']:
@@ -161,6 +170,32 @@ class MicroScalpSidekick:
 
                 estimated_basis = max(30.0, entry_price * 100.0 * shares_cnt)
                 pnl_pct = option_pnl / estimated_basis
+
+                # --- DYNAMIC SUB-SECOND CAPITAL PROTECTOR ENGINE ---
+                peak_pnl = max(peak_pnl_val, option_pnl)
+
+                # Update peak profit tracking
+                if option_pnl > peak_pnl_val:
+                    conn_peak = sqlite3.connect(DB_FILE)
+                    conn_peak.execute("UPDATE trades SET peak_pnl = ? WHERE id = ?", (option_pnl, trade_id))
+                    conn_peak.commit()
+                    conn_peak.close()
+
+                # 1. IMMEDIATE RATCHET: Lock gains if profit touched +$20 and retraced $10
+                if peak_pnl >= 20.0 and (peak_pnl - option_pnl) >= 10.0:
+                    conn_prot = sqlite3.connect(DB_FILE)
+                    conn_prot.execute("""
+                        UPDATE trades 
+                        SET exit_status = 'CSO_MICRO_PROFIT_LOCK', 
+                            exit_price = ?, 
+                            net_pnl = ?, 
+                            cso_notes = 'Capital Protector: Micro-profit trailing lock triggered' 
+                        WHERE id = ? AND exit_status = 'ACTIVE'
+                    """, (live_spot, option_pnl, trade_id))
+                    conn_prot.commit()
+                    conn_prot.close()
+                    print(f"[🛡️ CAPITAL PROTECTOR] Locked +${option_pnl:.2f} profit on {ticker}!")
+                    continue
 
                 # 1. Process CSO Expected Value Exit Guard
                 self.process_cso_ev_guard(trade_id, ticker, live_spot, float(stop_loss or 0.0), direction, shares_cnt, option_pnl)
@@ -179,7 +214,7 @@ class MicroScalpSidekick:
                         UPDATE OR IGNORE trades 
                         SET exit_status = 'STOP_LOSS_ATR_HARD_CAP', exit_price = ?, net_pnl = ?, cso_notes = ? 
                         WHERE id = ?
-                    """, (live_spot, trade_id, option_pnl, f"Reason: {cso_eval['reason']}", trade_id))
+                    """, (live_spot, trade_id, option_pnl, "Reason: ATR Hard Cap Breached", trade_id))
                     conn_update.commit()
                     conn_update.close()
                     continue
@@ -218,7 +253,7 @@ class MicroScalpSidekick:
                                 UPDATE OR IGNORE trades 
                                 SET exit_status = 'CSO_MACRO_CUT', exit_price = ?, net_pnl = ?, cso_notes = ? 
                                 WHERE id = ?
-                            """, (live_spot, trade_id, option_pnl, f"Reason: {cso_eval['reason']}", trade_id))
+                            """, (live_spot, trade_id, option_pnl, f"Reason: {reasoning}", trade_id))
                             conn_update.commit()
                             conn_update.close()
                             continue

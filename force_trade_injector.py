@@ -2,12 +2,46 @@ import sys
 import os
 import sqlite3
 import json
+import time
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if CURRENT_DIR not in sys.path:
     sys.path.append(CURRENT_DIR)
 
 from src.forced_entry_guard import can_tactical_force_entry
+
+def validate_micro_momentum(ticker, direction, sample_seconds=3):
+    """
+    Samples live quote ticks over `sample_seconds` window.
+    Rejects trade if price velocity opposes trade direction.
+    """
+    try:
+        from dashboard_server import get_live_quote
+        
+        t0_quote = get_live_quote(ticker)
+        t0_price = float(t0_quote.get('last', 0.0)) if (t0_quote and isinstance(t0_quote, dict)) else 0.0
+        
+        time.sleep(sample_seconds)
+        
+        t1_quote = get_live_quote(ticker)
+        t1_price = float(t1_quote.get('last', 0.0)) if (t1_quote and isinstance(t1_quote, dict)) else 0.0
+        
+        if t0_price == 0.0 or t1_price == 0.0:
+            return True, "Insufficient tick data; passing to Guard"
+            
+        price_delta = t1_price - t0_price
+        
+        # CALL requires positive micro-momentum (price rising)
+        if direction.upper() == 'CALL' and price_delta < -0.02:
+            return False, f"ADVERSE MOMENTUM: {ticker} dropping (${price_delta:+.2f} in {sample_seconds}s). CALL blocked!"
+            
+        # PUT requires negative micro-momentum (price falling)
+        if direction.upper() == 'PUT' and price_delta > 0.02:
+            return False, f"ADVERSE MOMENTUM: {ticker} rising (${price_delta:+.2f} in {sample_seconds}s). PUT blocked!"
+            
+        return True, f"MOMENTUM CONFIRMED: Delta ${price_delta:+.2f} aligns with {direction}"
+    except Exception as e:
+        return True, f"Momentum check bypassed due to exception: {e}"
 
 def force_entry(ticker, direction, force_override=False, live_mode=False):
     spot_price = 205.65 if ticker == "NVDA" else (310.19 if ticker == "TSLA" else 100.0)
@@ -32,6 +66,15 @@ def force_entry(ticker, direction, force_override=False, live_mode=False):
         if not allowed:
             print("[X] Force entry cancelled to protect capital.\n")
             return False
+
+    # Micro-Momentum Validation
+    print(f"[⚡ MICRO-MOMENTUM] Sampling live price velocity for {ticker} over 3s...")
+    mom_allowed, mom_message = validate_micro_momentum(ticker, direction, sample_seconds=3)
+    print(f"[🛡️ MOMENTUM GUARD] {mom_message}")
+    
+    if not mom_allowed:
+        print(f"[X] Force entry cancelled by Micro-Momentum Guard to protect capital.\n")
+        return False
 
     print(f"[🚀 EXECUTE] Guard passed! Injecting forced trade for {ticker}...")
 
