@@ -286,6 +286,7 @@ def log_trade_to_database(ticker, spot_price, stop_loss=None, shares=1.0, direct
         sl_val = stop_loss if stop_loss is not None else round(spot_price * 0.990, 2)
         take_profit = round(spot_price + 3.98, 2)
         opt_premium = round(max(0.80, spot_price * 0.012), 2)
+        spot_price = opt_premium # Align scale to option premium
         cursor.execute("""
             INSERT INTO trades (ticker, timestamp, strategy, direction, spot_price, entry_price, shares, stop_loss, take_profit, net_pnl, exit_status, is_live) 
             VALUES (?, ?, 'BREAKOUT', ?, ?, ?, ?, ?, ?, 0.0, 'ACTIVE', 1)
