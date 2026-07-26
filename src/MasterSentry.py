@@ -116,9 +116,9 @@ class MicroScalpSidekick:
                         conn_u.execute('PRAGMA journal_mode = WAL;')
                         conn_u.execute("""
                             UPDATE trades 
-                            SET exit_status = 'CSO_TAKE_PROFIT_LOCK', exit_price = ? + (? * 0.0001), net_pnl = ?
+                            SET exit_status = 'CSO_TAKE_PROFIT_LOCK', exit_price = ? + (? * 0.0001), net_pnl = ?, cso_notes = ?
                             WHERE id = ? AND exit_status = 'ACTIVE'
-                        """, (live_spot, trade_id, option_pnl, trade_id))
+                        """, (live_spot, trade_id, option_pnl, f"Reason: {cso_eval['reason']}", trade_id))
                         conn_u.commit()
 
     def audit_active_positions(self):
@@ -177,9 +177,9 @@ class MicroScalpSidekick:
                     conn_update = sqlite3.connect(DB_FILE)
                     conn_update.execute("""
                         UPDATE OR IGNORE trades 
-                        SET exit_status = 'STOP_LOSS_ATR_HARD_CAP', exit_price = ?, net_pnl = ? 
+                        SET exit_status = 'STOP_LOSS_ATR_HARD_CAP', exit_price = ?, net_pnl = ?, cso_notes = ? 
                         WHERE id = ?
-                    """, (live_spot, trade_id, option_pnl, trade_id))
+                    """, (live_spot, trade_id, option_pnl, f"Reason: {cso_eval['reason']}", trade_id))
                     conn_update.commit()
                     conn_update.close()
                     continue
@@ -216,9 +216,9 @@ class MicroScalpSidekick:
                             conn_update = sqlite3.connect(DB_FILE)
                             conn_update.execute("""
                                 UPDATE OR IGNORE trades 
-                                SET exit_status = 'CSO_MACRO_CUT', exit_price = ?, net_pnl = ? 
+                                SET exit_status = 'CSO_MACRO_CUT', exit_price = ?, net_pnl = ?, cso_notes = ? 
                                 WHERE id = ?
-                            """, (live_spot, trade_id, option_pnl, trade_id))
+                            """, (live_spot, trade_id, option_pnl, f"Reason: {cso_eval['reason']}", trade_id))
                             conn_update.commit()
                             conn_update.close()
                             continue
