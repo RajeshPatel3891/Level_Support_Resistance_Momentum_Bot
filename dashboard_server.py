@@ -209,6 +209,7 @@ INDEX_HTML_TEMPLATE = """
             <div class="flex items-center gap-2">
               <span class="font-bold text-white text-lg">{{ trade.ticker }}</span>
               <span class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">{{ trade.direction }}</span>
+          <span class="text-xs px-2 py-0.5 rounded bg-amber-950 text-amber-400 font-mono border border-amber-800/80 font-bold">{{ trade.contracts }}x</span>
               <span class="text-xs px-2 py-0.5 rounded bg-blue-950 text-blue-400 font-mono border border-blue-800">{{ trade.status }}</span>
             </div>
             <div class="text-right">
@@ -402,7 +403,7 @@ def fetch_portfolio_state(page: int = 1, selected_date: str = None):
 
         closed_trades.append({
             "ticker": ticker,
-            "direction": direction,
+            "direction": direction, "contracts": int(row["shares"]) if row["shares"] is not None else 1,
             "status": row['exit_status'],
             "strategy": strategy,
             "exit_price": f"${exit_val:.2f}",
