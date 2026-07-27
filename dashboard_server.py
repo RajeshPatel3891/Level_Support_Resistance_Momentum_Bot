@@ -259,49 +259,109 @@ def get_live_quote(symbol):
         return {}
     return {}
 
-def fetch_portfolio_state(page=1, per_page=10, selected_date=None):
-    import datetime
-    import sqlite3
-    conn = sqlite3.connect('harm_telemetry.db')
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
+    import boto3
+    from boto3.dynamodb.conditions import Key
+    from datetime import datetime
+    from decimal import Decimal
 
-    if selected_date:
-        date_str = selected_date
-    else:
-        date_str = datetime.datetime.now().strftime('%Y-%m-%d')
+    dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+    trades_table = dynamodb.Table('HarmonizedTrades')
+    ledger_table = dynamodb.Table('HarmonizedLedger')
 
-    # 1. Starting Balance with Day-over-Day Rollover
-    base_starting = 3430.22
-    cursor.execute("SELECT COALESCE(SUM(net_pnl), 0.0) FROM trades WHERE exit_status != 'ACTIVE' AND DATE(timestamp) < DATE(?)", (date_str,))
-    row = cursor.fetchone()
-    prior_pnl = float(row[0]) if row and row[0] is not None else 0.0
-    starting_balance = base_starting + prior_pnl
+    if not selected_date:
+        selected_date = datetime.now().strftime('%Y-%m-%d')
 
-    # 2. Active Trades & Floating PnL
-    cursor.execute("SELECT * FROM trades WHERE exit_status = 'ACTIVE'")
-    active_trades = cursor.fetchall()
-    floating_pnl = 0.0
+    # Query Ledger for selected date
+    ledger_res = ledger_table.get_item(Key={'tenant_id': tenant_id, 'date': selected_date})
+    ledger_item = ledger_res.get('Item', {})
 
-    # 3. Closed Trades for selected date
-    cursor.execute("SELECT * FROM trades WHERE exit_status != 'ACTIVE' AND DATE(timestamp) = DATE(?) ORDER BY id DESC", (date_str,))
-    db_closed = cursor.fetchall()
+    starting_balance = float(ledger_item.get('starting_settled_cash', '3430.22'))
+    settled_free = float(ledger_item.get('available_settled_cash', '3430.22'))
+    deployed_capital = float(ledger_item.get('deployed_capital', '0.00'))
+    unsettled = float(ledger_item.get('unsettled_cash', '0.00'))
+    total_closed_pnl = float(ledger_item.get('realized_pnl', '0.00'))
+    total_pnl = float(ledger_item.get('floating_pnl', '0.00'))
 
-    # 4. Realized Closed PnL
-    cursor.execute("SELECT COALESCE(SUM(net_pnl), 0.0) FROM trades WHERE exit_status != 'ACTIVE' AND DATE(timestamp) = DATE(?)", (date_str,))
-    row_closed = cursor.fetchone()
-    total_closed_pnl = float(row_closed[0]) if row_closed and row_closed[0] is not None else 0.0
+    # Query Trades for selected date
+    trades_res = trades_table.query(
+        KeyConditionExpression=Key('tenant_id').eq(tenant_id)
+    )
+    all_trades = trades_res.get('Items', [])
 
-    # 5. Active Deployed Capital
-    active_deployed = 0.0
+    active_trades = []
+    db_closed = []
 
-    # 6. Settled Free
-    settled_free = starting_balance + total_closed_pnl - active_deployed
-    unsettled = 0.0
+    for t in all_trades:
+        ts = str(t.get('timestamp', ''))
+        # Normalize items for template
+        trade_dict = dict(t)
+        trade_dict['net_pnl'] = float(t.get('net_pnl', 0))
+        trade_dict['exit_price'] = float(t.get('exit_price', 0)) if t.get('exit_price') else None
+        
+        if trade_dict.get('exit_status') == 'ACTIVE':
+            active_trades.append(trade_dict)
+        elif selected_date in ts:
+            db_closed.append(trade_dict)
 
-    conn.close()
+    return active_trades, db_closed, total_pnl, total_closed_pnl, selected_date, starting_balance, settled_free, deployed_capital, unsettled
 
-    return active_trades, db_closed, floating_pnl, total_closed_pnl, date_str, starting_balance, settled_free, active_deployed, unsettled
+@app.get("/api/proximity")
+async def get_proximity():
+    proximity_data = {}
+    
+    # 1. Load default watchlist matrix levels from local json state
+    try:
+        if os.path.exists('trading_levels.json'):
+            with open('trading_levels.json', 'r') as f:
+                levels_file = json.load(f)
+                
+            for ticker, info in levels_file.items():
+                spot = float(info.get('spot', info.get('last_price', 0.0)))
+                vwap = float(info.get('vwap', spot))
+                armed = bool(info.get('execution_armed', False)) or str(info.get('status', '')).upper() == 'ARMED'
+                
+                res_a = info.get('resistance_a', info.get('resistance', [0])[0] if isinstance(info.get('resistance'), list) else 0)
+                gap_val = abs(spot - float(res_a)) if res_a else 0.0
+                gap_pct_val = (gap_val / spot * 100) if spot > 0 else 0.0
+                
+                proximity_data[ticker] = {
+                    'armed': armed,
+                    'spot': spot,
+                    'vwap': vwap,
+                    'target': f"{res_a:.2f}" if isinstance(res_a, (int, float)) else str(res_a),
+                    'gap_dollars': f"${gap_val:.2f}",
+                    'gap_pct': f"{gap_pct_val:.2f}%"
+                }
+    except Exception as e:
+        print(f"Error reading trading_levels.json: {e}")
+
+    # 2. Overlay live active trades from DynamoDB state if present
+    try:
+        active_trades, *_ = fetch_portfolio_state()
+        for trade in active_trades:
+            ticker = trade.get('ticker')
+            if ticker:
+                spot = float(trade.get('spot_price', trade.get('price', 0)))
+                armed = str(trade.get('cso_recommendation', '')).upper() == 'ARMED'
+                
+                gex_dist = str(trade.get('gex_dist', '0.00 (0.0%)'))
+                parts = gex_dist.split(' ')
+                gap_dollars = f"${parts[0]}" if len(parts) > 0 else "$0.00"
+                gap_pct = parts[1].replace('(', '').replace(')', '') if len(parts) > 1 else '0.0%'
+                
+                proximity_data[ticker] = {
+                    'armed': armed,
+                    'spot': spot,
+                    'vwap': float(trade.get('entry_price', spot)),
+                    'target': str(trade.get('gex_target_str', trade.get('take_profit', 'N/A'))),
+                    'gap_dollars': gap_dollars,
+                    'gap_pct': gap_pct
+                }
+    except Exception as e:
+        print(f"Error fetching portfolio active overlay: {e}")
+
+    return proximity_data
 
 @app.get("/", response_class=HTMLResponse)
 async def index_view(request: Request, selected_date: str = Query(default=None)):
@@ -326,7 +386,18 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
     }
 
     template = Template(INDEX_HTML_TEMPLATE)
+    
+    levels_data = {}
+    if os.path.exists('trading_levels.json'):
+        try:
+            with open('trading_levels.json') as lf:
+                levels_data = json.load(lf)
+        except Exception:
+            pass
+
     rendered_html = template.render(
+        proximity_matrix=levels_data,
+        level_proximity=levels_data,
         trades=trades,
         closed_trades=closed,
         selected_date=current_date,
