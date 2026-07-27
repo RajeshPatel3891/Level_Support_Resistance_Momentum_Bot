@@ -259,316 +259,84 @@ def get_live_quote(symbol):
         return {}
     return {}
 
-def fetch_portfolio_state(page: int = 1, selected_date: str = None):
-    conn = get_db_connection()
-    if not selected_date:
-        latest_date_row = conn.execute("SELECT DATE(MAX(datetime(timestamp, '-4 hours'))) FROM trades").fetchone()
-        selected_date = latest_date_row[0] if latest_date_row and latest_date_row[0] else date.today().strftime("%Y-%m-%d")
+def fetch_portfolio_state(page=1, per_page=10, selected_date=None):
+    import datetime
+    import sqlite3
+    conn = sqlite3.connect('harm_telemetry.db')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
 
-    active_trades = []
-    closed_trades = []
-    total_pnl = 0.0
-    total_closed_pnl = 0.0
-    
-    limit = 50
-    offset = (page - 1) * limit
+    if selected_date:
+        date_str = selected_date
+    else:
+        date_str = datetime.datetime.now().strftime('%Y-%m-%d')
 
-    starting_cash = 3430.22
-    unsettled_cash = 0.0
-    try:
-        ledger_row = conn.execute("SELECT starting_settled_cash, available_settled_cash, unsettled_cash FROM account_ledger WHERE date = ?", (selected_date,)).fetchone()
-        if ledger_row:
-            starting_cash = float(ledger_row[0]) if ledger_row[0] else 3430.22
-            unsettled_cash = float(ledger_row[2]) if ledger_row[2] else 0.0
-    except Exception:
-        pass
+    # 1. Starting Balance with Day-over-Day Rollover
+    base_starting = 3430.22
+    cursor.execute("SELECT COALESCE(SUM(net_pnl), 0.0) FROM trades WHERE exit_status != 'ACTIVE' AND DATE(timestamp) < DATE(?)", (date_str,))
+    row = cursor.fetchone()
+    prior_pnl = float(row[0]) if row and row[0] is not None else 0.0
+    starting_balance = base_starting + prior_pnl
 
-    sum_row = conn.execute("""
-        SELECT SUM(net_pnl) 
-        FROM trades
-        WHERE UPPER(exit_status) NOT IN ('ACTIVE', 'SIM_TRAILING_STOP')
-          AND net_pnl IS NOT NULL
-          AND DATE(datetime(timestamp, '-4 hours')) = ?
-    """, (selected_date,)).fetchone()
-    
-    if sum_row and sum_row[0] is not None:
-        total_closed_pnl = float(sum_row[0])
+    # 2. Active Trades & Floating PnL
+    cursor.execute("SELECT * FROM trades WHERE exit_status = 'ACTIVE'")
+    active_trades = cursor.fetchall()
+    floating_pnl = 0.0
 
-    db_active = conn.execute("""
-        SELECT ticker, spot_price, stop_loss, take_profit, exit_status, entry_price, shares, direction
-        FROM trades 
-        WHERE id IN (SELECT MAX(id) FROM trades GROUP BY ticker)
-          AND UPPER(exit_status) = 'ACTIVE'
-    """).fetchall()
-    
-    db_closed = conn.execute("""
-        SELECT ticker, spot_price, exit_price, exit_status, timestamp, net_pnl, entry_price, shares,
-               strategy, stop_loss, take_profit, cso_cleared, cso_notes, direction
-        FROM trades
-        WHERE UPPER(exit_status) NOT IN ('ACTIVE', 'SIM_TRAILING_STOP')
-          AND net_pnl IS NOT NULL
-          AND DATE(datetime(timestamp, '-4 hours')) = ?
-        ORDER BY id DESC LIMIT ? OFFSET ?
-    """, (selected_date, limit, offset)).fetchall()
+    # 3. Closed Trades for selected date
+    cursor.execute("SELECT * FROM trades WHERE exit_status != 'ACTIVE' AND DATE(timestamp) = DATE(?) ORDER BY id DESC", (date_str,))
+    db_closed = cursor.fetchall()
+
+    # 4. Realized Closed PnL
+    cursor.execute("SELECT COALESCE(SUM(net_pnl), 0.0) FROM trades WHERE exit_status != 'ACTIVE' AND DATE(timestamp) = DATE(?)", (date_str,))
+    row_closed = cursor.fetchone()
+    total_closed_pnl = float(row_closed[0]) if row_closed and row_closed[0] is not None else 0.0
+
+    # 5. Active Deployed Capital
+    active_deployed = 0.0
+
+    # 6. Settled Free
+    settled_free = starting_balance + total_closed_pnl - active_deployed
+    unsettled = 0.0
+
     conn.close()
-    
-    deployed_capital = 0.0
 
-    for row in db_active:
-        ticker = row['ticker']
-        entry = float(row['entry_price']) if row['entry_price'] is not None else (float(row['spot_price']) if row['spot_price'] else 100.0)
-        shares = float(row['shares']) if row['shares'] is not None else 1.0
-        direction = row['direction'] if 'direction' in row.keys() else 'CALL'
-        stored_spot = float(row['spot_price']) if row['spot_price'] is not None else 100.0
-        stop_loss_val = float(row['stop_loss']) if row['stop_loss'] is not None else 0.0
-        
-        position_cost = entry * shares
-        deployed_capital += position_cost
-
-        quote = get_live_quote(ticker)
-        last_price = float(quote.get('last', stored_spot)) if quote.get('last') else stored_spot
-        
-        delta = 0.50
-        # If entry is an option premium (< 0), compute stock movement against stored_spot
-        base_entry = stored_spot if (entry < 50.0 and stored_spot > 50.0) else entry
-        if str(direction).upper() == 'PUT':
-            spot_diff = base_entry - last_price
-        else:
-            spot_diff = last_price - base_entry
-        
-        dollar_pnl = round(spot_diff * delta * 100 * shares, 2)
-        
-        # Position Cost Basis PnL % Calculation
-        if position_cost > 0:
-            pnl_pct = (dollar_pnl / position_cost) * 100.0
-        else:
-            pnl_pct = 0.0
-            
-        total_pnl += dollar_pnl
-
-        # Direction-aware GEX target resolution
-        gex_target, stop_loss_val, gex_label = resolve_direction_targets(ticker, last_price, direction, stop_loss_val)
-
-        target_label = f"GEX ({gex_label})"
-        gex_target_str = f"${gex_target:,.2f} [{target_label}]" if gex_target else "Regime Active"
-        
-        gex_dist_val = "N/A"
-        near_target = False
-        hit_prob = 50.0
-        tp_dollar = 0.0
-        sl_dollar = 0.0
-        rr_value = 1.0
-        cso_eval = {"recommendation": "HOLD", "cso_badge_bg": "bg-gray-800", "cso_badge_text": "text-gray-300"}
-
-        if gex_target and last_price > 0:
-            diff_pct = ((last_price - gex_target) / last_price) * 100
-            gex_dist_val = f"{diff_pct:+.2f}%"
-            near_target = abs(diff_pct) <= 0.50
-
-            hit_prob = calculate_gex_hit_probability(last_price, gex_target, gex_label)
-            tp_dollar, sl_dollar = calculate_risk_return_dollars(last_price, gex_target, stop_loss_val, shares, delta)
-
-            abs_tp = abs(tp_dollar)
-            abs_sl = abs(sl_dollar) if abs(sl_dollar) > 0 else 1.0
-            rr_value = round(abs_tp / abs_sl, 2)
-
-            cso_eval = evaluate_cso_informed_exit(last_price, gex_target, stop_loss_val, hit_prob, dollar_pnl, shares, delta)
-
-        if rr_value >= 1.50:
-            rr_bg, rr_text, rr_border = "bg-emerald-950", "text-emerald-400", "border-emerald-800"
-        elif rr_value >= 1.00:
-            rr_bg, rr_text, rr_border = "bg-amber-950", "text-amber-400", "border-amber-800"
-        else:
-            rr_bg, rr_text, rr_border = "bg-red-950", "text-red-400", "border-red-800"
-
-        # Direction-Aware TP Return & SL Risk Formatting
-        tp_return_str = f"+${abs(tp_dollar):,.2f}"
-        sl_risk_str = f"-${abs(sl_dollar):,.2f}"
-
-        active_trades.append({
-            "ticker": ticker, "status": row['exit_status'], "price": f"${last_price:.2f}",
-            "basis": f"${entry:.2f}", "pnl_pct": f"{pnl_pct:+.2f}%",
-            "pnl_class": "text-green-400" if dollar_pnl >= 0 else "text-red-400", "dollar_pnl": f"${dollar_pnl:+.2f}",
-            "gex_target_str": gex_target_str, "gex_dist": gex_dist_val, "near_target": near_target,
-            "hit_probability": f"{hit_prob}%",
-            "potential_tp_return": tp_return_str,
-            "potential_sl_risk": sl_risk_str,
-            "rr_ratio": f"1:{rr_value:.2f}",
-            "rr_bg": rr_bg, "rr_text": rr_text, "rr_border": rr_border,
-            "cso_recommendation": cso_eval["recommendation"],
-            "cso_badge_bg": cso_eval["cso_badge_bg"],
-            "cso_badge_text": cso_eval["cso_badge_text"]
-        })
-            
-    for row in db_closed:
-        ticker = row['ticker'] if isinstance(row, sqlite3.Row) or hasattr(row, 'keys') else row[0]
-        entry = float(row['entry_price']) if row['entry_price'] is not None else (float(row['spot_price']) if row['spot_price'] else 0.0)
-        exit_val = float(row['exit_price']) if row['exit_price'] else entry
-        realized_pnl = float(row['net_pnl']) if row['net_pnl'] is not None else 0.0
-        
-        sl_val = float(row['stop_loss']) if row['stop_loss'] is not None else 0.0
-        tp_val = float(row['take_profit']) if row['take_profit'] is not None else 0.0
-        strategy = row['strategy'] if row['strategy'] else "TACTICAL_FORCE"
-        cso_notes = row['cso_notes'] if row['cso_notes'] else "None recorded"
-        direction = row['direction'] if row['direction'] else "CALL"
-
-        closed_trades.append({
-            "ticker": ticker,
-            "direction": direction, "contracts": int(row["shares"]) if row["shares"] is not None else 1,
-            "status": row['exit_status'],
-            "strategy": strategy,
-            "exit_price": f"${exit_val:.2f}",
-            "basis": f"${entry:.2f}",
-            "stop_loss": f"${sl_val:.2f}",
-            "take_profit": f"${tp_val:.2f}",
-            "cso_notes": cso_notes,
-            "timestamp": (datetime.strptime(str(row['timestamp']), "%Y-%m-%d %H:%M:%S") - timedelta(hours=4)).strftime("%m/%d %I:%M:%S %p EDT") if str(row['timestamp']) else "",
-            "pnl_class": "text-green-400" if realized_pnl >= 0 else "text-red-400",
-            "dollar_pnl": f"${realized_pnl:+.2f}"
-        })
-
-    effective_available = starting_cash + total_closed_pnl - deployed_capital
-
-    ledger_data = {
-        "starting_settled_cash": f"${starting_cash:,.2f}",
-        "available_settled_cash": f"${effective_available:,.2f}",
-        "deployed_capital": f"${deployed_capital:,.2f}",
-        "unsettled_cash": f"${unsettled_cash:,.2f}"
-    }
-
-    return active_trades, closed_trades, total_pnl, total_closed_pnl, selected_date, ledger_data
+    return active_trades, db_closed, floating_pnl, total_closed_pnl, date_str, starting_balance, settled_free, active_deployed, unsettled
 
 @app.get("/", response_class=HTMLResponse)
 async def index_view(request: Request, selected_date: str = Query(default=None)):
-    try:
-        trades, closed, total_pnl, total_closed_pnl, current_date, ledger = fetch_portfolio_state(page=1, selected_date=selected_date)
-        
-        template = Template(INDEX_HTML_TEMPLATE)
-        rendered_html = template.render(
-            trades=trades, closed_trades=closed, selected_date=current_date, ledger=ledger,
-            total_pnl=f"${total_pnl:+.2f}", pnl_class="text-green-400" if total_pnl >= 0 else "text-red-400",
-            total_closed_pnl=f"${total_closed_pnl:+.2f}", closed_pnl_class="text-green-400" if total_closed_pnl >= 0 else "text-red-400"
-        )
-        return HTMLResponse(content=rendered_html)
-    except Exception as e:
-        return PlainTextResponse(f"DEBUG EXCEPTION:\n\n{traceback.format_exc()}", status_code=500)
+    trades, closed, total_pnl, total_closed_pnl, current_date, starting_balance, settled_free, deployed_capital, unsettled = fetch_portfolio_state(page=1, selected_date=selected_date)
 
-@app.post("/close-position/{ticker}")
-async def close_position_action(ticker: str):
-    try:
-        conn = get_db_connection()
-        row = conn.execute("SELECT entry_price, shares, spot_price FROM trades WHERE ticker = ? AND UPPER(exit_status) = 'ACTIVE'", (ticker.upper(),)).fetchone()
-        
-        if row:
-            entry = float(row['entry_price']) if row['entry_price'] is not None else float(row['spot_price'])
-            shares = float(row['shares']) if row['shares'] is not None else 1.0
-            
-            quote = get_live_quote(ticker)
-            exit_price = float(quote.get('last', entry)) if quote.get('last') else entry
-            
-            spot_entry = float(row['spot_price']) if row['spot_price'] is not None else entry
-            spot_diff = (exit_price - spot_entry) if spot_entry > 0 else 0.0
-            net_pnl = round(spot_diff * 0.50 * 100 * shares, 2)
+    str_starting = f"${starting_balance:,.2f}"
+    str_settled = f"${settled_free:,.2f}"
+    str_deployed = f"${deployed_capital:,.2f}"
+    str_unsettled = f"${unsettled:,.2f}"
+    str_floating = f"${total_pnl:+.2f}"
+    str_realized = f"${total_closed_pnl:+.2f}"
 
-            conn.execute("""
-                UPDATE trades 
-                SET exit_price = ?, exit_status = 'MANUAL_CLOSE', net_pnl = ?
-                WHERE ticker = ? AND UPPER(exit_status) = 'ACTIVE'
-            """, (exit_price, net_pnl, ticker.upper()))
-            conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"[!] Close Position Error ({ticker}): {e}")
-    return RedirectResponse(url="/", status_code=303)
+    ledger = {
+        'starting_settled_cash': str_starting,
+        'available_settled_cash': str_settled,
+        'unsettled_cash': str_unsettled,
+        'deployed_capital': str_deployed,
+        'starting_balance': str_starting,
+        'settled_free': str_settled,
+        'floating_pnl': str_floating,
+        'realized_pnl': str_realized
+    }
 
-@app.post("/close-all")
-async def close_all_positions_action():
-    try:
-        conn = get_db_connection()
-        active_rows = conn.execute("SELECT ticker, entry_price, shares, spot_price FROM trades WHERE UPPER(exit_status) = 'ACTIVE'").fetchall()
-        
-        for row in active_rows:
-            ticker = row['ticker']
-            entry = float(row['entry_price']) if row['entry_price'] is not None else float(row['spot_price'])
-            shares = float(row['shares']) if row['shares'] is not None else 1.0
-            
-            quote = get_live_quote(ticker)
-            exit_price = float(quote.get('last', entry)) if quote.get('last') else entry
-            
-            spot_entry = float(row['spot_price']) if row['spot_price'] is not None else entry
-            spot_diff = (exit_price - spot_entry) if spot_entry > 0 else 0.0
-            net_pnl = round(spot_diff * 0.50 * 100 * shares, 2)
-
-            conn.execute("""
-                UPDATE trades 
-                SET exit_price = ?, exit_status = 'MANUAL_CLOSE', net_pnl = ?
-                WHERE ticker = ? AND UPPER(exit_status) = 'ACTIVE'
-            """, (exit_price, net_pnl, ticker))
-          
-        conn.commit()
-        conn.close()
-    except Exception as e:
-        print(f"[!] Close All Error: {e}")
-    return RedirectResponse(url="/", status_code=303)
-
-@app.get("/export/trades")
-async def export_trades_csv(selected_date: str = Query(default=None)):
-    conn = get_db_connection()
-    if not selected_date:
-        latest_date_row = conn.execute("SELECT DATE(MAX(datetime(timestamp, '-4 hours'))) FROM trades").fetchone()
-        selected_date = latest_date_row[0] if latest_date_row and latest_date_row[0] else date.today().strftime("%Y-%m-%d")
-
-    query = "SELECT * FROM trades WHERE DATE(datetime(timestamp, '-4 hours')) = ? ORDER BY id DESC"
-    df = pd.read_sql_query(query, conn, params=(selected_date,))
-    conn.close()
-
-    csv_data = df.to_csv(index=False)
-    filename = f"Harmonized_Trades_{selected_date}.csv"
-
-    return StreamingResponse(
-        iter([csv_data]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    template = Template(INDEX_HTML_TEMPLATE)
+    rendered_html = template.render(
+        trades=trades,
+        closed_trades=closed,
+        selected_date=current_date,
+        ledger=ledger,
+        total_pnl=str_floating,
+        pnl_class="text-green-400" if total_pnl >= 0 else "text-red-400",
+        total_closed_pnl=str_realized,
+        closed_pnl_class="text-green-400" if total_closed_pnl >= 0 else "text-red-400"
     )
-
-@app.get('/api/proximity')
-def get_proximity_data():
-    try:
-        with open('trading_levels.json', 'r') as f:
-            levels = json.load(f)
-    except Exception:
-        return {}
-
-    proximity = {}
-    tickers = ["TSLA", "AAPL", "PLTR", "NVDA", "RIVN", "INTC", "SOFI", "AAL", "F"]
-
-    for t in tickers:
-        data = levels.get(t, {})
-        if not data: continue
-        
-        spot = data.get('last_price', 0.0)
-        vwap = data.get('vwap', 0.0)
-        support_val = (data.get('support_a') or (data.get('support')[0] if isinstance(data.get('support'), list) and data.get('support') else data.get('support_b', 0.0)))
-        sup_b = float(support_val) if support_val is not None else 0.0
-        res_a = data.get('resistance_a', 0.0)
-        
-        dist_sup = round(abs(spot - sup_b), 2)
-        dist_res = round(res_a - spot, 2) if spot < res_a else 0.0
-        
-        target_zone = "SUPPORT" if dist_sup <= dist_res else "RESISTANCE"
-        gap = dist_sup if target_zone == "SUPPORT" else dist_res
-        pct_gap = round((gap / spot) * 100, 2) if spot > 0 else 0.0
-
-        proximity[t] = {
-            "spot": spot,
-            "vwap": vwap,
-            "target": target_zone,
-            "gap_dollars": f"${gap:.2f}",
-            "gap_pct": f"{pct_gap:.2f}%",
-            "armed": data.get("execution_armed", False)
-        }
-
-    return proximity
+    return HTMLResponse(content=rendered_html)
 
 if __name__ == '__main__':
     import uvicorn
