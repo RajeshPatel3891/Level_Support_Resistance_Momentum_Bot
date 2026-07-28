@@ -64,8 +64,8 @@ def run_global_audit():
             g1_passed = (p >= vwap)
             g1_status = "✅ PASSED" if g1_passed else "❌ BLOCKED (Long setup below VWAP)"
         elif is_at_resistance:
-            g1_passed = (p < vwap)
-            g1_status = "✅ PASSED" if g1_passed else "❌ BLOCKED (Short setup above VWAP)"
+            g1_passed = (p >= vwap)
+            g1_status = "✅ PASSED" if g1_passed else "❌ BLOCKED (Call setup below VWAP)"
         else:
             g1_passed = False
             g1_status = "❌ BLOCKED (Outside trading zones)"

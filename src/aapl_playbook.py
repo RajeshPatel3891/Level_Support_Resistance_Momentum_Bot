@@ -1,7 +1,7 @@
 PLAYBOOK_CONFIG = {
     "ticker": "AAPL",
-    "spot_target_call": 332.10,
-    "spot_target_put": 323.10,
+    "spot_target_call": 337.95,
+    "spot_target_put": 336.61,
     "min_momentum_score": 0.65,
     "velocity_check_active": True,
     "low_nominal_mode": False

@@ -35,7 +35,12 @@
     "support_b": 305.94,
     "resistance_b": 313.63,
     "spot": 307.76,
-    "vwap": 307.76
+    "vwap": 307.76,
+    "target": 308.0,
+    "resistance_call": 308.0,
+    "call_target": 308.0,
+    "gex_target": 308.0,
+    "target_price": 308.0
   },
   "NVDA": {
     "last_price": 196.36,

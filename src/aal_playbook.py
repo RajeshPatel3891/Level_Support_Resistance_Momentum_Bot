@@ -1,7 +1,7 @@
 PLAYBOOK_CONFIG = {
     "ticker": "AAL",
-    "spot_target_call": 12.50,
-    "spot_target_put": 11.40,
+    "spot_target_call": 14.65,
+    "spot_target_put": 14.6,
     "low_nominal": True
 }
 

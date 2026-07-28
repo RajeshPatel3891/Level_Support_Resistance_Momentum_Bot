@@ -1,7 +1,7 @@
 PLAYBOOK_CONFIG = {
     "ticker": "TSLA",
-    "spot_target_call": 384.10,
-    "spot_target_put": 310.00,
+    "spot_target_call": 308.09,
+    "spot_target_put": 306.87,
     "min_momentum_score": 0.85,
     "velocity_check_active": True,
     "freefall_lockout": True

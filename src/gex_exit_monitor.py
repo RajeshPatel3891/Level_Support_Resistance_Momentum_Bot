@@ -10,7 +10,7 @@ except ImportError:
 LEVELS_FILE = "/home/ubuntu/Level_Support_Resistance_Momentum_Bot/trading_levels.json"
 
 def get_active_trades():
-    conn = sqlite3.connect("harm_telemetry.db")
+    conn = sqlite3.connect("harm_telemetry.db", timeout=30.0)
     cursor = conn.cursor()
     cursor.execute("SELECT id, ticker, spot_price, stop_loss, take_profit, is_live FROM trades WHERE exit_status = 'ACTIVE'")
     trades = cursor.fetchall()
@@ -18,14 +18,14 @@ def get_active_trades():
     return trades
 
 def update_trailing_stop(trade_id, ticker, new_stop_floor, reason="TRAILING"):
-    conn = sqlite3.connect("harm_telemetry.db")
+    conn = sqlite3.connect("harm_telemetry.db", timeout=30.0)
     conn.execute("UPDATE trades SET stop_loss = ? WHERE id = ?", (new_stop_floor, trade_id))
     conn.commit()
     conn.close()
     print(f"[📈 {reason}] Raised stop floor for {ticker} to ${new_stop_floor:.2f}")
 
 def execute_exit_routing(trade_id, ticker, current_price, is_live, exit_type):
-    conn = sqlite3.connect("harm_telemetry.db")
+    conn = sqlite3.connect("harm_telemetry.db", timeout=30.0)
     if is_live == 1:
         if DISPATCH_AVAILABLE:
             print(f"[🚨 LIVE EXECUTOR] [{exit_type}] Dispatching market exit order for {ticker} via HarmonizedDispatch...")

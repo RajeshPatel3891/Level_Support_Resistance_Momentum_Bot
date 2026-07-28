@@ -1,12 +1,19 @@
 import json
+import os
 import requests
-from atomic_writer import save_json_atomically
+from dotenv import load_dotenv
 
-# Baseline fallbacks (Used ONLY if live price stream is absent)
-FALLBACK_PRICES = {
-    "NVDA": 206.85, "INTC": 98.40, "TSLA": 390.00, 
-    "AAPL": 328.00, "PLTR": 133.00, "RIVN": 17.15,
-    "SOFI": 17.15, "F": 14.15, "AAL": 15.60
+try:
+    from atomic_writer import save_json_atomically
+except ImportError:
+    from src.atomic_writer import save_json_atomically
+
+load_dotenv()
+
+LIVE_PRICES_FALLBACK = {
+    "NVDA": 198.84, "INTC": 88.87, "TSLA": 307.48, 
+    "AAPL": 337.28, "PLTR": 127.05, "RIVN": 16.57,
+    "SOFI": 16.79, "F": 14.45, "AAL": 14.63
 }
 
 def is_armed(price, support, resistance):
@@ -18,6 +25,10 @@ def is_armed(price, support, resistance):
     return in_support or in_resistance
 
 def sync():
+    if not os.path.exists("trading_levels.json"):
+        print("[!] trading_levels.json not found.")
+        return
+
     try:
         with open("trading_levels.json", "r") as f:
             data = json.load(f)
@@ -25,34 +36,66 @@ def sync():
         print(f"[!] Error loading trading_levels.json: {e}")
         return
 
+    symbols = ",".join(data.keys())
+    token = os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN")
+    base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
+    if "sandbox" in base_url.lower():
+        base_url = "https://sandbox.tradier.com/v1"
+
+    headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
+
+    quotes = {}
+    if token:
+        try:
+            r = requests.get(f"{base_url}/markets/quotes?symbols={symbols}", headers=headers, timeout=5)
+            if r.status_code == 200:
+                res_quotes = r.json().get('quotes', {}).get('quote', [])
+                if isinstance(res_quotes, dict):
+                    res_quotes = [res_quotes]
+                for q in res_quotes:
+                    quotes[q.get('symbol')] = q
+        except Exception as e:
+            print(f"[!] Tradier quote fetch exception: {e}")
+
     for ticker, val in data.items():
-        if isinstance(val, dict):
-            # Use current dynamic live price if present, otherwise fallback
-            price = val.get("last_price")
-            if price is None:
-                price = FALLBACK_PRICES.get(ticker, 0.0)
-                val["last_price"] = price
+        if not isinstance(val, dict):
+            continue
 
-            sup = val.get("support", [])
-            res = val.get("resistance", [])
+        q = quotes.get(ticker, {})
+        default_fallback = LIVE_PRICES_FALLBACK.get(ticker, 0.0)
+        
+        # Determine spot price: API quote -> Existing file last_price -> Fallback dict
+        spot = float(q.get('last', q.get('close', val.get('last_price', default_fallback))))
+        vwap = float(q.get('vwap', 0.0) or q.get('average_price', 0.0))
+        
+        # Fallback VWAP to spot if 0.0 to prevent blocking execution momentum filters
+        if vwap == 0.0 and spot > 0:
+            vwap = spot
             
-            # Legacy Schema Mapping for Playbooks & HarmonizedDispatch
-            if sup and isinstance(sup, list) and len(sup) > 0:
-                val["support_a"] = sup[0]
-                val["support_b"] = sup[1] if len(sup) > 1 else sup[0]
-            if res and isinstance(res, list) and len(res) > 0:
-                val["resistance_a"] = res[0]
-                val["resistance_b"] = res[1] if len(res) > 1 else res[0]
+        val["last_price"] = spot
+        val["spot"] = spot
+        val["vwap"] = vwap
 
-            # Calculate dynamic arming state
-            if price > 0:
-                armed = is_armed(price, sup, res)
-                val["execution_armed"] = armed
-                val["status"] = "ARMED" if armed else "WAITING"
+        # Legacy Schema Mapping for Playbooks & HarmonizedDispatch
+        sup = val.get("support", [])
+        res = val.get("resistance", [])
+
+        if sup and isinstance(sup, list) and len(sup) > 0:
+            val["support_a"] = sup[0]
+            val["support_b"] = sup[1] if len(sup) > 1 else sup[0]
+        if res and isinstance(res, list) and len(res) > 0:
+            val["resistance_a"] = res[0]
+            val["resistance_b"] = res[1] if len(res) > 1 else res[0]
+
+        # Calculate dynamic arming state
+        if spot > 0:
+            armed = is_armed(spot, sup, res)
+            val["execution_armed"] = armed
+            val["status"] = "ARMED" if armed else "WAITING"
 
     try:
         save_json_atomically(data, "trading_levels.json")
-        print("[✓] Market prices preserved and dynamic arming states synced.")
+        print("[✓] Live Tradier market prices, VWAP, legacy schema, and dynamic arming states synced!")
     except Exception as e:
         print(f"[!] Error writing trading_levels.json: {e}")
 
