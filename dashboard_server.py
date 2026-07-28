@@ -443,7 +443,7 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
         cost = float(t.get('cost', 0.0))
         if cost <= 0:
             sh = float(t.get('shares', 10.0 if t.get('ticker') == 'PLTR' else 1.0))
-            ep = float(t.get('entry_price', t.get('basis', 0.58)))
+            ep = float(t.get('entry_price') or t.get('basis') or t.get('spot_price', 0.0))
             cost = sh * ep * 100.0 if ep < 5.0 else sh * ep
         today_closed_proceeds += (cost + pnl)
 
@@ -466,7 +466,6 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
 async def get_proximity():
     proximity_data = {}
     
-    # 1. Load default watchlist matrix levels from local json state
     try:
         if os.path.exists('trading_levels.json'):
             with open('trading_levels.json', 'r') as f:
@@ -475,17 +474,34 @@ async def get_proximity():
             for ticker, info in levels_file.items():
                 spot = float(info.get('spot', info.get('last_price', 0.0)))
                 vwap = float(info.get('vwap', spot))
-                armed = bool(info.get('execution_armed', False)) or str(info.get('status', '')).upper() == 'ARMED'
                 
-                res_a = info.get('resistance_a', info.get('resistance', [0])[0] if isinstance(info.get('resistance'), list) else 0)
-                gap_val = abs(spot - float(res_a)) if res_a else 0.0
+                res_zone = info.get('resistance_zone', [0, 0])
+                sup_zone = info.get('support_zone', [0, 0])
+                
+                target_call = float(info.get('spot_target_call', res_zone[0] if len(res_zone) > 0 else 0.0))
+                target_put = float(info.get('spot_target_put', sup_zone[1] if len(sup_zone) > 1 else 0.0))
+                
+                # Check if spot falls inside active execution ranges
+                in_res = len(res_zone) >= 2 and (res_zone[0] <= spot <= res_zone[1])
+                in_sup = len(sup_zone) >= 2 and (sup_zone[0] <= spot <= sup_zone[1])
+                
+                armed = bool(info.get('execution_armed', False)) or in_res or in_sup or str(info.get('status', '')).upper() == 'ARMED'
+                
+                if in_res:
+                    target_val = target_call
+                elif in_sup:
+                    target_val = target_put
+                else:
+                    target_val = target_call if spot < target_call else target_put
+                
+                gap_val = abs(spot - target_val) if target_val > 0 else 0.0
                 gap_pct_val = (gap_val / spot * 100) if spot > 0 else 0.0
                 
                 proximity_data[ticker] = {
                     'armed': armed,
                     'spot': spot,
                     'vwap': vwap,
-                    'target': f"{res_a:.2f}" if isinstance(res_a, (int, float)) else str(res_a),
+                    'target': f"{target_val:.2f}" if target_val > 0 else "N/A",
                     'gap_dollars': f"${gap_val:.2f}",
                     'gap_pct': f"{gap_pct_val:.2f}%"
                 }
@@ -587,3 +603,13 @@ async def close_all_positions():
 if __name__ == '__main__':
     import uvicorn
     uvicorn.run(app, host='0.0.0.0', port=8000)
+
+import os
+
+@app.get("/dashboard_data.json")
+async def get_dashboard_data_json():
+    import json
+    if os.path.exists("dashboard_data.json"):
+        with open("dashboard_data.json", "r") as f:
+            return json.load(f)
+    return {"active_positions": [], "closed_positions": [], "summary": {}}

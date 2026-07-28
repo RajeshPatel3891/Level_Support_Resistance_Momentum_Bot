@@ -1,7 +1,7 @@
 PLAYBOOK_CONFIG = {
     "ticker": "RIVN",
-    "spot_target_call": 16.03,
-    "spot_target_put": 15.87,
+    "spot_target_call": 18.51,
+    "spot_target_put": 17.11,
     "low_nominal": True,
     "min_extrinsic_floor": 0.20
 }

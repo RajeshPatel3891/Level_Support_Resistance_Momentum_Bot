@@ -49,8 +49,10 @@ def run_global_audit():
         p = levels.get('last_price', levels.get('price', snap_fallback["price"]))
         vwap = levels.get('vwap', snap_fallback["vwap"])
         
-        sa, sb = levels["support_a"], levels["support_b"]
-        ra, rb = levels["resistance_a"], levels["resistance_b"]
+        supp_zone = levels.get('support_zone', [levels.get('support_a', 0.0), levels.get('support_b', 0.0)])
+        res_zone = levels.get('resistance_zone', [levels.get('resistance_a', 0.0), levels.get('resistance_b', 0.0)])
+        sa, sb = supp_zone[0], supp_zone[1]
+        ra, rb = res_zone[0], res_zone[1]
         
         print(f"\nCore Asset: **{ticker}** | Spot: **${p:.2f}** (VWAP: ${vwap:.2f})")
         print(f"   • Active Registry: Support [{sa:.2f} - {sb:.2f}] | Resistance [{ra:.2f} - {rb:.2f}]")

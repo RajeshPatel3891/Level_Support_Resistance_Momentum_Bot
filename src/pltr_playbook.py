@@ -1,7 +1,7 @@
 PLAYBOOK_CONFIG = {
     "ticker": "PLTR",
-    "spot_target_call": 127.3,
-    "spot_target_put": 126.8,
+    "spot_target_call": 119.09,
+    "spot_target_put": 117.91,
     "min_momentum_score": 0.65
 }
 

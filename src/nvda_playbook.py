@@ -1,7 +1,7 @@
 PLAYBOOK_CONFIG = {
     "ticker": "NVDA",
-    "spot_target_call": 199.24,
-    "spot_target_put": 198.44,
+    "spot_target_call": 194.87,
+    "spot_target_put": 192.93,
     "min_momentum_score": 0.70,
     "velocity_check_active": True
 }

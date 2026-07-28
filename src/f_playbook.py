@@ -1,7 +1,7 @@
 PLAYBOOK_CONFIG = {
     "ticker": "F",
-    "spot_target_call": 14.48,
-    "spot_target_put": 14.42,
+    "spot_target_call": 14.92,
+    "spot_target_put": 14.78,
     "low_nominal": True
 }
 

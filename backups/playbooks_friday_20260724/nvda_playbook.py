@@ -1,17 +1,17 @@
 PLAYBOOK_CONFIG = {
-    "ticker": "RIVN",
-    "spot_target_call": 16.03,
-    "spot_target_put": 15.87,
-    "low_nominal": True,
-    "min_extrinsic_floor": 0.20
+    "ticker": "NVDA",
+    "spot_target_call": 214.10,
+    "spot_target_put": 205.10,
+    "min_momentum_score": 0.70,
+    "velocity_check_active": True
 }
 
 def evaluate_call_entry(spot_price, vwap, proximity_score, velocity):
     if spot_price >= PLAYBOOK_CONFIG["spot_target_call"]:
-        return True, "RIVN_LOW_NOMINAL_CALL"
+        return True, "NVDA_RESISTANCE_BREAKOUT"
     return False, "OUT_OF_BOUNDS"
 
 def evaluate_put_entry(spot_price, vwap, proximity_score, velocity):
     if spot_price <= PLAYBOOK_CONFIG["spot_target_put"]:
-        return True, "RIVN_LOW_NOMINAL_PUT"
+        return True, "NVDA_SUPPORT_BREACH"
     return False, "OUT_OF_BOUNDS"

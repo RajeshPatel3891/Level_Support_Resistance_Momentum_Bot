@@ -172,7 +172,7 @@ if __name__ == "__main__":
     try:
         with open('trading_levels.json', 'r') as f:
             levels = json.load(f)
-        print(f"[+] Loaded trading_levels.json successfully ({len([k for k, v in levels.items() if isinstance(v, dict) and 'support_a' in v])} tickers tracked)")
+        print(f"[+] Loaded trading_levels.json successfully ({len([k for k, v in levels.items() if isinstance(v, dict) and ('support_a' in v or 'support_zone' in v or 'spot_target_call' in v)])} tickers tracked)")
     except Exception as e:
         print(f"[!] Warning: Could not load trading_levels.json: {e}")
 

@@ -1,7 +1,7 @@
 PLAYBOOK_CONFIG = {
     "ticker": "INTC",
-    "spot_target_call": 89.05,
-    "spot_target_put": 88.69,
+    "spot_target_call": 85.83,
+    "spot_target_put": 84.97,
     "low_nominal": True
 }
 

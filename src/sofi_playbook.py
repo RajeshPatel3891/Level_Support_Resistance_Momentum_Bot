@@ -1,7 +1,7 @@
 PLAYBOOK_CONFIG = {
     "ticker": "SOFI",
-    "spot_target_call": 16.82,
-    "spot_target_put": 16.76,
+    "spot_target_call": 16.28,
+    "spot_target_put": 16.12,
     "low_nominal": True
 }
 
