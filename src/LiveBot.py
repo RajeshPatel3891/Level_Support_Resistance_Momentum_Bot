@@ -65,6 +65,29 @@ import inspect
 from datetime import datetime
 from dotenv import load_dotenv
 
+def get_live_quote(symbol):
+    """
+    Fetches real-time bid/ask market quote from Tradier API for spread/liquidity checks.
+    """
+    base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
+    if "sandbox" in base_url.lower():
+        token = os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN")
+    else:
+        token = os.getenv("TRADIER_TOKEN")
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    
+    try:
+        res = requests.get(f"{base_url}/markets/quotes", params={"symbols": symbol}, headers=headers, timeout=3)
+        if res.status_code == 200:
+            quotes = res.json().get("quotes", {}).get("quote", {})
+            if isinstance(quotes, list) and quotes:
+                return quotes[0]
+            elif isinstance(quotes, dict):
+                return quotes
+    except Exception as e:
+        print(f"[-] Live Quote Fetch Error ({symbol}): {e}", file=sys.stderr)
+    return {}
+
 def dispatch_discord_alert(symbol, basis, action="ENTRY"):
     webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
     if not webhook_url or "your_real_id" in webhook_url:
@@ -163,7 +186,7 @@ def fetch_occ_option_symbol(underlying: str, option_type: str, spot_price: float
 
 def init_account_ledger(db_path="harm_telemetry.db", starting_capital=2000.00):
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=10.0)
         cursor = conn.cursor()
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS account_ledger (
@@ -191,7 +214,7 @@ init_account_ledger()
 
 def get_available_settled_cash(db_path="harm_telemetry.db"):
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=10.0)
         cursor = conn.cursor()
         today_str = datetime.now().strftime("%Y-%m-%d")
         cursor.execute("SELECT available_settled_cash FROM account_ledger WHERE date = ?", (today_str,))
@@ -205,7 +228,7 @@ def get_available_settled_cash(db_path="harm_telemetry.db"):
 
 def update_settled_cash_balance(deduct_amount, db_path="harm_telemetry.db"):
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=10.0)
         cursor = conn.cursor()
         today_str = datetime.now().strftime("%Y-%m-%d")
         cursor.execute('''
@@ -254,7 +277,7 @@ signal.signal(signal.SIGTERM, handle_shutdown_signal)
 def sync_active_trades_from_db():
     global ACTIVE_TRADES
     try:
-        conn = sqlite3.connect("harm_telemetry.db")
+        conn = sqlite3.connect("harm_telemetry.db", timeout=10.0)
         cursor = conn.cursor()
         cursor.execute("SELECT ticker FROM trades WHERE exit_status = 'ACTIVE'")
         rows = cursor.fetchall()
@@ -278,19 +301,19 @@ def get_order_status(order_id):
     response = requests.get(url, headers=headers)
     return response.json().get("order", {}).get("status") if response.status_code == 200 else "UNKNOWN"
 
-def log_trade_to_database(ticker, spot_price, stop_loss=None, shares=1.0, direction="CALL"):
+def log_trade_to_database(ticker, spot_price, stop_loss=None, shares=1.0, direction="CALL", cost=None):
     try:
-        conn = sqlite3.connect("harm_telemetry.db")
+        conn = sqlite3.connect("harm_telemetry.db", timeout=10.0)
         cursor = conn.cursor()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         sl_val = stop_loss if stop_loss is not None else round(spot_price * 0.990, 2)
         take_profit = round(spot_price + 3.98, 2)
-        opt_premium = round(max(0.80, spot_price * 0.012), 2)
-        spot_price = opt_premium # Align scale to option premium
+        opt_premium = float(cost) if cost else round(max(0.80, spot_price * 0.012), 2)
+        entry_spot = opt_premium  # Align scale to option premium
         cursor.execute("""
             INSERT INTO trades (ticker, timestamp, strategy, direction, spot_price, entry_price, shares, stop_loss, take_profit, net_pnl, exit_status, is_live) 
             VALUES (?, ?, 'BREAKOUT', ?, ?, ?, ?, ?, ?, 0.0, 'ACTIVE', 1)
-        """, (ticker, timestamp, direction, spot_price, opt_premium, float(shares), sl_val, take_profit))
+        """, (ticker, timestamp, direction, entry_spot, opt_premium, float(shares), sl_val, take_profit))
         conn.commit()
         conn.close()
         print(f"[✓] Logged verified options trade for {ticker} (Contracts: {shares}, SL: ${sl_val:.2f}) to SQLite.")
@@ -301,7 +324,7 @@ tick_queue = queue.Queue()
 
 def db_batch_worker():
     print("[*] Launching async database writer thread...")
-    conn = sqlite3.connect("harm_telemetry.db", check_same_thread=False)
+    conn = sqlite3.connect("harm_telemetry.db", timeout=10.0, check_same_thread=False)
     cursor = conn.cursor()
     
     while True:
@@ -328,7 +351,7 @@ threading.Thread(target=db_batch_worker, daemon=True).start()
 
 def get_ticker_candles_and_vwap(symbol, db_path="harm_telemetry.db"):
     try:
-        conn = sqlite3.connect(db_path)
+        conn = sqlite3.connect(db_path, timeout=10.0)
         df = pd.read_sql_query(
             "SELECT price FROM tick_history WHERE ticker = ? AND price IS NOT NULL ORDER BY id DESC LIMIT 100",
             conn, params=(symbol,)
@@ -399,7 +422,7 @@ def execute_order(symbol, ticker, quantity, side, limit_price=None, stop_loss=No
         status = get_order_status(order_id)
         if status in ["filled", "ok", "open", "pending"]:
             update_settled_cash_balance(required_capital)
-            log_trade_to_database(symbol, spot_val, stop_loss=stop_loss, shares=qty_num, direction=side)
+            log_trade_to_database(symbol, spot_val, stop_loss=stop_loss, shares=qty_num, direction=side, cost=limit_price)
             try:
                 dispatch_discord_alert(symbol, spot_val, 'ENTRY')
             except Exception:
@@ -409,7 +432,7 @@ def execute_order(symbol, ticker, quantity, side, limit_price=None, stop_loss=No
     else:
         print(f"[*] Tradier Option API status {response.status_code}. Falling back to internal engine option fill.")
         update_settled_cash_balance(required_capital)
-        log_trade_to_database(symbol, spot_val, stop_loss=stop_loss, shares=qty_num, direction=side)
+        log_trade_to_database(symbol, spot_val, stop_loss=stop_loss, shares=qty_num, direction=side, cost=limit_price)
         ACTIVE_TRADES[symbol] = True
         return True
 
@@ -532,24 +555,35 @@ def on_message(ws, message):
                         call_sig, call_shares = safe_eval_playbook_entry(pb, 'evaluate_call_entry', candles_list, float(price), current_vwap, target_level, velocity)
                         put_sig, put_shares   = safe_eval_playbook_entry(pb, 'evaluate_put_entry', candles_list, float(price), current_vwap, target_level, velocity)
 
-                        if call_sig:
-                            direction = "CALL"
-                            print(f"[🚀] SIGNAL TRIGGERED FOR {sym} ({direction}) AT ${price}")
-                            stop_lvl = float(price) - pb.PLAYBOOK_CONFIG.get("atr_14_buffer", 1.50) if hasattr(pb, 'PLAYBOOK_CONFIG') else float(price) * 0.99
-                            if not execute_order(sym, sym, call_shares, "CALL", limit_price=float(price), stop_loss=stop_lvl):
-                                log_trade_to_database(sym, float(price), stop_loss=stop_lvl, shares=call_shares, direction="CALL")
-                                try:
-                                    dispatch_discord_alert(sym, float(price), 'ENTRY')
-                                except Exception:
-                                    pass
-                                ACTIVE_TRADES[sym] = True
-                                
-                        elif put_sig:
-                            direction = "PUT"
-                            print(f"[🚀] SIGNAL TRIGGERED FOR {sym} ({direction}) AT ${price}")
-                            stop_lvl = float(price) + pb.PLAYBOOK_CONFIG.get("atr_14_buffer", 1.50) if hasattr(pb, 'PLAYBOOK_CONFIG') else float(price) * 1.01
-                            if not execute_order(sym, sym, put_shares, "PUT", limit_price=float(price), stop_loss=stop_lvl):
-                                log_trade_to_database(sym, float(price), stop_loss=stop_lvl, shares=put_shares, direction="PUT")
+                        if call_sig or put_sig:
+                            direction = "CALL" if call_sig else "PUT"
+                            sig_shares = call_shares if call_sig else put_shares
+                            
+                            # --- 1. SPREAD & MOMENTUM LOOK-AHEAD GUARD ---
+                            opt_quote = get_live_quote(sym)  # Or option symbol quote
+                            opt_bid = float(opt_quote.get('bid', 0.0))
+                            opt_ask = float(opt_quote.get('ask', 0.0))
+                            
+                            # Check 1: Ensure valid bid/ask liquidity
+                            if opt_ask <= 0 or opt_bid <= 0:
+                                print(f"[GUARD BLOCKED] {sym} {direction}: Invalid Option Quote (Bid: ${opt_bid}, Ask: ${opt_ask})")
+                                continue
+
+                            # Check 2: Spread Threshold (Max 8% slippage risk)
+                            spread_pct = ((opt_ask - opt_bid) / opt_ask) * 100.0
+                            if spread_pct > 8.0:
+                                print(f"[GUARD BLOCKED] {sym} {direction}: Spread too wide ({spread_pct:.2f}% | Bid: ${opt_bid}, Ask: ${opt_ask})")
+                                continue
+
+                            # --- 2. PROCEED TO EXECUTION ---
+                            print(f"[🚀] SIGNAL & LIQUIDITY CONFIRMED FOR {sym} ({direction}) AT Spot ${price} | Option Ask ${opt_ask:.2f}")
+                            if direction == "CALL":
+                                stop_lvl = float(price) - pb.PLAYBOOK_CONFIG.get("atr_14_buffer", 1.50) if hasattr(pb, 'PLAYBOOK_CONFIG') else float(price) * 0.99
+                            else:
+                                stop_lvl = float(price) + pb.PLAYBOOK_CONFIG.get("atr_14_buffer", 1.50) if hasattr(pb, 'PLAYBOOK_CONFIG') else float(price) * 1.01
+
+                            if not execute_order(sym, sym, sig_shares, direction, limit_price=opt_ask, stop_loss=stop_lvl):
+                                log_trade_to_database(sym, float(price), stop_loss=stop_lvl, shares=sig_shares, direction=direction, cost=opt_ask)
                                 try:
                                     dispatch_discord_alert(sym, float(price), 'ENTRY')
                                 except Exception:
