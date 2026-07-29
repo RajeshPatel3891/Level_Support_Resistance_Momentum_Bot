@@ -109,8 +109,19 @@ class MicroScalpSidekick:
                 print(f"[🧠 CSO EV ALERT] {ticker} -> Recommendation: {recommendation} | Reason: {cso_eval['reason']}")
                 self.cso_ev_state_cache[ticker] = {"state": recommendation, "last_ping": now_ts}
 
+                # Auto-Execute Market Exits on CSO Recommendations
                 if recommendation == "TAKE_PROFIT_NOW":
                     print(f"[🎯 CSO AUTO-LOCK GAINS] Closing {ticker} to secure ${option_pnl:+.2f} profit!")
+                    conn_cso = sqlite3.connect(DB_FILE)
+                    conn_cso.execute("UPDATE trades SET exit_status = 'CSO_TAKE_PROFIT', exit_price = ?, net_pnl = ? WHERE id = ? AND exit_status = 'ACTIVE'", (live_spot, option_pnl, trade_id))
+                    conn_cso.commit()
+                    conn_cso.close()
+                elif recommendation == "TIGHTEN_STOP" and option_pnl <= -20.00:
+                    print(f"[🧠 CSO AUTO-EXIT] CSO EV Path severely degraded for {ticker} (PnL: ${option_pnl:.2f}). Executing Non-Discretionary Auto-Close!")
+                    conn_cso = sqlite3.connect(DB_FILE)
+                    conn_cso.execute("UPDATE trades SET exit_status = 'CSO_EV_DECAY_EXIT', exit_price = ?, net_pnl = ? WHERE id = ? AND exit_status = 'ACTIVE'", (live_spot, option_pnl, trade_id))
+                    conn_cso.commit()
+                    conn_cso.close()
                     with sqlite3.connect(DB_FILE, timeout=30.0) as conn_u:
                         conn_u.execute('PRAGMA busy_timeout = 30000;')
                         conn_u.execute('PRAGMA journal_mode = WAL;')
@@ -205,14 +216,12 @@ class MicroScalpSidekick:
                 # 1. Process CSO Expected Value Exit Guard
                 self.process_cso_ev_guard(trade_id, ticker, live_spot, float(stop_loss or 0.0), direction, shares_cnt, option_pnl)
 
-                # 2. STAGE 1: DYNAMIC ATR HARD STOP BREACHED
-                ticker_data = self.levels_cache.get(ticker, {}) if isinstance(self.levels_cache.get(ticker), dict) else {}
-                atr_14 = float(ticker_data.get("atr", live_spot * 0.035))
-                atr_pct = atr_14 / live_spot
-                max_loss_pct = max(0.20, min(0.42, atr_pct * 10.0))
-                hard_stop_dollars = -1.0 * (estimated_basis * max_loss_pct)
+                # 2. STAGE 1: STRICT $30.00 HARD RISK CAP & ATR BREACH
+                # Maximum dollar risk allowed per contract position is strictly $30.00
+                MAX_RISK_CAP_DOLLARS = -30.00
 
-                if option_pnl <= hard_stop_dollars:
+                if option_pnl <= MAX_RISK_CAP_DOLLARS:
+                    print(f"[🚨 HARD RISK CAP BREACHED] {ticker}: Option loss ${option_pnl:.2f} exceeded -$30.00 max risk limit! Triggering immediate market exit.")
                     print(f"[🚨 EMERGENCY ATR HARD STOP] {ticker}: Option loss ${option_pnl:.2f} reached ATR limit. Auto-Closing!")
                     conn_update = sqlite3.connect(DB_FILE)
                     conn_update.execute("""

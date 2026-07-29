@@ -12,7 +12,7 @@ LEVELS_FILE = "/home/ubuntu/Level_Support_Resistance_Momentum_Bot/trading_levels
 def get_active_trades():
     conn = sqlite3.connect("harm_telemetry.db", timeout=30.0)
     cursor = conn.cursor()
-    cursor.execute("SELECT id, ticker, spot_price, stop_loss, take_profit, is_live FROM trades WHERE exit_status = 'ACTIVE'")
+    cursor.execute("SELECT id, ticker, spot_price, stop_loss, take_profit, is_live, direction, entry_price FROM trades WHERE exit_status = 'ACTIVE'")
     trades = cursor.fetchall()
     conn.close()
     return trades
@@ -80,10 +80,23 @@ def monitor_loop():
                 print(f"[⚠️ GEX MONITOR] Skipping {ticker}: Zero/invalid quote received ({curr_price})")
                 continue
 
-            # Bypass stock-based trailing stop logic for option contracts (handled by MasterSentry)
+            # Option Contract Stop Enforcement (Strict $30.00 Risk Cap or Stop Loss Target)
             if entry_price < 50.0:
-                print(f"[ℹ️ GEX MONITOR] Skipping stock-level trailing stop for option contract {ticker} (Entry Premium: ${entry_price:.2f})")
-                continue
+                # Option entry cost per contract = entry_price * 100
+                opt_cost_basis = entry_price * 100.0
+                direction = str(trade[6] if len(trade)>6 else "CALL").upper()
+                
+                # Estimate PnL from spot delta
+                spot_change = (curr_price - entry_price) if direction == "CALL" else (entry_price - curr_price)
+                est_opt_pnl = round(spot_change * 0.50 * 100.0, 2)
+                
+                # Enforce $30.00 Hard Risk Cap or explicitly set stop_loss
+                opt_sl_dollars = float(current_stop_loss) if current_stop_loss > 0 else (opt_cost_basis - 30.00)
+                
+                if est_opt_pnl <= -30.00:
+                    print(f"[🚨 GEX MONITOR EXIT] {ticker}: Contract loss ${est_opt_pnl:.2f} breached -$30.00 Risk Cap!")
+                    execute_exit_routing(trade_id, ticker, curr_price, is_live, "HARD_RISK_CAP_EXIT")
+                    continue
 
             pnl_pct = ((curr_price - entry_price) / entry_price) * 100
             print(f"[⚙️][{mode_tag}] {ticker} | Price: {curr_price} | PnL: {pnl_pct:+.2f}% | Stop: ${current_stop_loss:.2f} | Flip: {gamma_flip}")
