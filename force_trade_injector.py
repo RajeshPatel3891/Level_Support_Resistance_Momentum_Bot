@@ -102,10 +102,27 @@ def force_entry(ticker, direction, force_override=False, live_mode=False):
         cursor = conn.cursor()
         
         # Explicitly tag strategy as TACTICAL_FORCE_SIM
+        real_spot = live_quote['last']
+        if real_spot == 100.0 or real_spot <= 0:
+            try:
+                with open('trading_levels.json', 'r') as lf:
+                    lvls = json.load(lf)
+                    real_spot = lvls.get(ticker, {}).get('spot', 100.0)
+            except Exception:
+                pass
+
+        tp_price = real_spot * 1.03 if direction == 'CALL' else real_spot * 0.97
+        sl_price = real_spot * 0.98 if direction == 'CALL' else real_spot * 1.02
+
+        # Inject with standard option contract parameters so CSO evaluates EV & -$30 Risk Cap
+        opt_entry_premium = 1.25  # $1.25 contract cost = $125 total basis
+        sl_opt_price = opt_entry_premium - 0.30  # -$30.00 max risk cap ($0.95 contract price)
+        tp_opt_price = opt_entry_premium + 0.625 # +$62.50 take profit target ($1.875 contract price)
+
         cursor.execute("""
-            INSERT INTO trades (ticker, spot_price, stop_loss, take_profit, timestamp, entry_price, shares, direction, exit_status, strategy)
-            VALUES (?, ?, ?, ?, DATETIME('now'), ?, 1.0, ?, 'ACTIVE', 'TACTICAL_FORCE_SIM')
-        """, (ticker, live_quote['last'], live_quote['last'] * 0.98, live_quote['last'] * 1.05, live_quote['last'], direction))
+            INSERT INTO trades (ticker, spot_price, stop_loss, take_profit, timestamp, entry_price, shares, direction, exit_status, strategy, is_live)
+            VALUES (?, ?, ?, ?, DATETIME('now'), ?, 1.0, ?, 'ACTIVE', 'TACTICAL_FORCE_SIM', 0)
+        """, (ticker, real_spot, sl_opt_price, tp_opt_price, opt_entry_premium, direction))
         
         conn.commit()
         conn.close()
