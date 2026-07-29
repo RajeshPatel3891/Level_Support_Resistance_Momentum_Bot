@@ -135,7 +135,7 @@ class MicroScalpSidekick:
             except sqlite3.OperationalError:
                 pass # Column already exists
                 
-            cursor.execute("SELECT ticker, spot_price, stop_loss, take_profit, timestamp, entry_price, shares, direction, id, peak_pnl FROM trades WHERE exit_status = 'ACTIVE'")
+            cursor.execute("SELECT ticker, spot_price, stop_loss, take_profit, timestamp, entry_price, shares, direction, id, peak_pnl, occ_symbol FROM trades WHERE exit_status = 'ACTIVE'")
             rows = cursor.fetchall()
             conn.close()
 
@@ -156,18 +156,22 @@ class MicroScalpSidekick:
                 trade_id = row[8]
                 peak_pnl_val = float(row[9]) if (len(row) > 9 and row[9] is not None) else 0.0
 
-                quote = get_live_quote(ticker)
-                if not quote or 'last' not in quote or not quote['last'] or float(quote.get('last') or 0.0) <= 0.0:
-                    print(f"[⚠️ SENTRY] Skipping {ticker}: Zero or invalid after-hours quote received.")
-                    continue
-
-                live_spot = float(quote['last'])
-                if entry_price == 0.0:
-                    entry_price = live_spot
-
-                delta = 0.50
-                spot_diff = live_spot - spot_price if str(direction).upper() == 'CALL' else spot_price - live_spot
-                option_pnl = spot_diff * delta * 100.0 * shares_cnt
+                occ_sym = row[10] if (len(row) > 10 and row[10]) else None
+                # Fetch stock quote for underlying spot tracking
+                stock_quote = get_live_quote(ticker)
+                live_spot = float(stock_quote.get('last') or spot_price) if (stock_quote and stock_quote.get('last')) else spot_price
+                
+                # Fetch option quote for exact Mark PnL if available
+                opt_quote = get_live_quote(occ_sym) if occ_sym else None
+                
+                if opt_quote and opt_quote.get('last') and float(opt_quote['last']) > 0:
+                    live_opt_mark = float(opt_quote['last'])
+                    option_pnl = round((live_opt_mark - entry_price) * shares_cnt * 100.0, 2)
+                else:
+                    # Delta fallback if option quote stream is quiet
+                    delta = 0.50
+                    spot_diff = live_spot - spot_price if str(direction).upper() == 'CALL' else spot_price - live_spot
+                    option_pnl = spot_diff * delta * 100.0 * shares_cnt
 
                 estimated_basis = max(30.0, entry_price * 100.0 * shares_cnt)
                 pnl_pct = option_pnl / estimated_basis

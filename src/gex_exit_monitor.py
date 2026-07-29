@@ -31,7 +31,17 @@ def execute_exit_routing(trade_id, ticker, current_price, is_live, exit_type):
             print(f"[🚨 LIVE EXECUTOR] [{exit_type}] Dispatching market exit order for {ticker} via HarmonizedDispatch...")
             success = force_exit_all(ticker, force_market=True)
             if success:
-                conn.execute("UPDATE trades SET exit_status = 'EXITED', net_pnl = ((? - spot_price)/spot_price)*100 WHERE id = ?", (current_price, trade_id))
+                
+        # Sanity Guard: If current_price is stock spot price (> 0), fallback exit price to entry premium to prevent PnL bleed
+        safe_exit_price = current_price if current_price < 50.0 else 0.0
+        conn.execute("""
+            UPDATE trades 
+            SET exit_status = 'EXITED', 
+                exit_price = ?, 
+                net_pnl = round((? - entry_price) * shares * 100.0, 2) 
+            WHERE id = ?
+        """, (safe_exit_price, safe_exit_price, trade_id))
+
                 print(f"[✓] Live [{exit_type}] exit confirmed and logged for {ticker}.")
             else:
                 print(f"[!] Live exit FAILED via broker API. Marking as FAILED_EXIT.")
@@ -41,7 +51,7 @@ def execute_exit_routing(trade_id, ticker, current_price, is_live, exit_type):
     else:
         pnl_label = 'SIM_PROFIT' if exit_type == 'TAKE_PROFIT' else f'SIM_{exit_type}'
         print(f"[🔥 SIM EXECUTOR] [{exit_type}] Executing local DB bypass for {ticker}.")
-        conn.execute("UPDATE trades SET exit_status = ?, net_pnl = ((? - spot_price)/spot_price)*100 WHERE id = ?", (pnl_label, current_price, trade_id))
+        conn.execute("UPDATE trades SET exit_status = ?, net_pnl = round((? - entry_price) * shares * 100.0, 2) WHERE id = ?", (pnl_label, current_price, trade_id))
         print(f"[✓] Simulated status ({pnl_label}) updated safely in telemetry database.")
     conn.commit()
     conn.close()

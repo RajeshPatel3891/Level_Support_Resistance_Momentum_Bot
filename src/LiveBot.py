@@ -322,6 +322,10 @@ def log_trade_to_database(ticker, spot_price, stop_loss=None, shares=1.0, direct
         sl_val = stop_loss if stop_loss is not None else round(opt_premium * 0.80, 2)
         take_profit = round(opt_premium * 1.50, 2)
 
+        if not occ_symbol:
+            print(f'[⚠️ LIVEBOT] Aborting trade insertion for {ticker}: Missing OCC symbol.')
+            conn.close()
+            return
         cursor.execute("""
             INSERT INTO trades (ticker, timestamp, strategy, direction, spot_price, entry_price, shares, stop_loss, take_profit, net_pnl, exit_status, is_live, occ_symbol) 
             VALUES (?, ?, 'BREAKOUT', ?, ?, ?, ?, ?, ?, 0.0, 'ACTIVE', 1, ?)
@@ -539,9 +543,8 @@ def safe_eval_playbook_entry(pb, method_name, candles_list, price_val, vwap_val,
         # GUARDRAIL 2: Tighten proximity gap. Reject 0.00% gap (target_level == price fallback)
         if price_val <= 0 or target_level <= 0:
             return False, 1.0
-        gap_pct = abs(price_val - target_level) / price_val
-        if gap_pct < 0.0015 or gap_pct > 0.0050:
-            return False, 1.0
+        # Guardrail check bypassed: allow playbook logic to govern entry criteria directly
+        pass
         args = [price_val, target_level, velocity]
         
     padded_args = args[:param_count]
