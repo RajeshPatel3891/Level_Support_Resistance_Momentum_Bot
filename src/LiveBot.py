@@ -652,13 +652,10 @@ def on_message(ws, message):
 
                             # --- 2. PROCEED TO EXECUTION ---
                             print(f"[🚀] SIGNAL & LIQUIDITY CONFIRMED FOR {sym} ({direction}) AT Spot ${price} | Option Ask ${opt_ask:.2f}")
-                            if direction == "CALL":
-                                stop_lvl = float(price) - pb.PLAYBOOK_CONFIG.get("atr_14_buffer", 1.50) if hasattr(pb, 'PLAYBOOK_CONFIG') else float(price) * 0.99
-                            else:
-                                stop_lvl = float(price) + pb.PLAYBOOK_CONFIG.get("atr_14_buffer", 1.50) if hasattr(pb, 'PLAYBOOK_CONFIG') else float(price) * 1.01
+                            # Stop loss set as 20% risk on option premium ask
+                            stop_lvl = round(opt_ask * 0.80, 2)
 
-                            if not execute_order(sym, sym, sig_shares, direction, limit_price=opt_ask, stop_loss=stop_lvl):
-                                log_trade_to_database(sym, float(price), stop_loss=stop_lvl, shares=sig_shares, direction=direction, cost=opt_ask, occ_symbol=occ_symbol)
+                            if execute_order(sym, sym, sig_shares, direction, limit_price=float(price), stop_loss=stop_lvl):
                                 try:
                                     dispatch_discord_alert(sym, float(price), 'ENTRY')
                                 except Exception:

@@ -165,7 +165,7 @@ class MicroScalpSidekick:
                     entry_price = live_spot
 
                 delta = 0.50
-                spot_diff = live_spot - entry_price if str(direction).upper() == 'CALL' else entry_price - live_spot
+                spot_diff = live_spot - spot_price if str(direction).upper() == 'CALL' else spot_price - live_spot
                 option_pnl = spot_diff * delta * 100.0 * shares_cnt
 
                 estimated_basis = max(30.0, entry_price * 100.0 * shares_cnt)
