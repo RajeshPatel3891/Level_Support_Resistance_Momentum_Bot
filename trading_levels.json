@@ -10,9 +10,9 @@
       330.55614999999995,
       335.59
     ],
-    "last_price": 340.44,
-    "spot": 340.08,
-    "vwap": 340.08,
+    "last_price": 338.19,
+    "spot": 338.19,
+    "vwap": 338.19,
     "execution_armed": false,
     "status": "WAITING"
   },
@@ -27,9 +27,9 @@
       194.88225,
       197.85
     ],
-    "last_price": 191.93,
-    "spot": 197.01,
-    "vwap": 197.01,
+    "last_price": 190.01,
+    "spot": 190.01,
+    "vwap": 190.01,
     "execution_armed": false,
     "status": "WAITING"
   },
@@ -44,9 +44,9 @@
       301.35089999999997,
       305.94
     ],
-    "last_price": 302.99,
-    "spot": 307.44,
-    "vwap": 307.44,
+    "last_price": 298.32,
+    "spot": 298.32,
+    "vwap": 298.32,
     "execution_armed": false,
     "status": "WAITING"
   },
@@ -61,9 +61,9 @@
       124.51384999999999,
       126.41
     ],
-    "last_price": 124.63,
-    "spot": 123.53,
-    "vwap": 123.53,
+    "last_price": 123.0,
+    "spot": 123.0,
+    "vwap": 123.0,
     "execution_armed": false,
     "status": "WAITING"
   },
@@ -78,9 +78,9 @@
       16.242649999999998,
       16.49
     ],
-    "last_price": 16.275,
-    "spot": 16.69,
-    "vwap": 16.69,
+    "last_price": 16.33,
+    "spot": 16.33,
+    "vwap": 16.33,
     "execution_armed": false,
     "status": "WAITING"
   },
@@ -95,9 +95,9 @@
       0.0,
       0.0
     ],
-    "last_price": 15.03,
-    "spot": 15.36,
-    "vwap": 15.36,
+    "last_price": 14.84,
+    "spot": 14.84,
+    "vwap": 14.84,
     "execution_armed": false,
     "status": "WAITING"
   },
@@ -112,9 +112,9 @@
       0.0,
       0.0
     ],
-    "last_price": 15.235,
-    "spot": 16.74,
-    "vwap": 16.74,
+    "last_price": 15.25,
+    "spot": 15.25,
+    "vwap": 15.25,
     "execution_armed": false,
     "status": "WAITING"
   },
@@ -129,9 +129,9 @@
       0.0,
       0.0
     ],
-    "last_price": 83.0,
-    "spot": 86.3,
-    "vwap": 86.3,
+    "last_price": 81.88,
+    "spot": 81.88,
+    "vwap": 81.88,
     "execution_armed": false,
     "status": "WAITING"
   },
@@ -146,9 +146,9 @@
       0.0,
       0.0
     ],
-    "last_price": 15.645,
-    "spot": 14.96,
-    "vwap": 14.96,
+    "last_price": 15.28,
+    "spot": 15.28,
+    "vwap": 15.28,
     "execution_armed": false,
     "status": "WAITING"
   }

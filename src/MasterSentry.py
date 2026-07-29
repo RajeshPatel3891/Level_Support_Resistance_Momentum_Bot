@@ -87,15 +87,21 @@ class MicroScalpSidekick:
             print(f"[!] Warning reading macro state in Sentry: {e}")
         return (False, "UNKNOWN", "Fallback Mode", "Unable to read macro state.", "NEUTRAL", {}, 50)
 
-    def process_cso_ev_guard(self, trade_id: int, ticker: str, live_spot: float, stop_loss_val: float, direction: str, shares_cnt: float, option_pnl: float):
+    def process_cso_ev_guard(self, trade_id: int, ticker: str, live_spot: float, stop_loss_val: float, direction: str, shares_cnt: float, option_pnl: float, entry_price: float = 0.0):
         """State Transition Guard for CSO Expected Value (EV) exits."""
         gex_target, stop_loss_val, gex_label = resolve_direction_targets(ticker, live_spot, direction, stop_loss_val)
         
         if not gex_target:
             return
 
+        # Calculate live effective loss if option_pnl is 0.0 or uncalculated
+        if entry_price > 0 and option_pnl == 0.0:
+            effective_pnl = (live_spot - entry_price) * shares_cnt * (-1 if direction == 'PUT' else 1)
+        else:
+            effective_pnl = option_pnl
+
         hit_prob = calculate_gex_hit_probability(live_spot, gex_target, gex_label)
-        cso_eval = evaluate_cso_informed_exit(live_spot, gex_target, stop_loss_val, hit_prob, option_pnl, shares_cnt)
+        cso_eval = evaluate_cso_informed_exit(live_spot, gex_target, stop_loss_val, hit_prob, effective_pnl, shares_cnt)
         recommendation = cso_eval["recommendation"]
 
         now_ts = time.time()
@@ -104,34 +110,45 @@ class MicroScalpSidekick:
         state_changed = (recommendation != cached["state"])
         time_elapsed = now_ts - cached["last_ping"]
 
-        if recommendation in ["TAKE_PROFIT_NOW", "TIGHTEN_STOP"]:
-            if state_changed or time_elapsed >= 120:
-                print(f"[🧠 CSO EV ALERT] {ticker} -> Recommendation: {recommendation} | Reason: {cso_eval['reason']}")
-                self.cso_ev_state_cache[ticker] = {"state": recommendation, "last_ping": now_ts}
+        if state_changed or time_elapsed >= 120:
+            print(f"[🧠 CSO EV ALERT] {ticker} -> Rec: {recommendation} | Effective PnL: ${effective_pnl:.2f} | Reason: {cso_eval['reason']}")
+            self.cso_ev_state_cache[ticker] = {"state": recommendation, "last_ping": now_ts}
 
-                # Auto-Execute Market Exits on CSO Recommendations
-                if recommendation == "TAKE_PROFIT_NOW":
-                    print(f"[🎯 CSO AUTO-LOCK GAINS] Closing {ticker} to secure ${option_pnl:+.2f} profit!")
-                    conn_cso = sqlite3.connect(DB_FILE)
-                    conn_cso.execute("UPDATE trades SET exit_status = 'CSO_TAKE_PROFIT', exit_price = ?, net_pnl = ? WHERE id = ? AND exit_status = 'ACTIVE'", (live_spot, option_pnl, trade_id))
-                    conn_cso.commit()
-                    conn_cso.close()
-                elif recommendation == "TIGHTEN_STOP" and option_pnl <= -20.00:
-                    print(f"[🧠 CSO AUTO-EXIT] CSO EV Path severely degraded for {ticker} (PnL: ${option_pnl:.2f}). Executing Non-Discretionary Auto-Close!")
-                    conn_cso = sqlite3.connect(DB_FILE)
-                    conn_cso.execute("UPDATE trades SET exit_status = 'CSO_EV_DECAY_EXIT', exit_price = ?, net_pnl = ? WHERE id = ? AND exit_status = 'ACTIVE'", (live_spot, option_pnl, trade_id))
-                    conn_cso.commit()
-                    conn_cso.close()
-                    with sqlite3.connect(DB_FILE, timeout=30.0) as conn_u:
-                        conn_u.execute('PRAGMA busy_timeout = 30000;')
-                        conn_u.execute('PRAGMA journal_mode = WAL;')
-                        conn_u.execute("""
-                            UPDATE trades 
-                            SET exit_status = 'CSO_TAKE_PROFIT_LOCK', exit_price = CASE WHEN entry_price < 50.0 THEN round(entry_price + (spot_diff * 0.5), 2) ELSE ? END + (? * 0.0001), net_pnl = ?, cso_notes = ?
-                            WHERE id = ? AND exit_status = 'ACTIVE'
-                        """, (live_spot, trade_id, option_pnl, f"Reason: {cso_eval['reason']}", trade_id))
-                        conn_u.commit()
+        # --- TIER 1: NON-NEGOTIABLE HARD RISK CAP (-$30.00) ---
+        if effective_pnl <= -30.00:
+            print(f"[🚨 CSO HARD RISK CAP] {ticker} breached -$30.00 risk cap (${effective_pnl:.2f}). Executing Non-Discretionary Close!")
+            with sqlite3.connect(DB_FILE, timeout=30.0) as conn_cso:
+                conn_cso.execute("""
+                    UPDATE trades 
+                    SET exit_status = 'CSO_RISK_CAP_STOP', exit_price = ?, net_pnl = ?, cso_notes = ?
+                    WHERE id = ? AND exit_status = 'ACTIVE'
+                """, (live_spot, effective_pnl, f"Hard Cap Breached: ${effective_pnl:.2f}", trade_id))
+                conn_cso.commit()
+            return
 
+        # --- TIER 2: CSO TACTICAL DECAY AUTO-EXIT ---
+        if recommendation == "TIGHTEN_STOP" and effective_pnl <= -20.00:
+            print(f"[🧠 CSO AUTO-EXIT] CSO EV Path degraded for {ticker} (${effective_pnl:.2f}). Executing Dynamic Exit!")
+            with sqlite3.connect(DB_FILE, timeout=30.0) as conn_cso:
+                conn_cso.execute("""
+                    UPDATE trades 
+                    SET exit_status = 'CSO_EV_DECAY_EXIT', exit_price = ?, net_pnl = ?, cso_notes = ?
+                    WHERE id = ? AND exit_status = 'ACTIVE'
+                """, (live_spot, effective_pnl, f"CSO EV Alert: {cso_eval['reason']}", trade_id))
+                conn_cso.commit()
+            return
+
+        # --- TIER 3: TAKE PROFIT AUTO-LOCK ---
+        if recommendation == "TAKE_PROFIT_NOW":
+            print(f"[🎯 CSO AUTO-LOCK GAINS] Closing {ticker} to secure ${effective_pnl:+.2f} profit!")
+            with sqlite3.connect(DB_FILE, timeout=30.0) as conn_cso:
+                conn_cso.execute("""
+                    UPDATE trades 
+                    SET exit_status = 'CSO_TAKE_PROFIT', exit_price = ?, net_pnl = ?, cso_notes = ?
+                    WHERE id = ? AND exit_status = 'ACTIVE'
+                """, (live_spot, effective_pnl, f"CSO Target Hit: {cso_eval['reason']}", trade_id))
+                conn_cso.commit()
+            return
     def audit_active_positions(self):
         if not os.path.exists(DB_FILE):
             return
@@ -214,13 +231,14 @@ class MicroScalpSidekick:
                     continue
 
                 # 1. Process CSO Expected Value Exit Guard
-                self.process_cso_ev_guard(trade_id, ticker, live_spot, float(stop_loss or 0.0), direction, shares_cnt, option_pnl)
+                self.process_cso_ev_guard(trade_id, ticker, live_spot, float(stop_loss or 0.0), direction, shares_cnt, option_pnl, entry_price)
 
                 # 2. STAGE 1: STRICT $30.00 HARD RISK CAP & ATR BREACH
                 # Maximum dollar risk allowed per contract position is strictly $30.00
                 MAX_RISK_CAP_DOLLARS = -30.00
 
-                if option_pnl <= MAX_RISK_CAP_DOLLARS:
+                # Force absolute catch if PnL or SL Risk exceeds -0.00 limit
+                if option_pnl <= MAX_RISK_CAP_DOLLARS or (entry_price and (live_spot - entry_price) * shares_cnt * (-1 if direction == 'PUT' else 1) <= MAX_RISK_CAP_DOLLARS):
                     print(f"[🚨 HARD RISK CAP BREACHED] {ticker}: Option loss ${option_pnl:.2f} exceeded -$30.00 max risk limit! Triggering immediate market exit.")
                     print(f"[🚨 EMERGENCY ATR HARD STOP] {ticker}: Option loss ${option_pnl:.2f} reached ATR limit. Auto-Closing!")
                     conn_update = sqlite3.connect(DB_FILE)

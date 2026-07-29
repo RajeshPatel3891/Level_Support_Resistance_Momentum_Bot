@@ -1,3 +1,4 @@
+import datetime
 import sys
 import os
 import sqlite3
@@ -115,14 +116,19 @@ def force_entry(ticker, direction, force_override=False, live_mode=False):
         sl_price = real_spot * 0.98 if direction == 'CALL' else real_spot * 1.02
 
         # Inject with standard option contract parameters so CSO evaluates EV & -$30 Risk Cap
-        opt_entry_premium = 1.25  # $1.25 contract cost = $125 total basis
-        sl_opt_price = opt_entry_premium - 0.30  # -$30.00 max risk cap ($0.95 contract price)
-        tp_opt_price = opt_entry_premium + 0.625 # +$62.50 take profit target ($1.875 contract price)
+        now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        exp_date_str = datetime.datetime.now().strftime('%y%m%d')
+        strike_int = int(round(real_spot))
+        occ_symbol = f"{ticker}{exp_date_str}{'C' if direction == 'CALL' else 'P'}{strike_int:08d}"
+
+        opt_entry_premium = 1.25
+        sl_opt_price = opt_entry_premium - 0.30
+        tp_opt_price = opt_entry_premium + 0.625
 
         cursor.execute("""
-            INSERT INTO trades (ticker, spot_price, stop_loss, take_profit, timestamp, entry_price, shares, direction, exit_status, strategy, is_live)
-            VALUES (?, ?, ?, ?, DATETIME('now'), ?, 1.0, ?, 'ACTIVE', 'TACTICAL_FORCE_SIM', 0)
-        """, (ticker, real_spot, sl_opt_price, tp_opt_price, opt_entry_premium, direction))
+            INSERT INTO trades (ticker, spot_price, stop_loss, take_profit, timestamp, entry_price, shares, direction, exit_status, strategy, is_live, occ_symbol)
+            VALUES (?, ?, ?, ?, ?, ?, 5.0, ?, 'ACTIVE', 'TACTICAL_FORCE_SIM', 0, ?)
+        """, (ticker, real_spot, sl_opt_price, tp_opt_price, now_str, opt_entry_premium, direction, occ_symbol))
         
         conn.commit()
         conn.close()
