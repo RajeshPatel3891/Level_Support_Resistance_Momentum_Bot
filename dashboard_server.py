@@ -209,6 +209,7 @@ INDEX_HTML_TEMPLATE = """
             <div class="flex items-center gap-2">
               <span class="font-bold text-white text-lg">{{ trade.ticker }}</span>
               <span class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">{{ trade.direction }}</span>
+              <span class="text-xs font-bold font-mono text-emerald-400">{{ trade.dollar_pnl }}</span>
           <span class="text-xs px-2 py-0.5 rounded bg-amber-950 text-amber-400 font-mono border border-amber-800/80 font-bold">{{ trade.contracts }}x</span>
               <span class="text-xs px-2 py-0.5 rounded bg-blue-950 text-blue-400 font-mono border border-blue-800">{{ trade.status }}</span>
             </div>
@@ -221,7 +222,7 @@ INDEX_HTML_TEMPLATE = """
           <!-- Rich Telemetry Sub-Panel -->
           <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs bg-slate-950 p-2 rounded border border-slate-800/60 font-mono">
             <div><span class="text-slate-500">Strategy:</span> <span class="text-slate-300">{{ trade.strategy }}</span></div>
-            <div><span class="text-slate-500">Entry/Exit:</span> <span class="text-slate-300">{{ trade.basis }} / {{ trade.exit_price }}</span></div>
+            <div><span class="text-slate-500">Entry/Exit:</span> <span class="text-slate-300">{{ trade.entry_price }} / {{ trade.exit_price }}</span></div>
             <div><span class="text-slate-500">Stop Loss:</span> <span class="text-red-400">{{ trade.stop_loss }}</span></div>
             <div><span class="text-slate-500">Target:</span> <span class="text-emerald-400">{{ trade.take_profit }}</span></div>
           </div>
@@ -302,9 +303,10 @@ def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A'
     direction = str(target_trade.get('direction', 'CALL'))
     delta = 0.50
     
-    base_ref = stored_spot if stored_spot > 0 else last_price
-    spot_diff = (last_price - base_ref) if direction.upper() == 'CALL' else (base_ref - last_price)
-    realized_pnl = round(spot_diff * delta * 100 * shares, 2)
+    # True Option Premium PnL calculation
+    entry_premium = float(target_trade.get('cost', target_trade.get('entry_price', 0.0)))
+    exit_premium = last_price # Or fetched option quote last/bid
+    realized_pnl = round((exit_premium - entry_premium) * 100 * shares, 2)
     
     # 3. Update Trade item in DynamoDB
     trades_table.update_item(
@@ -335,132 +337,64 @@ def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A'
     return True
 
 def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
-    import boto3
-    from boto3.dynamodb.conditions import Key
+    import sqlite3
     from datetime import datetime
-
-    dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
-    trades_table = dynamodb.Table('HarmonizedTrades')
-    ledger_table = dynamodb.Table('HarmonizedLedger')
 
     if not selected_date:
         selected_date = datetime.now().strftime('%Y-%m-%d')
 
-    ledger_res = ledger_table.get_item(Key={'tenant_id': tenant_id, 'date': selected_date})
-    ledger_item = ledger_res.get('Item', {})
-
-    starting_balance = float(ledger_item.get('starting_settled_cash', '6535.24'))
-    total_closed_pnl = float(ledger_item.get('realized_pnl', '0.00'))
-    unsettled = float(ledger_item.get('unsettled_cash', '0.00'))
-
-    trades_res = trades_table.query(
-        KeyConditionExpression=Key('tenant_id').eq(tenant_id)
-    )
-    all_trades = trades_res.get('Items', [])
-
+    starting_balance = 6535.24
+    unsettled = 0.0
     active_trades = []
     db_closed = []
+    total_closed_pnl = 0.0
     total_floating_pnl = 0.0
 
-    for t in all_trades:
-        ts = str(t.get('timestamp', ''))
-        trade_dict = dict(t)
-        ticker = trade_dict.get('ticker')
-        
-        # 1. Fetch Live Quote
-        quote = get_live_quote(ticker) if ticker else {}
-        stored_spot = float(t.get('spot_price', 0.0))
-        last_price = float(quote.get('last', stored_spot)) if quote.get('last') else float(t.get('price', stored_spot))
-        
-        entry = float(t.get('entry_price', t.get('basis', 0)))
-        shares = float(t.get('shares', 1))
-        direction = str(t.get('direction', 'CALL'))
-        delta = 0.50
-        
-        # 2. PnL Calculation
-        base_ref = stored_spot if stored_spot > 0 else last_price
-        spot_diff = (last_price - base_ref) if direction.upper() == 'CALL' else (base_ref - last_price)
-        
-        dollar_pnl = round(spot_diff * delta * 100 * shares, 2)
-        position_cost = float(t.get('cost', entry * 100 * shares if entry < 50 else entry * shares))
-        pnl_pct = (dollar_pnl / position_cost * 100.0) if position_cost > 0 else 0.0
+    try:
+        conn = sqlite3.connect('harm_telemetry.db')
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
 
-        trade_dict['price'] = f"{last_price:.2f}"
-        trade_dict['net_pnl'] = dollar_pnl
-        trade_dict['pnl_pct'] = f"{pnl_pct:+.2f}%"
-        trade_dict['dollar_pnl'] = f"${dollar_pnl:+.2f}"
-        trade_dict['pnl_class'] = "text-emerald-400 font-bold" if dollar_pnl >= 0 else "text-rose-400 font-bold"
-        trade_dict['exit_price'] = float(t.get('exit_price', 0)) if t.get('exit_price') else None
+        # 1. Fetch Active Trades
+        cursor.execute("SELECT * FROM trades WHERE exit_status = 'ACTIVE'")
+        for r in cursor.fetchall():
+            d = dict(r)
+            d['price'] = f"{d.get('spot_price', 0.0):.2f}"
+            d['dollar_pnl'] = f"${float(d.get('net_pnl') or 0.0):+.2f}"
+            active_trades.append(d)
 
-        # 3. Dynamic CSO Exit Evaluation
-        gex_target = float(t.get('gex_target', t.get('take_profit', 0.0)))
-        stop_loss_val = float(t.get('stop_loss', 0.0))
-        hit_prob = float(str(t.get('hit_probability', '50')).replace('%', ''))
-        
-        try:
-            cso_eval = evaluate_cso_informed_exit(
-                spot=last_price,
-                target=gex_target,
-                stop_loss=stop_loss_val,
-                prob_win=hit_prob,
-                floating_pnl=dollar_pnl,
-                shares=shares,
-                delta=delta
-            )
+        # 2. Fetch Closed Trades
+        cursor.execute("SELECT * FROM trades WHERE exit_status LIKE 'CSO_%' OR exit_status = 'EXITED' ORDER BY id DESC LIMIT 10")
+        for r in cursor.fetchall():
+            d = dict(r)
+            pnl = float(d.get('net_pnl') or 0.0)
+            total_closed_pnl += pnl
             
-            # Map CSO outputs to trade_dict
-            if isinstance(cso_eval, dict):
-                trade_dict['cso_recommendation'] = cso_eval.get('recommendation', trade_dict.get('cso_recommendation', 'ARMED'))
-                trade_dict['cso_badge_bg'] = cso_eval.get('cso_badge_bg', 'bg-emerald-950')
-                trade_dict['cso_badge_text'] = cso_eval.get('cso_badge_text', 'text-emerald-400')
-                
-                # Check for Auto-Close triggers
-                rec = trade_dict['cso_recommendation'].upper()
-                if rec in ['EXIT_NOW', 'PROFIT_TAKE_TRIM', 'TAKE_PROFIT_NOW', 'SL_TRIGGER', 'AUTO_CLOSE']:
-                    print(f"[CSO AUTO-CLOSE TRIGGERED] {ticker} -> Signal: {rec} | PnL: ${dollar_pnl:+.2f}")
-                    close_position_in_db(ticker, exit_price=last_price, tenant_id=tenant_id)
-        except Exception as e:
-            print(f"[CSO Evaluation Warning] {ticker}: {e}")
+            # Ensure keys exist for template rendering
+            d['entry_price'] = f"{float(d.get('cost') or d.get('entry_price') or 0.0):.2f}"
+            d['exit_price'] = f"{float(d.get('exit_price') or 0.0):.2f}"
+            d['dollar_pnl'] = f"${pnl:+,.2f}"
+            
+            # Use actual option cost/premium if stored, else fallback correctly
+            entry = float(d.get('cost') or d.get('entry_price') or 0.0)
+            exit_p = float(d.get('exit_price') or entry or 0.0)
+            
+            d['entry_price'] = f"{entry:.2f}"
+            d['exit_price'] = f"{exit_p:.2f}"
+            d['display_pnl'] = f"{pnl:+.2f}"
+            d['pnl'] = f"{pnl:+.2f}"
+            d['net_pnl'] = f"{pnl:+.2f}"
+            d['status'] = d.get('exit_status', 'CLOSED')
+            db_closed.append(d)
 
-        if trade_dict.get('status') == 'ACTIVE':
-            active_trades.append(trade_dict)
-            total_floating_pnl += dollar_pnl
-        elif selected_date in ts:
-            db_closed.append(trade_dict)
+        conn.close()
+    except Exception as e:
+        print(f"SQLite fetch_portfolio_state error: {e}")
 
-    total_pnl = total_floating_pnl if active_trades else float(ledger_item.get('floating_pnl', '0.00'))
+    settled_free = starting_balance + total_closed_pnl
+    deployed_capital = sum(float(t.get('entry_price', 0.0)) for t in active_trades)
 
-    # 1. Deployed Capital = sum of cost of active open positions
-    deployed_capital = round(sum(float(t.get('cost', 0.0)) for t in active_trades), 2)
-    
-    # 2. Unsettled Cash = proceeds from closed trades today awaiting 24h settlement
-    # Proceeds = Original Cost Outlay + Realized PnL
-    # Calculate total gross proceeds for closed positions today
-    today_closed_proceeds = 0.0
-    for t in db_closed:
-        pnl = float(t.get('net_pnl', t.get('pnl', 0.0)))
-        # Base cost: 10 contracts @ $0.58 = $580.00
-        cost = float(t.get('cost', 0.0))
-        if cost <= 0:
-            sh = float(t.get('shares', 10.0 if t.get('ticker') == 'PLTR' else 1.0))
-            ep = float(t.get('entry_price') or t.get('basis') or t.get('spot_price', 0.0))
-            cost = sh * ep * 100.0 if ep < 5.0 else sh * ep
-        today_closed_proceeds += (cost + pnl)
-
-    # If only PLTR closed today, proceeds = $580 outlay + $1075 pnl = $1655.00
-    if len(db_closed) == 1 and db_closed[0].get('ticker') == 'PLTR':
-        today_closed_proceeds = 1655.00
-
-    unsettled = round(today_closed_proceeds, 2)
-    
-    # 1. Deployed Capital = sum of cost of active open trades
-    deployed_capital = round(sum(float(t.get('cost', 0.0)) for t in active_trades), 2)
-    
-    # 2. Settled Free Cash = Starting Balance - Deployed Capital - Original Principal Tied Up in Unsettled Trades
-    unsettled_principal = max(0.0, unsettled - total_closed_pnl)
-    settled_free = round(starting_balance - deployed_capital - unsettled_principal, 2)
-
-    return active_trades, db_closed, total_pnl, total_closed_pnl, selected_date, starting_balance, settled_free, deployed_capital, unsettled
+    return active_trades, db_closed, total_floating_pnl, total_closed_pnl, selected_date, starting_balance, settled_free, deployed_capital, unsettled
 
 @app.get("/api/proximity")
 async def get_proximity():
@@ -600,16 +534,37 @@ async def close_all_positions():
             close_position_in_db(item.get('ticker'))
     return RedirectResponse(url="/", status_code=303)
 
+
+@app.get("/dashboard_data.json")
+async def get_dashboard_data_json():
+    import sqlite3
+    try:
+        conn = sqlite3.connect('harm_telemetry.db')
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT ticker, direction, spot_price, entry_price, net_pnl FROM trades WHERE exit_status = 'ACTIVE'")
+        active = [{"ticker": r[0], "direction": r[1], "spot": r[2], "entry": r[3], "pnl": r[4]} for r in cursor.fetchall()]
+        
+        cursor.execute("SELECT ticker, direction, spot_price, exit_price, net_pnl, exit_status FROM trades WHERE exit_status LIKE 'CSO_%' OR exit_status = 'EXITED' ORDER BY id DESC LIMIT 10")
+        closed = [{"ticker": r[0], "direction": r[1], "entry": r[2], "exit": r[3], "pnl": r[4], "status": r[5]} for r in cursor.fetchall()]
+        
+        cursor.execute("SELECT SUM(net_pnl) FROM trades WHERE exit_status LIKE 'CSO_%' OR exit_status = 'EXITED'")
+        total_pnl = cursor.fetchone()[0] or 0.0
+        
+        conn.close()
+        return {
+            "active_positions": active,
+            "closed_positions": closed,
+            "realized_pnl": f"${total_pnl:+.2f}"
+        }
+    except Exception as e:
+        return {"active_positions": [], "closed_positions": [], "error": str(e)}
+
+
 if __name__ == '__main__':
     import uvicorn
     uvicorn.run(app, host='0.0.0.0', port=8000)
 
 import os
 
-@app.get("/dashboard_data.json")
-async def get_dashboard_data_json():
-    import json
-    if os.path.exists("dashboard_data.json"):
-        with open("dashboard_data.json", "r") as f:
-            return json.load(f)
-    return {"active_positions": [], "closed_positions": [], "summary": {}}
+

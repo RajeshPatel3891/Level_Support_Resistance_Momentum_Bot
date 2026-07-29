@@ -36,7 +36,7 @@ tmux new-window -t $SESSION -n "Guardrails" "bash -c 'while true; do clear; ./ve
 tmux new-window -t $SESSION -n "MasterSentry" "bash -c 'while true; do ./venv/bin/python3 -u src/MasterSentry.py; echo \"[!] MasterSentry exited. Restarting in 5s...\"; sleep 5; done; exec bash'"
 
 # 5. Dashboard Data Generator
-tmux new-window -t $SESSION -n "Dash_Gen" "bash -c 'while true; do ./venv/bin/python3 -u src/generate_dashboard_data.py; sleep 10; done; exec bash'"
+tmux new-window -t $SESSION -n "Dash_Gen" "bash -c 'while true; do ./venv/bin/./venv/bin/python3 -u src/generate_dashboard_data.py; sleep 10; done; exec bash'"
 
 # 6. Uvicorn Dashboard Server
 tmux new-window -t $SESSION -n "Dash_Server" "bash -c './venv/bin/uvicorn dashboard_server:app --host 0.0.0.0 --port 8000 --reload; exec bash'"

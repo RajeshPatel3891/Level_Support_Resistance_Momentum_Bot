@@ -12,7 +12,7 @@ def get_target_expiration_date():
     - After 1:30 PM EST  -> Returns tomorrow's date (1DTE)
     """
     tz = pytz.timezone('US/Eastern')
-    now_et = datetime.datetime.now(tz)
+    now_et = datetime.now(tz)
     cutoff = now_et.replace(hour=13, minute=30, second=0, microsecond=0)
     
     if now_et >= cutoff:
@@ -147,6 +147,8 @@ def fetch_occ_option_symbol(underlying: str, option_type: str, spot_price: float
         token = os.getenv("TRADIER_TOKEN")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     
+    target_exp = get_target_expiration_date()
+    
     try:
         exp_res = requests.get(f"{base_url}/markets/options/expirations", params={"symbol": underlying}, headers=headers, timeout=3)
         if exp_res.status_code == 200:
@@ -154,7 +156,8 @@ def fetch_occ_option_symbol(underlying: str, option_type: str, spot_price: float
             if isinstance(expirations, str):
                 expirations = [expirations]
             if expirations:
-                target_exp = expirations[0]
+                if target_exp not in expirations:
+                    target_exp = expirations[0]
                 
                 chain_res = requests.get(
                     f"{base_url}/markets/options/chains",
@@ -206,6 +209,14 @@ def init_account_ledger(db_path="harm_telemetry.db", starting_capital=2000.00):
             ''', (today_str, starting_capital, starting_capital))
             conn.commit()
             print(f"[✓] Initialized account ledger for {today_str} with ${starting_capital:,.2f} settled cash.")
+        
+        # Ensure occ_symbol column exists in trades table
+        try:
+            cursor.execute("ALTER TABLE trades ADD COLUMN occ_symbol TEXT;")
+            conn.commit()
+        except Exception:
+            pass
+
         conn.close()
     except Exception as e:
         print(f"[-] Account Ledger Init Error: {e}", file=sys.stderr)
@@ -301,22 +312,23 @@ def get_order_status(order_id):
     response = requests.get(url, headers=headers)
     return response.json().get("order", {}).get("status") if response.status_code == 200 else "UNKNOWN"
 
-def log_trade_to_database(ticker, spot_price, stop_loss=None, shares=1.0, direction="CALL", cost=None):
+def log_trade_to_database(ticker, spot_price, stop_loss=None, shares=1.0, direction="CALL", cost=None, occ_symbol=None):
     try:
         conn = sqlite3.connect("harm_telemetry.db", timeout=10.0)
         cursor = conn.cursor()
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        sl_val = stop_loss if stop_loss is not None else round(spot_price * 0.990, 2)
-        take_profit = round(spot_price + 3.98, 2)
-        opt_premium = float(cost) if cost else round(max(0.80, spot_price * 0.012), 2)
-        entry_spot = opt_premium  # Align scale to option premium
+        
+        opt_premium = float(cost) if (cost and float(cost) > 0) else round(max(0.80, spot_price * 0.012), 2)
+        sl_val = stop_loss if stop_loss is not None else round(opt_premium * 0.80, 2)
+        take_profit = round(opt_premium * 1.50, 2)
+
         cursor.execute("""
-            INSERT INTO trades (ticker, timestamp, strategy, direction, spot_price, entry_price, shares, stop_loss, take_profit, net_pnl, exit_status, is_live) 
-            VALUES (?, ?, 'BREAKOUT', ?, ?, ?, ?, ?, ?, 0.0, 'ACTIVE', 1)
-        """, (ticker, timestamp, direction, entry_spot, opt_premium, float(shares), sl_val, take_profit))
+            INSERT INTO trades (ticker, timestamp, strategy, direction, spot_price, entry_price, shares, stop_loss, take_profit, net_pnl, exit_status, is_live, occ_symbol) 
+            VALUES (?, ?, 'BREAKOUT', ?, ?, ?, ?, ?, ?, 0.0, 'ACTIVE', 1, ?)
+        """, (ticker, timestamp, direction, spot_price, opt_premium, float(shares), sl_val, take_profit, occ_symbol))
         conn.commit()
         conn.close()
-        print(f"[✓] Logged verified options trade for {ticker} (Contracts: {shares}, SL: ${sl_val:.2f}) to SQLite.")
+        print(f"[✓] Logged verified LIVE OPTION trade for {ticker} ({occ_symbol or ticker}) | Contracts: {shares} | Entry Premium: ${opt_premium:.2f} | SL: ${sl_val:.2f}")
     except Exception as e:
         print(f"[-] DB Log Error: {e}", file=sys.stderr)
 
@@ -378,16 +390,81 @@ def execute_order(symbol, ticker, quantity, side, limit_price=None, stop_loss=No
     except (ValueError, TypeError):
         qty_num = 1.0
 
-    estimated_contract_cost = 250.00
-    required_capital = qty_num * estimated_contract_cost
+    opt_quote = get_live_quote(occ_symbol) if occ_symbol else {}
+    fill_premium = float(opt_quote.get('ask') or opt_quote.get('last') or opt_quote.get('close') or 0.0)
+    
+    if fill_premium <= 0:
+        print(f"[!] REJECTED: Unable to fetch valid live Tradier ask quote for {occ_symbol}")
+        return False
+
+    required_capital = qty_num * fill_premium * 100.0
     available_settled_cash = get_available_settled_cash()
 
     if available_settled_cash < required_capital:
-        adjusted_quantity = int(available_settled_cash // estimated_contract_cost)
-        if adjusted_quantity > 0:
-            print(f"[*] Capital Auto-Scale: Reducing {symbol} options contracts from {qty_num} -> {adjusted_quantity} to fit ${available_settled_cash:,.2f} budget.")
-            qty_num = float(adjusted_quantity)
-            required_capital = qty_num * estimated_contract_cost
+        max_contracts = int(available_settled_cash // (fill_premium * 100.0))
+        if max_contracts > 0:
+            print(f"[*] Capital Auto-Scale: Adjusting {symbol} contracts from {qty_num} -> {max_contracts} for ${available_settled_cash:,.2f} cash.")
+            qty_num = float(max_contracts)
+            required_capital = qty_num * fill_premium * 100.0
+        else:
+            print(f"[!] REJECTED: Insufficient Settled Cash for Option (${available_settled_cash:.2f} available, ${required_capital:.2f} needed)")
+            return False
+
+    base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
+    token = os.getenv("TRADIER_SANDBOX_TOKEN") if "sandbox" in base_url.lower() else os.getenv("TRADIER_TOKEN")
+    account_id = os.getenv("TRADIER_ACCOUNT_ID")
+    
+    order_side = "buy_to_open" if side.upper() in ["CALL", "BUY"] else "sell_to_open"
+    payload = {
+        "class": "option", 
+        "symbol": symbol, 
+        "option_symbol": occ_symbol,
+        "side": order_side, 
+        "quantity": str(int(qty_num)), 
+        "type": "market", 
+        "duration": "day"
+    }
+    
+    response = requests.post(
+        f"{base_url}/accounts/{account_id}/orders", 
+        data=payload, 
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    )
+    
+    if response.status_code == 200:
+        order_data = response.json().get("order", {})
+        order_id = order_data.get("id")
+        time.sleep(2)
+        status = get_order_status(order_id)
+        if status in ["filled", "ok", "open", "pending"]:
+            update_settled_cash_balance(required_capital)
+            log_trade_to_database(symbol, spot_val, stop_loss=stop_loss, shares=qty_num, direction=side, cost=fill_premium, occ_symbol=occ_symbol)
+            try:
+                dispatch_discord_alert(symbol, spot_val, 'ENTRY')
+            except Exception:
+                pass
+            ACTIVE_TRADES[symbol] = True
+            return True
+        else:
+            print(f"[!] TRADIER ORDER PLACED BUT FAILED FILL CHECK. Status: {status}")
+            return False
+    else:
+        print(f"[!] TRADIER API REJECTED ORDER ({response.status_code}): {response.text}")
+        return False
+
+    # Dynamic live Tradier option premium quote fetch
+    opt_quote = get_live_quote(occ_symbol) if occ_symbol else {}
+    fill_premium = float(opt_quote.get('ask') or opt_quote.get('last') or opt_quote.get('close') or 1.50)
+
+    required_capital = qty_num * fill_premium * 100.0
+    available_settled_cash = get_available_settled_cash()
+
+    if available_settled_cash < required_capital:
+        max_contracts = int(available_settled_cash // (fill_premium * 100.0))
+        if max_contracts > 0:
+            print(f"[*] Capital Auto-Scale: Reducing {symbol} options contracts from {qty_num} -> {max_contracts} to fit ${available_settled_cash:,.2f} budget.")
+            qty_num = float(max_contracts)
+            required_capital = qty_num * fill_premium * 100.0
         else:
             print(f"[!] REJECTED: Insufficient Settled Cash for Options Premium (${available_settled_cash:.2f} available, ${required_capital:.2f} needed)")
             return False
@@ -422,7 +499,7 @@ def execute_order(symbol, ticker, quantity, side, limit_price=None, stop_loss=No
         status = get_order_status(order_id)
         if status in ["filled", "ok", "open", "pending"]:
             update_settled_cash_balance(required_capital)
-            log_trade_to_database(symbol, spot_val, stop_loss=stop_loss, shares=qty_num, direction=side, cost=limit_price)
+            log_trade_to_database(symbol, spot_val, stop_loss=stop_loss, shares=qty_num, direction=side, cost=fill_premium, occ_symbol=occ_symbol)
             try:
                 dispatch_discord_alert(symbol, spot_val, 'ENTRY')
             except Exception:
@@ -430,11 +507,8 @@ def execute_order(symbol, ticker, quantity, side, limit_price=None, stop_loss=No
             ACTIVE_TRADES[symbol] = True
             return True
     else:
-        print(f"[*] Tradier Option API status {response.status_code}. Falling back to internal engine option fill.")
-        update_settled_cash_balance(required_capital)
-        log_trade_to_database(symbol, spot_val, stop_loss=stop_loss, shares=qty_num, direction=side, cost=limit_price)
-        ACTIVE_TRADES[symbol] = True
-        return True
+        print(f"[!] TRADIER API REJECTED ORDER ({response.status_code}): {response.text}")
+        return False
 
     return False
 
@@ -560,7 +634,8 @@ def on_message(ws, message):
                             sig_shares = call_shares if call_sig else put_shares
                             
                             # --- 1. SPREAD & MOMENTUM LOOK-AHEAD GUARD ---
-                            opt_quote = get_live_quote(sym)  # Or option symbol quote
+                            occ_symbol = fetch_occ_option_symbol(sym, direction, float(price))
+                            opt_quote = get_live_quote(occ_symbol) if occ_symbol else get_live_quote(sym)
                             opt_bid = float(opt_quote.get('bid', 0.0))
                             opt_ask = float(opt_quote.get('ask', 0.0))
                             
@@ -583,7 +658,7 @@ def on_message(ws, message):
                                 stop_lvl = float(price) + pb.PLAYBOOK_CONFIG.get("atr_14_buffer", 1.50) if hasattr(pb, 'PLAYBOOK_CONFIG') else float(price) * 1.01
 
                             if not execute_order(sym, sym, sig_shares, direction, limit_price=opt_ask, stop_loss=stop_lvl):
-                                log_trade_to_database(sym, float(price), stop_loss=stop_lvl, shares=sig_shares, direction=direction, cost=opt_ask)
+                                log_trade_to_database(sym, float(price), stop_loss=stop_lvl, shares=sig_shares, direction=direction, cost=opt_ask, occ_symbol=occ_symbol)
                                 try:
                                     dispatch_discord_alert(sym, float(price), 'ENTRY')
                                 except Exception:

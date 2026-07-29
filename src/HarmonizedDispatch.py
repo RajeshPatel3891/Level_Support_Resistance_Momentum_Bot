@@ -160,7 +160,7 @@ def force_exit_all(symbol, limit_price=None, force_market=False):
 if __name__ == "__main__":
     print("=" * 65)
     print("[+] HARMONIZED AI DISPATCH ENGINE INITIALIZED")
-    print("Target Session: July 22, 2026 | Session Bell: Active")
+    print("Target Session: July 28, 2026 | Session Bell: Active")
     print("=" * 65)
 
     # Initialize database tables and deduplication constraints
