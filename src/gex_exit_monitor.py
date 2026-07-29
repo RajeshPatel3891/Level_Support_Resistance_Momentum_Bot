@@ -65,6 +65,16 @@ def monitor_loop():
             call_wall = ticker_data.get("call_wall", take_profit)
             
             mode_tag = "LIVE" if is_live == 1 else "SIM"
+            # Zero-quote or invalid price sanity guard
+            if curr_price <= 0.0:
+                print(f"[⚠️ GEX MONITOR] Skipping {ticker}: Zero/invalid quote received ({curr_price})")
+                continue
+
+            # Bypass stock-based trailing stop logic for option contracts (handled by MasterSentry)
+            if entry_price < 50.0:
+                print(f"[ℹ️ GEX MONITOR] Skipping stock-level trailing stop for option contract {ticker} (Entry Premium: ${entry_price:.2f})")
+                continue
+
             pnl_pct = ((curr_price - entry_price) / entry_price) * 100
             print(f"[⚙️][{mode_tag}] {ticker} | Price: {curr_price} | PnL: {pnl_pct:+.2f}% | Stop: ${current_stop_loss:.2f} | Flip: {gamma_flip}")
 
