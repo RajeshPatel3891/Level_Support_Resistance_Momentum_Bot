@@ -157,7 +157,8 @@ class MicroScalpSidekick:
                 peak_pnl_val = float(row[9]) if (len(row) > 9 and row[9] is not None) else 0.0
 
                 quote = get_live_quote(ticker)
-                if not quote or 'last' not in quote or not quote['last']:
+                if not quote or 'last' not in quote or not quote['last'] or float(quote.get('last') or 0.0) <= 0.0:
+                    print(f"[⚠️ SENTRY] Skipping {ticker}: Zero or invalid after-hours quote received.")
                     continue
 
                 live_spot = float(quote['last'])
