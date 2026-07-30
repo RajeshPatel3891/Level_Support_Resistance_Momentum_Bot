@@ -8,6 +8,16 @@ DB_PATH = os.path.join(os.path.dirname(current_dir), 'harm_telemetry.db')
 JSON_OUTPUT_PATH = os.path.join(os.path.dirname(current_dir), 'dashboard_data.json')
 
 def fetch_and_compile_telemetry():
+    # Load live market data from trading_levels.json
+    levels_path = os.path.join(os.path.dirname(current_dir), 'trading_levels.json')
+    data = {}
+    if os.path.exists(levels_path):
+        try:
+            with open(levels_path, 'r') as lf:
+                data = json.load(lf)
+        except Exception as e:
+            print(f"[!] Error loading trading_levels.json: {e}")
+
     if not os.path.exists(DB_PATH):
         print(f"[*] Database not found at {DB_PATH}")
         return
@@ -83,11 +93,54 @@ def fetch_and_compile_telemetry():
                 
                 # 2. Dynamic Live Option PnL based on stock movement
                 # Calculate spot change relative to baseline stock price
-                spot_now = float(trade_obj.get("spot_price") or 100.0)
-                entry_spot = float(trade_obj.get("spot_price") or spot_now or 0.0)
+                # Check for live option mark in trading levels/quotes
+                occ_sym = trade_obj.get("occ_symbol") or ""
+                if not occ_sym and "OCC:" in str(trade_obj.get("cso_notes")):
+                    import re
+                    m = re.search(r'OCC:\s*([A-Z0-9]+)', str(trade_obj.get("cso_notes")))
+                    if m: occ_sym = m.group(1)
                 
-                spot_diff = (spot_now - entry_spot) if "CALL" in str(direction).upper() else (entry_spot - spot_now)
-                calc_floating = round(spot_diff * 0.50 * 100.0, 2)
+                opt_mark = 0.0
+                # Direct Tradier live quote fetch for active option contracts
+                tradier_token = os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN")
+                tradier_base = os.getenv("TRADIER_BASE_URL", "https://sandbox.tradier.com/v1")
+                
+                if occ_sym and tradier_token:
+                    try:
+                        import urllib.request
+                        q_url = f"{tradier_base}/markets/quotes?symbols={occ_sym},{ticker}"
+                        req = urllib.request.Request(q_url, headers={
+                            "Authorization": f"Bearer {tradier_token}",
+                            "Accept": "application/json"
+                        })
+                        with urllib.request.urlopen(req, timeout=3) as resp:
+                            if resp.status == 200:
+                                q_data = json.loads(resp.read().decode())
+                                quotes = q_data.get("quotes", {}).get("quote", [])
+                                if isinstance(quotes, dict): quotes = [quotes]
+                                for q in quotes:
+                                    if q.get("symbol") == occ_sym:
+                                        opt_mark = float(q.get("last") or q.get("ask") or q.get("bid") or 0.0)
+                                    elif q.get("symbol") == ticker:
+                                        t_info["last_price"] = float(q.get("last") or q.get("close") or 0.0)
+                    except Exception as e:
+                        print(f"[-] Tradier quote fetch exception for {occ_sym}: {e}")
+
+                # Extract live stock price directly from data dict loaded at start of function
+                t_info = data.get(ticker, {}) if isinstance(data, dict) else {}
+                live_stock_spot = float(t_info.get("last_price") or t_info.get("last") or t_info.get("spot") or 0.0)
+                if live_stock_spot == 0.0:
+                    live_stock_spot = float(spot_price or 0.0)
+
+                spot_now = live_stock_spot
+                entry_stock_spot = float(spot_price) if spot_price > 0 else live_stock_spot
+
+                if opt_mark > 0.0:
+                    calc_floating = round((opt_mark - opt_cost) * 100.0, 2)
+                else:
+                    # Delta PnL estimation: ($0.50 delta x 100 shares per contract)
+                    spot_diff = (live_stock_spot - entry_stock_spot) if "CALL" in str(direction).upper() else (entry_stock_spot - live_stock_spot)
+                    calc_floating = round(spot_diff * 0.50 * 100.0, 2)
                 
                 trade_obj["net_pnl"] = calc_floating
                 floating_pnl += calc_floating

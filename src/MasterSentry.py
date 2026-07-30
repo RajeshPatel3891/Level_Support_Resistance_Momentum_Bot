@@ -94,14 +94,18 @@ class MicroScalpSidekick:
         if not gex_target:
             return
 
-        # Calculate live effective loss if option_pnl is 0.0 or uncalculated
+        # Calculate live effective loss safely without stock-spot cross-talk
         if entry_price > 0 and option_pnl == 0.0:
-            effective_pnl = (live_spot - entry_price) * shares_cnt * (-1 if direction == 'PUT' else 1)
+            # DYNAMIC GUARDRAIL: Zero heuristics. If option_pnl is 0.0 on an option trade,
+            # never evaluate stock spot price against option entry cost.
+            effective_pnl = 0.0
         else:
             effective_pnl = option_pnl
 
         hit_prob = calculate_gex_hit_probability(live_spot, gex_target, gex_label)
-        cso_eval = evaluate_cso_informed_exit(live_spot, gex_target, stop_loss_val, hit_prob, effective_pnl, shares_cnt)
+        # DYNAMIC BRIDGE: If option_pnl is 0.0 on an option contract, do not pass stock spot price to RiskEngine
+        eval_spot = entry_price if (entry_price > 0 and option_pnl == 0.0 and live_spot > entry_price * 2.0) else live_spot
+        cso_eval = evaluate_cso_informed_exit(eval_spot, gex_target, stop_loss_val, hit_prob, effective_pnl, shares_cnt)
         recommendation = cso_eval["recommendation"]
 
         now_ts = time.time()

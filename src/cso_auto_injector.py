@@ -4,37 +4,84 @@ import time
 import subprocess
 import os
 import urllib.request
+import urllib.parse
+from dotenv import load_dotenv
+
+# Load environment variables from .env
+load_dotenv()
 
 DB_PATH = "harm_telemetry.db"
 LEVELS_PATH = "trading_levels.json"
 
-def fetch_live_option_quote(ticker, direction, spot_price):
-    """
-    Fetches the live 0DTE option contract quote and OCC symbol from Tradier API,
-    falling back to a dynamic 3.5% delta estimate if API is unreachable.
-    """
-    try:
-        # Fetch option chain telemetry from local sync API endpoint
-        req = urllib.request.urlopen(f"http://127.0.0.1:8000/api/proximity", timeout=2)
-        if req.status == 200:
-            data = json.loads(req.read().decode())
-            ticker_data = data.get(ticker, {})
-            
-            # Check if live option ask is present in telemetry feed
-            live_ask = ticker_data.get("opt_ask") or ticker_data.get("option_ask")
-            occ_symbol = ticker_data.get("occ_symbol") or ticker_data.get("contract")
-            
-            if live_ask and float(live_ask) > 0:
-                print(f"[✓] Tradier Market Direct -> {ticker} Option Ask: ${live_ask} | Contract: {occ_symbol}")
-                return float(live_ask), occ_symbol
-    except Exception as e:
-        pass
+TRADIER_TOKEN = os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN")
+TRADIER_BASE = os.getenv("TRADIER_BASE_URL", "https://sandbox.tradier.com/v1")
 
-    # Dynamic fallback scaled to spot price rather than static $0.50
-    estimated_cost = round(max(spot_price * 0.035, 0.35), 2)
-    dummy_occ = f"{ticker}260731{'C' if direction == 'CALL' else 'P'}000{int(spot_price*1000):05d}"
-    print(f"[!] Tradier chain fallback -> {ticker} Dynamic Est: ${estimated_cost} ({dummy_occ})")
-    return estimated_cost, dummy_occ
+def format_occ_symbol(ticker, direction, spot_price):
+    """
+    Constructs a standard 21-character OCC option symbol string.
+    Example: TSLA260730C00308000
+    """
+    opt_type = 'C' if str(direction).upper() == 'CALL' else 'P'
+    exp_date = "260730"  # 2026-07-30
+    
+    # Strike formatted as 8 digits (scaled by 1000)
+    strike_val = int(round(spot_price) * 1000)
+    root = f"{ticker[:6]:<6}".replace(" ", "")
+    
+    return f"{root}{exp_date}{opt_type}{strike_val:08d}"
+
+def fetch_live_tradier_option(ticker, direction, spot_price):
+    """
+    Fetches the actual near-the-money 0DTE OCC contract symbol and live Ask price
+    directly from Tradier API with safe dictionary parsing.
+    """
+    if not TRADIER_TOKEN:
+        print("[!] Warning: Tradier token missing from environment.")
+        return fallback_option_calc(ticker, direction, spot_price)
+
+    try:
+        exp_date = "2026-07-30"
+        url = f"{TRADIER_BASE}/markets/options/chains?symbol={ticker}&expiration={exp_date}&greeks=false"
+        
+        req = urllib.request.Request(
+            url,
+            headers={
+                "Authorization": f"Bearer {TRADIER_TOKEN}",
+                "Accept": "application/json"
+            }
+        )
+        
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            if resp.status == 200:
+                raw_body = resp.read().decode()
+                data = json.loads(raw_body) if raw_body else {}
+                
+                if isinstance(data, dict) and data.get("options"):
+                    options_obj = data["options"]
+                    if isinstance(options_obj, dict):
+                        options = options_obj.get("option", [])
+                        if isinstance(options, dict):
+                            options = [options]
+                        
+                        opt_type = direction.lower()
+                        matching = [o for o in options if isinstance(o, dict) and o.get("option_type") == opt_type]
+                        
+                        if matching:
+                            closest = min(matching, key=lambda x: abs(float(x.get("strike", 0)) - spot_price))
+                            occ = closest.get("symbol")
+                            ask = float(closest.get("ask") or closest.get("last") or 0.50)
+                            if occ and len(occ) >= 15:
+                                print(f"[✓] Tradier Market Direct -> {ticker} Strike: ${closest.get('strike')} | Ask: ${ask} | OCC: {occ}")
+                                return ask, occ
+    except Exception as e:
+        print(f"[-] Tradier Option API lookup exception for {ticker}: {e}")
+
+    return fallback_option_calc(ticker, direction, spot_price)
+
+def fallback_option_calc(ticker, direction, spot_price):
+    est_cost = round(max(spot_price * 0.035, 0.35), 2)
+    occ = format_occ_symbol(ticker, direction, spot_price)
+    return est_cost, occ
 
 def clean_float(val, default=0.0):
     if isinstance(val, (int, float)):
@@ -61,7 +108,7 @@ def scan_and_inject_armed_tickers(default_direction="BOTH", force_ticker=None):
 
     if force_ticker:
         info = telemetry.get(force_ticker, {})
-        spot = clean_float(info.get("spot") or info.get("spot_price"), default=16.33)
+        spot = clean_float(info.get("spot") or info.get("spot_price"), default=308.30)
         direction = default_direction if default_direction in ["CALL", "PUT"] else "CALL"
         targets_to_inject.append((force_ticker, direction, spot))
     else:
@@ -94,21 +141,20 @@ def scan_and_inject_armed_tickers(default_direction="BOTH", force_ticker=None):
             print(f"[!] Ticker {ticker} already active. Skipping.")
             continue
 
-        # FETCH REAL MARKET OPTION ENTRY & OCC SYMBOL
-        cso_entry_price, occ_symbol = fetch_live_option_quote(ticker, direction, spot_price)
+        cso_entry_price, occ_symbol = fetch_live_tradier_option(ticker, direction, spot_price)
 
         sql = """
             INSERT INTO trades (
-                ticker, direction, spot_price, entry_price, 
+                ticker, direction, spot_price, entry_price, option_symbol,
                 exit_status, strategy, is_live, 
                 cso_cleared, cso_notes, timestamp
             )
-            VALUES (?, ?, ?, ?, 'ACTIVE', 'CSO_AUTO_INJECT', 1, 1, ?, ?)
+            VALUES (?, ?, ?, ?, ?, 'ACTIVE', 'CSO_AUTO_INJECT', 1, 1, ?, ?)
         """
         
-        cso_notes = f"OCC: {occ_symbol} | Live Entry: ${cso_entry_price}"
-        cursor.execute(sql, (ticker, direction, spot_price, cso_entry_price, cso_notes, timestamp))
-        print(f"[✓] INJECTED {ticker} -> {direction} | Contract: {occ_symbol} | Live Entry Ask: ${cso_entry_price}")
+        cso_notes = f"OCC: {occ_symbol} | Entry Ask: ${cso_entry_price}"
+        cursor.execute(sql, (ticker, direction, spot_price, cso_entry_price, occ_symbol, cso_notes, timestamp))
+        print(f"[✓] INJECTED {ticker} -> {direction} | Contract: {occ_symbol} | Entry Ask: ${cso_entry_price}")
 
     conn.commit()
     conn.close()

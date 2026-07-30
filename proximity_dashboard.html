@@ -221,7 +221,7 @@
      */
     async function loadDashboardData() {
         try {
-            const response = await fetch('dashboard_data.json');
+            const response = await fetch('dashboard_data.json?t=' + new Date().getTime());
             if (!response.ok) throw new Error('Data file not available.');
             const payload = await response.json();
             

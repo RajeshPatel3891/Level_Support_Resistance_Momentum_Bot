@@ -337,8 +337,17 @@ def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A'
     return True
 
 def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
-    import sqlite3
+    import sqlite3, json, os
     from datetime import datetime
+
+    live_levels = {}
+    levels_file = os.path.join(os.path.dirname(__file__), 'trading_levels.json')
+    if os.path.exists(levels_file):
+        try:
+            with open(levels_file, 'r') as lf:
+                live_levels = json.load(lf)
+        except Exception as e:
+            print(f"[!] Warning reading trading_levels.json: {e}")
 
     if not selected_date:
         selected_date = datetime.now().strftime('%Y-%m-%d')
@@ -373,14 +382,41 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
                 # Estimate live floating option PnL from stock spot ticks (0.50 Delta)
                 direction = str(d.get('direction', 'CALL')).upper()
                 # Use current price if available from market feed, otherwise spot
-                current_spot = float(d.get('current_spot') or d.get('price') or spot)
-                spot_diff = (current_spot - spot) if 'CALL' in direction else (spot - current_spot)
+                ticker = d.get('ticker')
+                t_info = live_levels.get(ticker, {}) if isinstance(live_levels, dict) else {}
+                live_spot = float(t_info.get('last_price') or t_info.get('last') or spot)
+                if live_spot == 0.0:
+                    live_spot = spot
+
+                spot_diff = (live_spot - spot) if 'CALL' in direction else (spot - live_spot)
                 float_pnl = round(spot_diff * 0.50 * contracts * 100.0, 2)
                 
+            # Calculate defaults first to avoid UnboundLocalError
             total_floating_pnl += float_pnl
-            d['price'] = f"{spot:.2f}"
+            cost_basis = entry_prem * contracts * 100.0
+            pct = (float_pnl / cost_basis * 100.0) if cost_basis > 0 else 0.0
             pnl_prefix = "+" if float_pnl >= 0 else ""
+
+            d['price'] = f"{live_spot:.2f}"
             d['dollar_pnl'] = f"{pnl_prefix}${float_pnl:.2f}"
+            d['pnl_pct'] = f"{pnl_prefix}{pct:.1f}%"
+            d['pnl_class'] = "text-emerald-400" if float_pnl >= 0 else "text-red-400"
+
+            # Overlay dashboard_data.json safely if available
+            dash_file = os.path.join(os.path.dirname(__file__), 'dashboard_data.json')
+            if os.path.exists(dash_file):
+                try:
+                    with open(dash_file, 'r') as df:
+                        dj = json.load(df)
+                        dash_actives = {x.get('ticker'): x for x in dj.get('active_positions', [])}
+                        if ticker in dash_actives:
+                            match = dash_actives[ticker]
+                            d['price'] = match.get('price', d['price'])
+                            d['dollar_pnl'] = match.get('dollar_pnl', d['dollar_pnl'])
+                            d['pnl_pct'] = match.get('pnl_pct', d['pnl_pct'])
+                            d['pnl_class'] = match.get('pnl_class', d['pnl_class'])
+                except Exception:
+                    pass
             active_trades.append(d)
 
         # 2. Fetch Closed Trades
@@ -418,80 +454,65 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
 
 @app.get("/api/proximity")
 async def get_proximity():
+    # Single source of truth: Read level proximity directly from dashboard_data.json
+    dash_file = os.path.join(os.path.dirname(__file__), 'dashboard_data.json')
+    if os.path.exists(dash_file):
+        try:
+            with open(dash_file, 'r') as df:
+                dj = json.load(df)
+                if 'proximity_matrix' in dj and dj['proximity_matrix']:
+                    return dj['proximity_matrix']
+        except Exception as e:
+            print(f"Error loading proximity from dashboard_data.json: {e}")
+
+    # Fallback to trading_levels.json
     proximity_data = {}
-    
-    try:
-        if os.path.exists('trading_levels.json'):
+    if os.path.exists('trading_levels.json'):
+        try:
             with open('trading_levels.json', 'r') as f:
                 levels_file = json.load(f)
-                
             for ticker, info in levels_file.items():
                 spot = float(info.get('spot', info.get('last_price', 0.0)))
                 vwap = float(info.get('vwap', spot))
-                
-                res_zone = info.get('resistance_zone', [0, 0])
-                sup_zone = info.get('support_zone', [0, 0])
-                
-                target_call = float(info.get('spot_target_call', res_zone[0] if len(res_zone) > 0 else 0.0))
-                target_put = float(info.get('spot_target_put', sup_zone[1] if len(sup_zone) > 1 else 0.0))
-                
-                # Check if spot falls inside active execution ranges
-                in_res = len(res_zone) >= 2 and (res_zone[0] <= spot <= res_zone[1])
-                in_sup = len(sup_zone) >= 2 and (sup_zone[0] <= spot <= sup_zone[1])
-                
-                armed = bool(info.get('execution_armed', False)) or in_res or in_sup or str(info.get('status', '')).upper() == 'ARMED'
-                
-                if in_res:
-                    target_val = target_call
-                elif in_sup:
-                    target_val = target_put
-                else:
-                    target_val = target_call if spot < target_call else target_put
-                
-                gap_val = abs(spot - target_val) if target_val > 0 else 0.0
-                gap_pct_val = (gap_val / spot * 100) if spot > 0 else 0.0
-                
+                target = str(info.get('target', 'N/A'))
+                gap_dollars = f"${abs(spot - vwap):.2f}"
+                gap_pct = f"{abs(spot - vwap) / vwap * 100.0:.2f}%" if vwap > 0 else "0.0%"
                 proximity_data[ticker] = {
-                    'armed': armed,
+                    'armed': info.get('armed', False),
                     'spot': spot,
                     'vwap': vwap,
-                    'target': f"{target_val:.2f}" if target_val > 0 else "N/A",
-                    'gap_dollars': f"${gap_val:.2f}",
-                    'gap_pct': f"{gap_pct_val:.2f}%"
-                }
-    except Exception as e:
-        print(f"Error reading trading_levels.json: {e}")
-
-    # 2. Overlay live active trades from DynamoDB state if present
-    try:
-        active_trades, *_ = fetch_portfolio_state()
-        for trade in active_trades:
-            ticker = trade.get('ticker')
-            if ticker:
-                spot = float(trade.get('spot_price', trade.get('price', 0)))
-                armed = str(trade.get('cso_recommendation', '')).upper() == 'ARMED'
-                
-                gex_dist = str(trade.get('gex_dist', '0.00 (0.0%)'))
-                parts = gex_dist.split(' ')
-                gap_dollars = f"${parts[0]}" if len(parts) > 0 else "$0.00"
-                gap_pct = parts[1].replace('(', '').replace(')', '') if len(parts) > 1 else '0.0%'
-                
-                proximity_data[ticker] = {
-                    'armed': armed,
-                    'spot': spot,
-                    'vwap': float(trade.get('entry_price', spot)),
-                    'target': str(trade.get('gex_target_str', trade.get('take_profit', 'N/A'))),
+                    'target': target,
                     'gap_dollars': gap_dollars,
                     'gap_pct': gap_pct
                 }
-    except Exception as e:
-        print(f"Error fetching portfolio active overlay: {e}")
+        except Exception as e:
+            print(f"Error building proximity fallback: {e}")
 
     return proximity_data
 
 @app.get("/", response_class=HTMLResponse)
 async def index_view(request: Request, selected_date: str = Query(default=None)):
     trades, closed, total_pnl, total_closed_pnl, current_date, starting_balance, settled_free, deployed_capital, unsettled = fetch_portfolio_state(page=1, selected_date=selected_date)
+    
+    # Clean overlay from pre-compiled dashboard_data.json
+    dash_file = os.path.join(os.path.dirname(__file__), 'dashboard_data.json')
+    if os.path.exists(dash_file):
+        try:
+            with open(dash_file, 'r') as df:
+                dj = json.load(df)
+                dash_actives = {x.get('ticker'): x for x in dj.get('active_positions', [])}
+                for t in trades:
+                    tkr = t.get('ticker')
+                    if tkr in dash_actives:
+                        m = dash_actives[tkr]
+                        t['price'] = m.get('price', t.get('price'))
+                        t['dollar_pnl'] = m.get('dollar_pnl', t.get('dollar_pnl'))
+                        t['pnl_pct'] = m.get('pnl_pct', t.get('pnl_pct'))
+                        t['pnl_class'] = m.get('pnl_class', t.get('pnl_class'))
+                        t['net_pnl'] = m.get('net_pnl', t.get('net_pnl', 0.0))
+                        t['calc_floating'] = m.get('net_pnl', t.get('calc_floating', 0.0))
+        except Exception as e:
+            print(f"Error applying dashboard_data.json overlay: {e}")
 
     str_starting = f"${starting_balance:,.2f}"
     str_settled = f"${settled_free:,.2f}"
@@ -588,17 +609,25 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         t['potential_tp_return'] = f"+${reward_per_contract:.1f} ({opt_tp_pct}%)"
         t['potential_sl_risk'] = f"-${risk_per_contract:.1f} ({sl_pct}%)"
 
-        # Calculate exact option float PnL from live stock movement
+        # Calculate fallback PnL, but honor dashboard_data.json overlay if present
         spot_diff = (current_spot - spot_entry) if 'CALL' in direction else (spot_entry - current_spot)
         dollar_pnl_val = round(spot_diff * 0.50 * 100.0, 2)
-        total_floating_pnl_val += dollar_pnl_val
+        
+        # Parse numeric floating PnL for total summary header
+        try:
+            raw_num_str = str(t.get('dollar_pnl', '')).replace('$', '').replace('+', '').replace(',', '')
+            num_val = float(raw_num_str) if raw_num_str else dollar_pnl_val
+            total_floating_pnl_val += num_val
+        except Exception:
+            total_floating_pnl_val += dollar_pnl_val
 
         pct_pnl_val = round((dollar_pnl_val / (opt_cost * 100.0)) * 100.0, 1) if opt_cost > 0 else 0.0
-
         pnl_prefix = "+" if dollar_pnl_val >= 0 else ""
-        t['dollar_pnl'] = f"{pnl_prefix}${dollar_pnl_val:.2f}"
-        t['pnl_pct'] = f"{pnl_prefix}{pct_pnl_val:.1f}%"
-        t['pnl_class'] = "text-emerald-400" if dollar_pnl_val >= 0 else "text-red-400"
+
+        if not t.get('dollar_pnl') or t.get('dollar_pnl') == "$+0.00":
+            t['dollar_pnl'] = f"{pnl_prefix}${dollar_pnl_val:.2f}"
+            t['pnl_pct'] = f"{pnl_prefix}{pct_pnl_val:.1f}%"
+            t['pnl_class'] = "text-emerald-400" if dollar_pnl_val >= 0 else "text-red-400"
 
     str_floating = f"${total_floating_pnl_val:+,.2f}"
     total_pnl = total_floating_pnl_val
@@ -641,13 +670,13 @@ async def close_all_positions():
 
 @app.get("/dashboard_data.json")
 async def get_dashboard_data_json():
-    import sqlite3
+    import json, os
+    json_path = os.path.join(os.path.dirname(__file__), 'dashboard_data.json')
     try:
-        conn = sqlite3.connect('harm_telemetry.db')
-        cursor = conn.cursor()
-        
-        cursor.execute("SELECT ticker, direction, spot_price, entry_price, net_pnl FROM trades WHERE exit_status = 'ACTIVE'")
-        active = [{"ticker": r[0], "direction": r[1], "spot": r[2], "entry": r[3], "pnl": r[4]} for r in cursor.fetchall()]
+        if os.path.exists(json_path):
+            with open(json_path, 'r') as f:
+                return json.load(f)
+        return {"active_positions": [], "error": "File not found"}
         
         cursor.execute("SELECT ticker, direction, spot_price, exit_price, net_pnl, exit_status FROM trades WHERE exit_status LIKE 'CSO_%' OR exit_status = 'EXITED' ORDER BY id DESC LIMIT 10")
         closed = [{"ticker": r[0], "direction": r[1], "entry": r[2], "exit": r[3], "pnl": r[4], "status": r[5]} for r in cursor.fetchall()]

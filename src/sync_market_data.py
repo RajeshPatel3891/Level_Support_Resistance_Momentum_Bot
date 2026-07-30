@@ -1,3 +1,4 @@
+import re
 import json
 import os
 import requests
@@ -36,7 +37,28 @@ def sync():
         print(f"[!] Error loading trading_levels.json: {e}")
         return
 
-    symbols = ",".join(data.keys())
+    # Dynamic Active OCC Option Symbol Extractor
+    active_occ_symbols = []
+    try:
+        import sqlite3
+        import re
+        conn = sqlite3.connect('harm_telemetry.db')
+        c = conn.cursor()
+        c.execute('SELECT occ_symbol, cso_notes FROM trades WHERE exit_status="ACTIVE"')
+        rows = c.fetchall()
+        conn.close()
+        for occ, notes in rows:
+            if occ and len(str(occ).strip()) >= 15:
+                active_occ_symbols.append(str(occ).strip())
+            elif notes and 'OCC:' in str(notes):
+                match = re.search(r'OCC:\s*([A-Z0-9]+)', str(notes))
+                if match:
+                    active_occ_symbols.append(match.group(1))
+    except Exception as e:
+        print(f"[!] Error reading active OCC symbols: {e}")
+
+    all_symbols = [s for s in data.keys()] + active_occ_symbols
+    symbols = ",".join(all_symbols)
     token = os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN")
     base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
     if "sandbox" in base_url.lower():
