@@ -4,6 +4,21 @@
 import datetime
 import pytz
 from datetime import timedelta
+import os
+import requests
+import queue
+import threading
+import sys
+import json
+import websocket
+import time
+import sqlite3
+import signal
+import numpy as np
+import pandas as pd
+import inspect
+from datetime import datetime
+from dotenv import load_dotenv
 
 def get_target_expiration_date():
     """
@@ -48,22 +63,6 @@ def validate_extrinsic_floor(ticker, option_price, spot_price, strike, side="CAL
         return False, itm_strike, note
         
     return True, strike, "STANDARD_PREMIUM"
-
-import os
-import requests
-import queue
-import threading
-import sys
-import json
-import websocket
-import time
-import sqlite3
-import signal
-import numpy as np
-import pandas as pd
-import inspect
-from datetime import datetime
-from dotenv import load_dotenv
 
 def get_live_quote(symbol):
     """
@@ -456,66 +455,6 @@ def execute_order(symbol, ticker, quantity, side, limit_price=None, stop_loss=No
         print(f"[!] TRADIER API REJECTED ORDER ({response.status_code}): {response.text}")
         return False
 
-    # Dynamic live Tradier option premium quote fetch
-    opt_quote = get_live_quote(occ_symbol) if occ_symbol else {}
-    fill_premium = float(opt_quote.get('ask') or opt_quote.get('last') or opt_quote.get('close') or 1.50)
-
-    required_capital = qty_num * fill_premium * 100.0
-    available_settled_cash = get_available_settled_cash()
-
-    if available_settled_cash < required_capital:
-        max_contracts = int(available_settled_cash // (fill_premium * 100.0))
-        if max_contracts > 0:
-            print(f"[*] Capital Auto-Scale: Reducing {symbol} options contracts from {qty_num} -> {max_contracts} to fit ${available_settled_cash:,.2f} budget.")
-            qty_num = float(max_contracts)
-            required_capital = qty_num * fill_premium * 100.0
-        else:
-            print(f"[!] REJECTED: Insufficient Settled Cash for Options Premium (${available_settled_cash:.2f} available, ${required_capital:.2f} needed)")
-            return False
-
-    base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
-    if "sandbox" in base_url.lower():
-        token = os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN")
-    else:
-        token = os.getenv("TRADIER_TOKEN")
-    account_id = os.getenv("TRADIER_ACCOUNT_ID")
-    
-    order_side = "buy_to_open" if side.upper() in ["CALL", "BUY"] else "sell_to_open"
-    payload = {
-        "class": "option", 
-        "symbol": symbol, 
-        "option_symbol": occ_symbol,
-        "side": order_side, 
-        "quantity": str(int(qty_num)), 
-        "type": "market", 
-        "duration": "day"
-    }
-    
-    response = requests.post(
-        f"{base_url}/accounts/{account_id}/orders", 
-        data=payload, 
-        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    )
-    
-    if response.status_code == 200:
-        order_id = response.json().get("order", {}).get("id")
-        time.sleep(2)
-        status = get_order_status(order_id)
-        if status in ["filled", "ok", "open", "pending"]:
-            update_settled_cash_balance(required_capital)
-            log_trade_to_database(symbol, spot_val, stop_loss=stop_loss, shares=qty_num, direction=side, cost=fill_premium, occ_symbol=occ_symbol)
-            try:
-                dispatch_discord_alert(symbol, spot_val, 'ENTRY')
-            except Exception:
-                pass
-            ACTIVE_TRADES[symbol] = True
-            return True
-    else:
-        print(f"[!] TRADIER API REJECTED ORDER ({response.status_code}): {response.text}")
-        return False
-
-    return False
-
 def safe_eval_playbook_entry(pb, method_name, candles_list, price_val, vwap_val, target_level, velocity=0.5):
     """
     Intelligently inspects playbook parameter signatures and return types:
@@ -588,6 +527,37 @@ def safe_eval_playbook_entry(pb, method_name, candles_list, price_val, vwap_val,
     except Exception as err:
         print(f"[-] Playbook Eval Error ({pb.__name__}.{method_name}): {err}", file=sys.stderr)
         return False, 1.0
+
+class LiveBot:
+    """
+    Core LiveBot Execution Engine & CSO Entry Optimizer.
+    """
+    def __init__(self):
+        self.active_trades = ACTIVE_TRADES
+        self.master_data = MASTER_DATA
+        self.playbooks = PLAYBOOKS
+
+    def calculate_cso_entry_price(self, bid: float, ask: float, cso_ev_score: float, momentum_state: str) -> float:
+        """
+        Dynamically calculates a competitive limit entry price inside the spread
+        based on live Bid/Ask quotes, micro-momentum, and Gemini CSO EV score.
+        """
+        spread = max(0.01, ask - bid)
+        
+        # 1. Base Strategy: Target Midpoint (50% spread)
+        aggression = 0.50 
+        
+        # 2. Adjust for Micro-Momentum and CSO EV
+        if momentum_state == "HIGH_IMPULSE" and cso_ev_score > 500:
+            aggression = 0.70  # Aggressive fill: step up to 70% toward Ask on strong momentum
+        elif cso_ev_score < 0:
+            return None        # Negative EV: Abort fill completely
+        elif spread > 0.15:
+            aggression = 0.30  # Wide spread: Stay passive near Bid (30%) to prevent slippage
+
+        # 3. Round to standard 2-decimal option strike step
+        optimal_limit = round(bid + (spread * aggression), 2)
+        return optimal_limit
 
 def on_message(ws, message):
     if not is_market_hours():
