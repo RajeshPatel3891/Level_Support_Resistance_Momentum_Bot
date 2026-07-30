@@ -412,7 +412,7 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
         print(f"SQLite fetch_portfolio_state error: {e}")
 
     settled_free = starting_balance + total_closed_pnl
-    deployed_capital = sum(float(t.get('entry_price', 0.0)) for t in active_trades)
+    deployed_capital = sum(float(t.get('entry_price') or 0.0) for t in active_trades)
 
     return active_trades, db_closed, total_floating_pnl, total_closed_pnl, selected_date, starting_balance, settled_free, deployed_capital, unsettled
 

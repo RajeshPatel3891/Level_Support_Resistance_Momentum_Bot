@@ -35,8 +35,8 @@ def fetch_and_compile_telemetry():
         active_positions = []
         closed_trades_by_day = {}
         deployed_capital = 0.0
-        floating_pnl = 0.0
         today_realized_pnl = 0.0
+        floating_pnl = 0.0
 
         # Process each trade row chronologically
         for r in rows:
@@ -84,7 +84,7 @@ def fetch_and_compile_telemetry():
                 # 2. Dynamic Live Option PnL based on stock movement
                 # Calculate spot change relative to baseline stock price
                 spot_now = float(trade_obj.get("spot_price") or 100.0)
-                entry_spot = float(trade_obj.get("entry_spot") or (spot_now - 0.20 if "CALL" in str(direction).upper() else spot_now + 0.20))
+                entry_spot = float(trade_obj.get("spot_price") or spot_now or 0.0)
                 
                 spot_diff = (spot_now - entry_spot) if "CALL" in str(direction).upper() else (entry_spot - spot_now)
                 calc_floating = round(spot_diff * 0.50 * 100.0, 2)

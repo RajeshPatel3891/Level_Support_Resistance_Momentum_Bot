@@ -15,3 +15,21 @@ def evaluate_put_entry(spot_price, vwap, proximity_score, velocity):
     if spot_price <= PLAYBOOK_CONFIG["spot_target_put"]:
         return True, "NVDA_SUPPORT_BREACH"
     return False, "OUT_OF_BOUNDS"
+
+
+def calculate_risk_parameters(spot_price, direction, multiplier=1.0):
+    """Fallback Risk Parameter Generator returning dictionary context."""
+    spot_price = float(spot_price)
+    if direction.upper() in ['CALL', 'BULLISH']:
+        tp = round(spot_price * (1 + 0.015 * multiplier), 2)
+        sl = round(spot_price * (1 - 0.008 * multiplier), 2)
+    else:
+        tp = round(spot_price * (1 - 0.015 * multiplier), 2)
+        sl = round(spot_price * (1 + 0.008 * multiplier), 2)
+    
+    return {
+        "stop_loss": sl,
+        "tp1": tp,
+        "take_profit": tp,
+        "distance": round(abs(spot_price - sl), 2)
+    }
