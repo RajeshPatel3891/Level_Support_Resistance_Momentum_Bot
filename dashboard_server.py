@@ -409,7 +409,7 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
             active_trades.append(d)
 
         # 2. Fetch Closed Trades
-        cursor.execute("SELECT * FROM trades WHERE exit_status LIKE 'CSO_%' OR exit_status IN ('EXITED', 'FORCE_CLOSE', 'CLOSED') ORDER BY id DESC LIMIT 10")
+        cursor.execute("SELECT * FROM trades WHERE (exit_status LIKE 'CSO_%' OR exit_status IN ('EXITED', 'FORCE_CLOSE', 'CLOSED')) AND DATE(timestamp) = DATE(?) ORDER BY id DESC LIMIT 10", (selected_date,))
         for r in cursor.fetchall():
             d = dict(r)
             pnl = float(d.get('net_pnl') or 0.0)
@@ -671,10 +671,10 @@ async def get_dashboard_data_json():
                 return json.load(f)
         return {"active_positions": [], "error": "File not found"}
         
-        cursor.execute("SELECT ticker, direction, spot_price, exit_price, net_pnl, exit_status FROM trades WHERE exit_status LIKE 'CSO_%' OR exit_status IN ('EXITED', 'FORCE_CLOSE', 'CLOSED') ORDER BY id DESC LIMIT 10")
+        cursor.execute("SELECT ticker, direction, spot_price, exit_price, net_pnl, exit_status FROM trades WHERE (exit_status LIKE 'CSO_%' OR exit_status IN ('EXITED', 'FORCE_CLOSE', 'CLOSED')) AND DATE(timestamp) = DATE('now') ORDER BY id DESC LIMIT 10")
         closed = [{"ticker": r[0], "direction": r[1], "entry": r[2], "exit": r[3], "pnl": r[4], "status": r[5]} for r in cursor.fetchall()]
         
-        cursor.execute("SELECT SUM(net_pnl) FROM trades WHERE exit_status LIKE 'CSO_%' OR exit_status IN ('EXITED', 'FORCE_CLOSE', 'CLOSED')")
+        cursor.execute("SELECT SUM(net_pnl) FROM trades WHERE (exit_status LIKE 'CSO_%' OR exit_status IN ('EXITED', 'FORCE_CLOSE', 'CLOSED')) AND DATE(timestamp) = DATE('now')")
         total_pnl = cursor.fetchone()[0] or 0.0
         
         conn.close()
