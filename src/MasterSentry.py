@@ -43,6 +43,7 @@ class MicroScalpSidekick:
         self.active_positions = {}
         self.cso_cooldowns = {} 
         self.cso_ev_state_cache = {} # State Transition Cache (ticker: {"state": str, "last_ping": float})
+        self.peak_pnl_tracker = {}   # Persistent In-Memory Peak Return Tracker ({ticker: peak_pnl_pct})
 
         try:
             conn = sqlite3.connect(DB_FILE)
@@ -55,7 +56,7 @@ class MicroScalpSidekick:
             print(f"[!] Recovery Error: {e}")
 
         self.load_tactical_levels()
-        print("[✓] HARM.AI Sidekick Engine: Production-Grade Orchestrator Loaded with Dual-Stage CSO Context.")
+        print("[✓] HARM.AI Sidekick Engine: Production-Grade Orchestrator Loaded with Multi-Tier CSO Context.")
 
     def load_tactical_levels(self):
         try:
@@ -96,14 +97,11 @@ class MicroScalpSidekick:
 
         # Calculate live effective loss safely without stock-spot cross-talk
         if entry_price > 0 and option_pnl == 0.0:
-            # DYNAMIC GUARDRAIL: Zero heuristics. If option_pnl is 0.0 on an option trade,
-            # never evaluate stock spot price against option entry cost.
             effective_pnl = 0.0
         else:
             effective_pnl = option_pnl
 
         hit_prob = calculate_gex_hit_probability(live_spot, gex_target, gex_label)
-        # DYNAMIC BRIDGE: If option_pnl is 0.0 on an option contract, do not pass stock spot price to RiskEngine
         eval_spot = entry_price if (entry_price > 0 and option_pnl == 0.0 and live_spot > entry_price * 2.0) else live_spot
         cso_eval = evaluate_cso_informed_exit(eval_spot, gex_target, stop_loss_val, hit_prob, effective_pnl, shares_cnt)
         recommendation = cso_eval["recommendation"]
@@ -153,6 +151,7 @@ class MicroScalpSidekick:
                 """, (live_spot, effective_pnl, f"CSO Target Hit: {cso_eval['reason']}", trade_id))
                 conn_cso.commit()
             return
+
     def audit_active_positions(self):
         if not os.path.exists(DB_FILE):
             return
@@ -187,26 +186,67 @@ class MicroScalpSidekick:
                 direction = row[7] if (len(row) > 7 and row[7]) else 'CALL'
                 trade_id = row[8]
                 peak_pnl_val = float(row[9]) if (len(row) > 9 and row[9] is not None) else 0.0
-
                 occ_sym = row[10] if (len(row) > 10 and row[10]) else None
+
                 # Fetch stock quote for underlying spot tracking
                 stock_quote = get_live_quote(ticker)
                 live_spot = float(stock_quote.get('last') or spot_price) if (stock_quote and stock_quote.get('last')) else spot_price
-                
+                ticker_data = self.levels_cache.get(ticker, {})
+
                 # Fetch option quote for exact Mark PnL if available
                 opt_quote = get_live_quote(occ_sym) if occ_sym else None
                 
                 if opt_quote and opt_quote.get('last') and float(opt_quote['last']) > 0:
-                    live_opt_mark = float(opt_quote['last'])
-                    option_pnl = round((live_opt_mark - entry_price) * shares_cnt * 100.0, 2)
+                    live_opt_price = float(opt_quote['last'])
+                    option_pnl = round((live_opt_price - entry_price) * shares_cnt * 100.0, 2)
                 else:
-                    # Delta fallback if option quote stream is quiet
                     delta = 0.50
                     spot_diff = live_spot - spot_price if str(direction).upper() == 'CALL' else spot_price - live_spot
                     option_pnl = spot_diff * delta * 100.0 * shares_cnt
+                    live_opt_price = entry_price + (option_pnl / (shares_cnt * 100.0)) if (shares_cnt > 0) else entry_price
 
+                cost_basis = entry_price
                 estimated_basis = max(30.0, entry_price * 100.0 * shares_cnt)
                 pnl_pct = option_pnl / estimated_basis
+
+                # --- CSO DYNAMIC MULTI-TIER TRAILING PROFIT MATRIX ---
+                if cost_basis > 0 and live_opt_price > 0:
+                    current_pnl_pct = (live_opt_price - cost_basis) / cost_basis
+                    peak_pnl_pct = max(self.peak_pnl_tracker.get(ticker, current_pnl_pct), current_pnl_pct)
+                    self.peak_pnl_tracker[ticker] = peak_pnl_pct
+
+                    # Determine dynamic trail width based on Peak PnL Tier
+                    trail_buffer = 0.0
+                    tier_label = ""
+
+                    if peak_pnl_pct >= 0.30:
+                        trail_buffer = 0.03  # Tighter 3% trail at +30%+ gain
+                        tier_label = "TIER 3 (+30% Peak / 3% Trail)"
+                    elif peak_pnl_pct >= 0.20:
+                        trail_buffer = 0.05  # Standard 5% trail at +20%+ gain
+                        tier_label = "TIER 2 (+20% Peak / 5% Trail)"
+                    elif peak_pnl_pct >= 0.10:
+                        trail_buffer = 0.03  # Micro 3% trail at +10%+ gain
+                        tier_label = "TIER 1 (+10% Peak / 3% Trail)"
+
+                    if trail_buffer > 0.0:
+                        floor_pct = peak_pnl_pct - trail_buffer
+                        print(f"[🛡️ TRAILING LOCK {tier_label}] {ticker}: Peak = +{peak_pnl_pct*100:.1f}% | Current = +{current_pnl_pct*100:.1f}% | Floor = +{floor_pct*100:.1f}%")
+
+                        if current_pnl_pct <= floor_pct:
+                            print(f"[🚨 CSO TRAILING TRIGGERED] {ticker} peaked at +{peak_pnl_pct*100:.1f}%, dropped below floor (+{floor_pct*100:.1f}%). Executing Auto-Close!")
+                            conn_trail = sqlite3.connect(DB_FILE)
+                            conn_trail.execute("""
+                                UPDATE trades 
+                                SET exit_status = 'CSO_TRAILING_LOCK_EXIT', 
+                                    exit_price = ?, 
+                                    net_pnl = ?, 
+                                    cso_notes = ? 
+                                WHERE id = ? AND exit_status = 'ACTIVE'
+                            """, (live_spot, option_pnl, f"Trailing Lock Exit ({tier_label}): Peaked +{peak_pnl_pct*100:.1f}%, Dropped to +{current_pnl_pct*100:.1f}%", trade_id))
+                            conn_trail.commit()
+                            conn_trail.close()
+                            continue
 
                 # --- DYNAMIC SUB-SECOND CAPITAL PROTECTOR ENGINE ---
                 peak_pnl = max(peak_pnl_val, option_pnl)
@@ -238,10 +278,8 @@ class MicroScalpSidekick:
                 self.process_cso_ev_guard(trade_id, ticker, live_spot, float(stop_loss or 0.0), direction, shares_cnt, option_pnl, entry_price)
 
                 # 2. STAGE 1: STRICT $30.00 HARD RISK CAP & ATR BREACH
-                # Maximum dollar risk allowed per contract position is strictly $30.00
                 MAX_RISK_CAP_DOLLARS = -30.00
 
-                # Force absolute catch if PnL or SL Risk exceeds -0.00 limit
                 if option_pnl <= MAX_RISK_CAP_DOLLARS or (entry_price and (live_spot - entry_price) * shares_cnt * (-1 if direction == 'PUT' else 1) <= MAX_RISK_CAP_DOLLARS):
                     print(f"[🚨 HARD RISK CAP BREACHED] {ticker}: Option loss ${option_pnl:.2f} exceeded -$30.00 max risk limit! Triggering immediate market exit.")
                     print(f"[🚨 EMERGENCY ATR HARD STOP] {ticker}: Option loss ${option_pnl:.2f} reached ATR limit. Auto-Closing!")
@@ -289,7 +327,7 @@ class MicroScalpSidekick:
                                 UPDATE OR IGNORE trades 
                                 SET exit_status = 'CSO_MACRO_CUT', exit_price = ?, net_pnl = ?, cso_notes = ? 
                                 WHERE id = ?
-                            """, (live_spot, trade_id, option_pnl, f"Reason: {reasoning}", trade_id))
+                            """, (live_spot, option_pnl, f"Reason: {reasoning}", trade_id))
                             conn_update.commit()
                             conn_update.close()
                             continue
@@ -307,7 +345,7 @@ if __name__ == "__main__":
 
     print("=" * 65)
     print("[⚙️] MASTERSENTRY ACTIVE RISK MONITOR INITIALIZED")
-    print("Target Session: Pure Tradier Stream & Gemini CSO Risk Engine")
+    print("Target Session: Pure Tradier Stream & Multi-Tier Trailing Engine")
     print("=" * 65)
 
     sidekick = MicroScalpSidekick()
