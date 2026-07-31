@@ -463,9 +463,13 @@ async def get_proximity():
             for ticker, info in levels_file.items():
                 spot = float(info.get('spot', info.get('last_price', 0.0)))
                 vwap = float(info.get('vwap', spot))
-                target = str(info.get('target', 'N/A'))
-                gap_dollars = f"${abs(spot - vwap):.2f}"
-                gap_pct = f"{abs(spot - vwap) / vwap * 100.0:.2f}%" if vwap > 0 else "0.0%"
+                call_t = float(info.get('spot_target_call', 0.0))
+                put_t = float(info.get('spot_target_put', 0.0))
+                gex_target = call_t if call_t > 0 else put_t
+                target = f"${gex_target:.2f}" if gex_target > 0 else "N/A"
+                gap_val = abs(spot - gex_target) if gex_target > 0 else 0.0
+                gap_dollars = f"${gap_val:.2f}"
+                gap_pct = f"{(gap_val / spot * 100.0):.2f}%" if spot > 0 and gex_target > 0 else "0.00%"
                 proximity_data[ticker] = {
                     'armed': info.get('armed', False),
                     'spot': spot,

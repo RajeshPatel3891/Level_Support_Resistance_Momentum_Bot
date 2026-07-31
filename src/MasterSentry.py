@@ -250,7 +250,7 @@ class MicroScalpSidekick:
                         UPDATE OR IGNORE trades 
                         SET exit_status = 'STOP_LOSS_ATR_HARD_CAP', exit_price = ?, net_pnl = ?, cso_notes = ? 
                         WHERE id = ?
-                    """, (live_spot, trade_id, option_pnl, "Reason: ATR Hard Cap Breached", trade_id))
+                    """, (live_spot, option_pnl, "Reason: ATR Hard Cap Breached", trade_id))
                     conn_update.commit()
                     conn_update.close()
                     continue
