@@ -259,14 +259,14 @@ class MicroScalpSidekick:
                     tier_label = ""
 
                     if peak_pnl_pct >= 0.30:
-                        trail_buffer = 0.03  # Tighter 3% trail at +30%+ gain
-                        tier_label = "TIER 3 (+30% Peak / 3% Trail)"
+                        trail_buffer = 0.015 # Maximum 1.5% tight trail at +30%+ gain
+                        tier_label = "TIER 3 (+30% Peak / 1.5% Trail)"
                     elif peak_pnl_pct >= 0.20:
-                        trail_buffer = 0.05  # Standard 5% trail at +20%+ gain
-                        tier_label = "TIER 2 (+20% Peak / 5% Trail)"
+                        trail_buffer = 0.03  # Tighter 3% trail at +20%+ gain
+                        tier_label = "TIER 2 (+20% Peak / 3% Trail)"
                     elif peak_pnl_pct >= 0.10:
-                        trail_buffer = 0.03  # Micro 3% trail at +10%+ gain
-                        tier_label = "TIER 1 (+10% Peak / 3% Trail)"
+                        trail_buffer = 0.05  # Standard 5% trail at +10%+ gain
+                        tier_label = "TIER 1 (+10% Peak / 5% Trail)"
 
                     if trail_buffer > 0.0:
                         floor_pct = peak_pnl_pct - trail_buffer
