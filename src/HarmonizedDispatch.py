@@ -6,10 +6,15 @@ import requests
 import time
 from datetime import datetime
 
+# Fetch environment tag; defaults to UNKNOWN-ORIGIN if omitted
+EXECUTION_ORIGIN = os.getenv("EXECUTION_ORIGIN", "UNKNOWN-ORIGIN")
+
 def init_db(db_path='harm_telemetry.db'):
-    """Ensures database table and unique composite index exist for UPSERT deduplication."""
+    """Ensures database table, execution_origin column, and unique composite index exist for UPSERT deduplication."""
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
+    
+    # 1. Create table with full schema if it doesn't exist
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -20,17 +25,28 @@ def init_db(db_path='harm_telemetry.db'):
             spot_price REAL,
             exit_price REAL,
             exit_status TEXT,
-            net_pnl REAL
+            net_pnl REAL,
+            execution_origin TEXT DEFAULT 'UNKNOWN-ORIGIN'
         )
     ''')
+    
+    # 2. Migration check: Add execution_origin column if missing from legacy tables
+    cursor.execute("PRAGMA table_info(trades);")
+    columns = [column[1] for column in cursor.fetchall()]
+    if "execution_origin" not in columns:
+        cursor.execute("ALTER TABLE trades ADD COLUMN execution_origin TEXT DEFAULT 'LEGACY';")
+        print("[✓] Migrated 'trades' table: Added 'execution_origin' column.")
+
+    # 3. Ensure deduplication index exists
     cursor.execute('''
         CREATE UNIQUE INDEX IF NOT EXISTS idx_dedup_trades 
         ON trades(ticker, spot_price, exit_price, exit_status)
     ''')
+    
     conn.commit()
     conn.close()
 
-def sanitize_historical_telemetry(db_paths=['harm_telemetry.db', 'harm_telemetry.db']):
+def sanitize_historical_telemetry(db_paths=['harm_telemetry.db']):
     """Auto-sanitizes historical telemetry on engine startup by purging duplicate records."""
     for db in db_paths:
         if not os.path.exists(db):
@@ -39,15 +55,10 @@ def sanitize_historical_telemetry(db_paths=['harm_telemetry.db', 'harm_telemetry
             conn = sqlite3.connect(db)
             cursor = conn.cursor()
             
-            # Identify target table name (trades vs trades)
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
             tables = [row[0] for row in cursor.fetchall()]
             
-            target_table = None
-            if 'trades' in tables:
-                target_table = 'trades'
-            elif 'trades' in tables:
-                target_table = 'trades'
+            target_table = 'trades' if 'trades' in tables else None
                 
             if target_table:
                 cursor.execute(f'''
@@ -85,24 +96,33 @@ def check_cash_availability(required_capital, db_path='harm_telemetry.db'):
         return False, 0.0
 
 def log_trade_event(trade_data, db_path='harm_telemetry.db'):
-    """Logs or updates a trade record using SQLite UPSERT pattern to prevent duplicates."""
+    """Logs or updates a trade record using SQLite UPSERT pattern with execution origin tracking."""
     conn = sqlite3.connect(db_path)
     cursor = conn.cursor()
+    
+    origin = os.getenv("EXECUTION_ORIGIN", "UNKNOWN-ORIGIN")
+    
+    # Ensure execution_origin is present in payload dict
+    payload = dict(trade_data)
+    payload['execution_origin'] = payload.get('execution_origin', origin)
+    
     query = '''
         INSERT INTO trades (
             ticker, timestamp, strategy, direction, 
-            spot_price, exit_price, exit_status, net_pnl
+            spot_price, exit_price, exit_status, net_pnl, execution_origin
         ) VALUES (
             :ticker, :timestamp, :strategy, :direction, 
-            :spot_price, :exit_price, :exit_status, :net_pnl
+            :spot_price, :exit_price, :exit_status, :net_pnl, :execution_origin
         )
         ON CONFLICT(ticker, spot_price, exit_price, exit_status) DO UPDATE SET
             timestamp = EXCLUDED.timestamp,
-            net_pnl = EXCLUDED.net_pnl;
+            net_pnl = EXCLUDED.net_pnl,
+            execution_origin = EXCLUDED.execution_origin;
     '''
     try:
-        cursor.execute(query, trade_data)
+        cursor.execute(query, payload)
         conn.commit()
+        print(f"[✓] Trade logged for {payload.get('ticker')} | Marker: {payload['execution_origin']}")
     except Exception as e:
         print(f"[!] Database log error: {e}")
     finally:
@@ -123,10 +143,7 @@ def force_exit_all(symbol, limit_price=None, force_market=False):
         orders_resp = {}
         
     orders_data = orders_resp.get('orders', {})
-    if isinstance(orders_data, dict):
-        orders = orders_data.get('order', [])
-    else:
-        orders = []
+    orders = orders_data.get('order', []) if isinstance(orders_data, dict) else []
 
     if isinstance(orders, dict):
         orders = [orders]
@@ -139,14 +156,8 @@ def force_exit_all(symbol, limit_price=None, force_market=False):
     except Exception:
         pos_data = {}
 
-    if not isinstance(pos_data, dict):
-        pos_data = {}
-        
-    positions_data = pos_data.get('positions', {})
-    if isinstance(positions_data, dict):
-        positions = positions_data.get('position', [])
-    else:
-        positions = []
+    positions_data = pos_data.get('positions', {}) if isinstance(pos_data, dict) else {}
+    positions = positions_data.get('position', []) if isinstance(positions_data, dict) else []
 
     if isinstance(positions, dict):
         positions = [positions]
@@ -160,7 +171,8 @@ def force_exit_all(symbol, limit_price=None, force_market=False):
 if __name__ == "__main__":
     print("=" * 65)
     print("[+] HARMONIZED AI DISPATCH ENGINE INITIALIZED")
-    print("Target Session: July 28, 2026 | Session Bell: Active")
+    print("Target Session: August 3, 2026 | Session Bell: Active")
+    print(f"Execution Marker: {EXECUTION_ORIGIN}")
     print("=" * 65)
 
     # Initialize database tables and deduplication constraints
