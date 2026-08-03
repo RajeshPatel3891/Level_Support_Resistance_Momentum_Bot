@@ -457,11 +457,19 @@ async def get_proximity():
     # Fallback to trading_levels.json
     proximity_data = {}
     if os.path.exists('trading_levels.json'):
+        import time
+        levels_file = {}
         try:
-            with open('trading_levels.json', 'r') as f:
-                levels_file = json.load(f)
+            for attempt in range(3):
+                try:
+                    with open('trading_levels.json', 'r') as f:
+                        levels_file = json.load(f)
+                    if levels_file:
+                        break
+                except (json.JSONDecodeError, OSError):
+                    time.sleep(0.05)
             for ticker, info in levels_file.items():
-                spot = float(info.get('spot', info.get('last_price', 0.0)))
+                spot = float(info.get('last_price') or info.get('spot', 0.0))
                 vwap = float(info.get('vwap', spot))
                 call_t = float(info.get('spot_target_call', 0.0))
                 put_t = float(info.get('spot_target_put', 0.0))
@@ -470,8 +478,18 @@ async def get_proximity():
                 gap_val = abs(spot - gex_target) if gex_target > 0 else 0.0
                 gap_dollars = f"${gap_val:.2f}"
                 gap_pct = f"{(gap_val / spot * 100.0):.2f}%" if spot > 0 and gex_target > 0 else "0.00%"
+                sup = info.get("support_zone", info.get("support", [0, 0]))
+                res = info.get("resistance_zone", info.get("resistance", [0, 0]))
+                
+                # Direct Range Evaluation
+                in_sup = (sup[0] <= spot <= sup[1]) if isinstance(sup, list) and len(sup) == 2 and sup[0] > 0 else False
+                in_res = (res[0] <= spot <= res[1]) if isinstance(res, list) and len(res) == 2 and res[0] > 0 else False
+                
+                is_armed = bool(info.get('execution_armed')) or bool(info.get('armed')) or in_sup or in_res
+
                 proximity_data[ticker] = {
-                    'armed': info.get('armed', False),
+                    "armed": is_armed,
+                    "status": "ARMED" if is_armed else "WAITING",
                     'spot': spot,
                     'vwap': vwap,
                     'target': target,
