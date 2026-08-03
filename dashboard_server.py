@@ -1,3 +1,14 @@
+import os
+import json
+import tempfile
+
+def atomic_json_dump(data, filepath):
+    dir_name = os.path.dirname(os.path.abspath(filepath)) or '.'
+    with tempfile.NamedTemporaryFile('w', dir=dir_name, delete=False, encoding='utf-8') as tf:
+        json.dump(data, tf, indent=2)
+        temp_name = tf.name
+    os.replace(temp_name, filepath)
+
 from datetime import datetime, timedelta
 import sys
 import sqlite3

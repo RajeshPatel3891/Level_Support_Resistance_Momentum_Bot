@@ -1,4 +1,15 @@
 import os
+import json
+import tempfile
+
+def atomic_json_dump(data, filepath):
+    dir_name = os.path.dirname(os.path.abspath(filepath)) or '.'
+    with tempfile.NamedTemporaryFile('w', dir=dir_name, delete=False, encoding='utf-8') as tf:
+        json.dump(data, tf, indent=2)
+        temp_name = tf.name
+    os.replace(temp_name, filepath)
+
+import os
 import sys
 import json
 import time
@@ -96,8 +107,17 @@ class MicroScalpSidekick:
             return
 
         # Calculate live effective loss safely without stock-spot cross-talk
-        if entry_price > 0 and option_pnl == 0.0:
-            effective_pnl = 0.0
+        if entry_price > 0 and (option_pnl == 0.0 or option_pnl is None):
+            # Dynamic delta extraction without hardcoding: fallback to 0.50 only if uninitialized
+            delta_val = float(delta) if ('delta' in locals() and delta and float(delta) > 0) else 0.50
+            # Calculate dynamic MTM PnL from stock spot differential against entry spot
+            base_spot = entry_spot if 'entry_spot' in locals() else (spot_price if 'spot_price' in locals() else live_spot)
+            spot_diff = live_spot - base_spot if str(direction).upper() == 'CALL' else base_spot - live_spot
+            # True underlying MTM calculation with dynamic delta_val
+            t_dict = trade if 'trade' in locals() else (pos if 'pos' in locals() else (position if 'position' in locals() else {}))
+            entry_stock = float(t_dict.get('spot_price', 0) or t_dict.get('entry_spot', 0) or live_spot)
+            stock_move = (live_spot - entry_stock) if str(direction).upper() == 'CALL' else (entry_stock - live_spot)
+            effective_pnl = round(stock_move * delta_val * 100.0 * shares_cnt, 2) if entry_stock > 0 else 0.0
         else:
             effective_pnl = option_pnl
 
@@ -201,17 +221,36 @@ class MicroScalpSidekick:
                     option_pnl = round((live_opt_price - entry_price) * shares_cnt * 100.0, 2)
                 else:
                     delta = 0.50
-                    spot_diff = live_spot - spot_price if str(direction).upper() == 'CALL' else spot_price - live_spot
-                    option_pnl = spot_diff * delta * 100.0 * shares_cnt
+                    base_spot = entry_spot if 'entry_spot' in locals() else (spot_price if 'spot_price' in locals() else live_spot)
+                    spot_diff = live_spot - base_spot if str(direction).upper() == 'CALL' else base_spot - live_spot
+                    option_pnl = round(spot_diff * delta * 100.0 * shares_cnt, 2)
                     live_opt_price = entry_price + (option_pnl / (shares_cnt * 100.0)) if (shares_cnt > 0) else entry_price
 
                 cost_basis = entry_price
+                # --- DB SINGLE SOURCE OF TRUTH FOR PEAKS ---
+                total_cost = max(30.0, entry_price * 100.0 * shares_cnt)
+                current_pnl_pct = option_pnl / total_cost if total_cost > 0 else 0.0
+
+                # Read persistent DB peak return
+                db_peak_dollars = max(peak_pnl_val, option_pnl)
+                db_peak_pct = db_peak_dollars / total_cost if total_cost > 0 else 0.0
+
+                # Write new peak immediately to SQLite if breached
+                if option_pnl > peak_pnl_val:
+                    with sqlite3.connect(DB_FILE, timeout=30.0) as conn_peak:
+                        conn_peak.execute("UPDATE trades SET peak_pnl = ? WHERE id = ?", (option_pnl, trade_id))
+                        conn_peak.commit()
+
+                # Memory tracker synced strictly with persistent DB peak
+                self.peak_pnl_tracker[ticker] = max(self.peak_pnl_tracker.get(ticker, 0.0), db_peak_pct)
+                peak_pnl_pct = self.peak_pnl_tracker[ticker]
                 estimated_basis = max(30.0, entry_price * 100.0 * shares_cnt)
                 pnl_pct = option_pnl / estimated_basis
 
                 # --- CSO DYNAMIC MULTI-TIER TRAILING PROFIT MATRIX ---
-                if cost_basis > 0 and live_opt_price > 0:
-                    current_pnl_pct = (live_opt_price - cost_basis) / cost_basis
+                total_cost = max(30.0, entry_price * 100.0 * shares_cnt)
+                if total_cost > 0:
+                    current_pnl_pct = option_pnl / total_cost
                     peak_pnl_pct = max(self.peak_pnl_tracker.get(ticker, current_pnl_pct), current_pnl_pct)
                     self.peak_pnl_tracker[ticker] = peak_pnl_pct
 
@@ -243,7 +282,7 @@ class MicroScalpSidekick:
                                     net_pnl = ?, 
                                     cso_notes = ? 
                                 WHERE id = ? AND exit_status = 'ACTIVE'
-                            """, (live_spot, option_pnl, f"Trailing Lock Exit ({tier_label}): Peaked +{peak_pnl_pct*100:.1f}%, Dropped to +{current_pnl_pct*100:.1f}%", trade_id))
+                            """, (round(entry_price + (option_pnl / (shares_cnt * 100.0)), 2) if shares_cnt > 0 else live_spot, option_pnl, f"Trailing Lock Exit ({tier_label}): Peaked +{peak_pnl_pct*100:.1f}%, Dropped to +{current_pnl_pct*100:.1f}%", trade_id))
                             conn_trail.commit()
                             conn_trail.close()
                             continue
