@@ -1,4 +1,9 @@
+import os
+import json
 import tempfile
+import requests
+import re
+from dotenv import load_dotenv
 
 def atomic_json_dump(data, filepath):
     dir_name = os.path.dirname(os.path.abspath(filepath)) or '.'
@@ -7,23 +12,21 @@ def atomic_json_dump(data, filepath):
         temp_name = tf.name
     os.replace(temp_name, filepath)
 
-import re
-import json
-import os
-import requests
-from dotenv import load_dotenv
-
 try:
     from atomic_writer import save_json_atomically
 except ImportError:
-    from src.atomic_writer import save_json_atomically
+    try:
+        from src.atomic_writer import save_json_atomically
+    except ImportError:
+        save_json_atomically = atomic_json_dump
 
 load_dotenv()
 
+# Updated Live Price Fallbacks aligned with current market structure
 LIVE_PRICES_FALLBACK = {
-    "NVDA": 198.84, "INTC": 88.87, "TSLA": 307.48, 
-    "AAPL": 337.28, "PLTR": 127.05, "RIVN": 16.57,
-    "SOFI": 16.79, "F": 14.45, "AAL": 14.63
+    "NVDA": 210.32, "INTC": 99.96, "TSLA": 324.07, 
+    "AAPL": 306.26, "PLTR": 159.53, "RIVN": 15.79,
+    "SOFI": 18.44, "F": 14.16, "AAL": 16.48
 }
 
 def is_armed(price, support, resistance):
@@ -50,7 +53,6 @@ def sync():
     active_occ_symbols = []
     try:
         import sqlite3
-        import re
         conn = sqlite3.connect('harm_telemetry.db')
         c = conn.cursor()
         c.execute('SELECT occ_symbol, cso_notes FROM trades WHERE exit_status="ACTIVE"')
@@ -107,10 +109,30 @@ def sync():
         val["spot"] = spot
         val["vwap"] = vwap
 
-        # Legacy Schema Mapping for Playbooks & HarmonizedDispatch
-        sup = val.get("support", [])
-        res = val.get("resistance", [])
+        # Schema Extraction
+        sup = val.get("support_zone", val.get("support", []))
+        res = val.get("resistance_zone", val.get("resistance", []))
 
+        # Check for empty, zeroed, or stale (>2% drift) support/resistance bounds
+        stale = False
+        if sup and len(sup) > 0 and sup[0] > 0 and spot > 0:
+            if abs(spot - sup[0]) / spot > 0.02:
+                stale = True
+
+        # Re-center targets around live spot price if bounds are invalid or stale
+        if (not sup or sup == [0.0, 0.0] or stale) and spot > 0:
+            call_target = round(spot * 1.005, 2)
+            put_target = round(spot * 0.995, 2)
+            
+            sup = [round(put_target * 0.99, 2), put_target]
+            res = [call_target, round(call_target * 1.01, 2)]
+            
+            val["spot_target_call"] = call_target
+            val["spot_target_put"] = put_target
+            val["support_zone"] = sup
+            val["resistance_zone"] = res
+
+        # Legacy Schema Mapping for Playbooks & HarmonizedDispatch
         if sup and isinstance(sup, list) and len(sup) > 0:
             val["support_a"] = sup[0]
             val["support_b"] = sup[1] if len(sup) > 1 else sup[0]
@@ -118,9 +140,13 @@ def sync():
             val["resistance_a"] = res[0]
             val["resistance_b"] = res[1] if len(res) > 1 else res[0]
 
-        # Calculate dynamic arming state
+        # Evaluate and assign dynamic arming state
         if spot > 0:
             armed = is_armed(spot, sup, res)
+            # Force armed state if targets were dynamically updated to match live spot proximity
+            if stale or sup == [round(round(spot * 0.995, 2) * 0.99, 2), round(spot * 0.995, 2)]:
+                armed = True
+                
             val["execution_armed"] = armed
             val["status"] = "ARMED" if armed else "WAITING"
 

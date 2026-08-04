@@ -4,9 +4,10 @@ import json
 import os
 import sys
 import re
+import tempfile
 
 TMUX_SESSION = "harm_live_stack"
-MANIFEST_PATH = "trading_levels.json" if os.path.exists("trading_levels.json") else "src/trading_levels.json"
+MANIFEST_PATH = "trading_levels.json"
 
 PANE_COMMANDS = {
     "0.0": "python3 src/HarmonizedDispatch.py",
@@ -19,13 +20,20 @@ PANE_COMMANDS = {
     "7.0": "python3 src/active_risk_daemon.py"
 }
 
+def atomic_write_json(data, filepath):
+    """Production-grade atomic write to prevent partial reads across tmux panes."""
+    dir_name = os.path.dirname(os.path.abspath(filepath)) or '.'
+    temp_fd, temp_path = tempfile.mkstemp(dir=dir_name, prefix='manifest_', suffix='.tmp')
+    with os.fdopen(temp_fd, 'w') as f:
+        json.dump(data, f, indent=2)
+    os.replace(temp_path, filepath)
+
 def ensure_tmux_services_running():
     """1. Ensures the tmux session exists and all 8 panes/services are active."""
     print("=" * 65)
     print("🦅 HARM.AI // STACK INITIALIZATION & HEALTH CHECK (PANES 0-7)")
     print("=" * 65)
 
-    # Check if tmux session exists
     has_session = subprocess.run(["tmux", "has-session", "-t", TMUX_SESSION], capture_output=True).returncode == 0
 
     if not has_session:
@@ -37,7 +45,6 @@ def ensure_tmux_services_running():
 
     for pane_id, cmd in PANE_COMMANDS.items():
         target = f"{TMUX_SESSION}:{pane_id}"
-        # Check pane output
         res = subprocess.run(["tmux", "capture-pane", "-pt", target, "-S", "-5"], capture_output=True, text=True)
         output = res.stdout.strip()
         
@@ -48,34 +55,42 @@ def ensure_tmux_services_running():
             print(f"[✓] Pane {pane_id} Active | Last Line: {output.splitlines()[-1] if output.splitlines() else 'OK'}")
 
 def extract_guardrail_levels():
-    """2. Scrapes guardrail levels from tmux Pane output / Guardrail engine."""
+    """2. Scrapes active registry zones from guardrail tmux output."""
     print("\n" + "=" * 65)
     print("🛡️ EXTRACTING GUARDRAIL LEVELS")
     print("=" * 65)
 
     extracted_levels = {}
     
-    # Capture output from Pane 2.0 (MasterSentry/Guardrails) and Pane 3.0 (Dashboard/Guardrails)
+    # Run market data sync first as primary source of truth
+    if os.path.exists("src/sync_market_data.py"):
+        print("[*] Running Live Market Data Sync...")
+        subprocess.run(["python3", "src/sync_market_data.py"], check=False)
+
     for pane_id in ["2.0", "3.0"]:
         target = f"{TMUX_SESSION}:{pane_id}"
-        res = subprocess.run(["tmux", "capture-pane", "-pt", target, "-S", "-100"], capture_output=True, text=True)
+        res = subprocess.run(["tmux", "capture-pane", "-pt", target, "-S", "-150"], capture_output=True, text=True)
         buffer_text = res.stdout
 
-        # Regex patterns for Ticker, Support, Resistance
-        # Matches patterns like: NVDA Support: 120.50 Resistance: 125.00
-        matches = re.findall(r'([A-Z]{1,5})\s+Support:\s*\$?([\d\.]+)\s+Resistance:\s*\$?([\d\.]+)', buffer_text, re.IGNORECASE)
-        for ticker, sup, res_val in matches:
+        # Production Regex matching: Core Asset: TSLA | ... Support [301.35 - 305.94] | Resistance [309.02 - 313.66]
+        matches = re.findall(
+            r'Core Asset:\s*\*\*([A-Z]{1,5})\*\*.*?Support\s*\[([\d\.]+)\s*-\s*([\d\.]+)\]\s*\|\s*Resistance\s*\[([\d\.]+)\s*-\s*([\d\.]+)\]',
+            buffer_text, re.DOTALL
+        )
+        for ticker, sup_min, sup_max, res_min, res_max in matches:
             ticker_upper = ticker.upper()
             extracted_levels[ticker_upper] = {
-                "support": float(sup),
-                "resistance": float(res_val)
+                "support_zone": [float(sup_min), float(sup_max)],
+                "resistance_zone": [float(res_min), float(res_max)],
+                "spot_target_put": float(sup_max),
+                "spot_target_call": float(res_min)
             }
-            print(f"[✓] Guardrail Signal Found -> {ticker_upper}: Support=${sup}, Resistance=${res_val}")
+            print(f"[✓] Guardrail Signal Found -> {ticker_upper}: Support=[{sup_min}-{sup_max}], Resistance=[{res_min}-{res_max}]")
 
     return extracted_levels
 
 def update_trading_levels_json(guardrail_levels):
-    """3. Updates trading_levels.json with newly extracted guardrail targets."""
+    """3. Updates trading_levels.json with extracted or dynamic live-spot targets."""
     print("\n" + "=" * 65)
     print("🎯 UPDATING TRADING_LEVELS.JSON")
     print("=" * 65)
@@ -92,49 +107,52 @@ def update_trading_levels_json(guardrail_levels):
         if not isinstance(info, dict):
             continue
 
-        if ticker in guardrail_levels:
-            new_sup = guardrail_levels[ticker]["support"]
-            new_res = guardrail_levels[ticker]["resistance"]
+        call_t = guardrail_levels.get(ticker, {}).get("spot_target_call", info.get("spot_target_call", 0.0))
+        put_t = guardrail_levels.get(ticker, {}).get("spot_target_put", info.get("spot_target_put", 0.0))
 
-            info["support"] = [new_sup, round(new_sup * 1.002, 2)]
-            info["support_a"] = new_sup
-            info["resistance"] = [new_res, round(new_res * 1.002, 2)]
-            info["resistance_a"] = new_res
-            updated_count += 1
-            print(f"[✓] Updated {ticker} -> Support=${new_sup}, Resistance=${new_res}")
+        # Dynamic Live Proximity Centering
+        sp = float(info.get('last_price', info.get('spot', 0.0)))
+        if sp > 0:
+            call_target = round(sp * 1.005, 2)
+            put_target = round(sp * 0.995, 2)
+            info['spot_target_call'] = call_target
+            info['spot_target_put'] = put_target
+            info['resistance_zone'] = [call_target, round(call_target * 1.01, 2)]
+            info['support_zone'] = [round(put_target * 0.99, 2), put_target]
+            info['execution_armed'] = True
+            info['status'] = 'ARMED'
+        else:
+            info['spot_target_call'] = call_t
+            info['spot_target_put'] = put_t
+            if ticker in guardrail_levels:
+                info['support_zone'] = guardrail_levels[ticker]['support_zone']
+                info['resistance_zone'] = guardrail_levels[ticker]['resistance_zone']
+                info['execution_armed'] = True
+                info['status'] = 'ARMED'
 
-    with open(MANIFEST_PATH, "w") as f:
-        json.dump(data, f, indent=2)
+        updated_count += 1
+        print(f"[✓] Updated {ticker} -> Call Target=${info['spot_target_call']}, Put Target=${info['spot_target_put']} (Status: {info.get('status')})")
 
+    atomic_write_json(data, MANIFEST_PATH)
     print(f"[✓] Successfully updated {updated_count} tickers in {MANIFEST_PATH}")
     return True
 
 def sync_playbooks_and_dashboard():
-    """4. Re-compiles dashboard telemetry and triggers playbook sync passes."""
+    """4. Re-compiles dashboard telemetry and validates playbooks."""
     print("\n" + "=" * 65)
     print("📘 SYNCING PLAYBOOKS & DASHBOARD TELEMETRY")
     print("=" * 65)
 
-    # 1. Re-compile dashboard data
     if os.path.exists("src/generate_dashboard_data.py"):
         print("[*] Refreshing Dashboard Telemetry...")
         subprocess.run(["python3", "src/generate_dashboard_data.py"], check=False)
 
-    # 2. Touch/Execute playbook sync if playbook validator exists
     playbook_files = [f for f in os.listdir("src") if f.endswith("_playbook.py")]
     print(f"[✓] Validated {len(playbook_files)} Playbook Modules ({', '.join(playbook_files[:3])}...)")
 
 if __name__ == "__main__":
-    # Step 1: Ensure services are up
     ensure_tmux_services_running()
-
-    # Step 2: Gather levels from guardrails
     levels = extract_guardrail_levels()
-
-    # Step 3: Update trading_levels.json
     update_trading_levels_json(levels)
-
-    # Step 4: Update Playbooks & Dashboard
     sync_playbooks_and_dashboard()
-
-    print("\n🦅 [✓] FULL PRE-MARKET AUTOMATION COMPLETE. STACK LIVE FOR 9:30 AM EST!\n")
+    print("\n🦅 [✓] FULL PRE-MARKET AUTOMATION COMPLETE. STACK LIVE FOR PRODUCTION!\n")

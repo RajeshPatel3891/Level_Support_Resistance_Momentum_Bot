@@ -136,7 +136,12 @@ INDEX_HTML_TEMPLATE = """
                 </div>
 
                 <div class="text-[11px] text-purple-400">
-                    GEX Target: <strong class="text-purple-300">{{ trade.gex_target_str }}</strong> (Dist: {{ trade.gex_dist }})
+                    GEX Target: <strong class="text-purple-300">{{ trade.gex_target_str }}</strong> 
+<span class="inline-flex items-center gap-1 bg-purple-950/60 border border-purple-500/40 rounded px-1.5 py-0.5 text-[10px] ml-1">
+    <button type="button" onclick="adjustTP('{{ trade.ticker }}', -1.0)" class="text-purple-300 hover:text-white font-bold px-1 hover:bg-purple-800/50 rounded transition-colors">-</button>
+    <span id="tp-val-{{ trade.ticker }}" class="text-purple-300 font-bold">(Dist: {{ trade.gex_dist }})</span>
+    <button type="button" onclick="adjustTP('{{ trade.ticker }}', 1.0)" class="text-purple-300 hover:text-white font-bold px-1 hover:bg-purple-800/50 rounded transition-colors">+</button>
+</span>
                 </div>
 
                 <!-- Explicit Dollar Risk & Return Overlay -->
@@ -246,6 +251,41 @@ INDEX_HTML_TEMPLATE = """
         </div>
         {% endfor %}
     </div>
+
+
+
+
+
+
+
+
+
+<script>
+async function adjustTP(ticker, step) {
+    console.log('adjustTP triggered:', ticker, step);
+    if (!ticker) return;
+    let el = document.getElementById('tp-val-' + ticker);
+    if (!el) return;
+    
+    let match = el.innerText.match(/([+-]?\d+(\.\d+)?)/);
+    let current = match ? parseFloat(match[1]) : 50.0;
+    
+    // Lower floor limit to -100.0% so targets can be dialed into stop territory
+    let nextVal = Math.max(-100.0, current + step);
+    
+    // Format display string (+/-)
+    let sign = nextVal > 0 ? '+' : '';
+    el.innerText = sign + nextVal.toFixed(1) + '%';
+    
+    try {
+        let res = await fetch(`/api/update_tp_target/${ticker}/${nextVal}`, { method: 'POST' });
+        let data = await res.json();
+        console.log('TP target updated cleanly:', data);
+    } catch(err) {
+        console.error('Failed to update TP target:', err);
+    }
+}
+</script>
 
 </body>
 </html>
@@ -672,6 +712,22 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
 
 
 from fastapi.responses import RedirectResponse
+
+@app.post("/api/update_tp_target/{ticker}/{target_pct}")
+async def update_tp_target(ticker: str, target_pct: float):
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE trades 
+            SET target_pct = ? 
+            WHERE ticker = ? AND exit_status = 'ACTIVE'
+        """, (target_pct / 100.0, ticker))
+        conn.commit()
+        conn.close()
+        return {"status": "success", "ticker": ticker, "new_target_pct": target_pct}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
 
 @app.post("/close-position/{ticker}")
 async def close_single_position(ticker: str):

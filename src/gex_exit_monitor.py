@@ -7,13 +7,20 @@ def evaluate_gex_exits():
         cursor = conn.cursor()
         cursor.execute("SELECT id, ticker, spot_price, entry_price FROM trades WHERE exit_status = 'ACTIVE'")
         active = cursor.fetchall()
-        for trade in active:
-            t_id, ticker, current_price, entry_price = trade
-            if current_price is not None:
-                safe_exit_price = current_price if current_price < 50.0 else 0.0
+        
+        if not active:
+            print("[⚙️ GEX MONITOR] Scanning... 0 active trades pending GEX exit.")
+        else:
+            for trade in active:
+                t_id, ticker, current_price, entry_price = trade
+                print(f"[⚙️ GEX MONITOR] Tracking ID {t_id} ({ticker}) | Spot: ${current_price} | Entry: ${entry_price}")
+        
         conn.close()
     except Exception as e:
         print(f"[-] GEX Exit Monitor Error: {e}")
 
 if __name__ == "__main__":
-    evaluate_gex_exits()
+    print("[⚙️] GEX Exit Monitor Active Routine Initialized.")
+    while True:
+        evaluate_gex_exits()
+        time.sleep(10)

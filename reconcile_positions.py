@@ -17,7 +17,7 @@ def reconcile():
     if isinstance(positions, dict): positions = [positions]
 
     # 2. Robust Manifest Search
-    manifest_path = 'src/trading_levels.json'
+    manifest_path = 'trading_levels.json'
     if not os.path.exists(manifest_path):
         manifest_path = 'trading_levels.json'
         
