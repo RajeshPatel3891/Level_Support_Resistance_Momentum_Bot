@@ -20,6 +20,13 @@ PANE_COMMANDS = {
     "7.0": "python3 src/active_risk_daemon.py"
 }
 
+def purge_zombie_stacks():
+    """Ensure zero duplicate tmux sessions or stray python loops exist."""
+    print("[🧹] Purging legacy tmux sessions and orphaned worker processes...")
+    subprocess.run(["tmux", "kill-server"], stderr=subprocess.DEVNULL)
+    subprocess.run(["pkill", "-9", "-f", "LiveBot.py"], stderr=subprocess.DEVNULL)
+    subprocess.run(["pkill", "-9", "-f", "MasterSentry.py"], stderr=subprocess.DEVNULL)
+
 def atomic_write_json(data, filepath):
     """Production-grade atomic write to prevent partial reads across tmux panes."""
     dir_name = os.path.dirname(os.path.abspath(filepath)) or '.'
@@ -151,6 +158,7 @@ def sync_playbooks_and_dashboard():
     print(f"[✓] Validated {len(playbook_files)} Playbook Modules ({', '.join(playbook_files[:3])}...)")
 
 if __name__ == "__main__":
+    purge_zombie_stacks()
     ensure_tmux_services_running()
     levels = extract_guardrail_levels()
     update_trading_levels_json(levels)
