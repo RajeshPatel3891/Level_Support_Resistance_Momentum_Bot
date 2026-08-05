@@ -47,7 +47,6 @@ def get_cso_status_reason(current_pnl_pct, peak_pnl_pct, tp_target_pct, last_hea
     now = time.time()
     heartbeat_age = round(now - last_heartbeat_ts, 1)
 
-    # 🚨 CRITICAL SYSTEM WARNINGS (Catches Blocked / Asleep Engines)
     if heartbeat_age > 15.0:
         return f"🚨 CSO_BLOCKED [REASON: PROCESS_FROZEN | No Heartbeat in {heartbeat_age}s]"
     
@@ -57,7 +56,6 @@ def get_cso_status_reason(current_pnl_pct, peak_pnl_pct, tp_target_pct, last_hea
     if execution_error:
         return f"🚨 CSO_ERROR [REASON: DISPATCH_FAILED | {execution_error}]"
 
-    # ✅ HEALTHY STATE LOGIC (Normal Operating Modes)
     if peak_pnl_pct >= 0.30:
         trail_level = round((peak_pnl_pct - 0.015) * 100.0, 1)
         return f"CSO_HOLD [REASON: TIER_3_TRAIL_ACTIVE | Stop @ +{trail_level}% | Peak: +{round(peak_pnl_pct*100, 1)}%]"
@@ -80,8 +78,8 @@ class MicroScalpSidekick:
         self.last_levels_mtime = 0
         self.active_positions = {}
         self.cso_cooldowns = {} 
-        self.cso_ev_state_cache = {} # State Transition Cache (ticker: {"state": str, "last_ping": float})
-        self.peak_pnl_tracker = {}   # Persistent In-Memory Peak Return Tracker ({ticker: peak_pnl_pct})
+        self.cso_ev_state_cache = {}
+        self.peak_pnl_tracker = {}
         self.last_heartbeat = time.time()
 
         try:
@@ -128,21 +126,11 @@ class MicroScalpSidekick:
         return (False, "UNKNOWN", "Fallback Mode", "Unable to read macro state.", "NEUTRAL", {}, 50)
 
     def process_cso_ev_guard(self, trade_id: int, ticker: str, live_spot: float, stop_loss_val: float, direction: str, shares_cnt: float, option_pnl: float, entry_price: float = 0.0):
-        """State Transition Guard for CSO Expected Value (EV) exits."""
         gex_target, stop_loss_val, gex_label = resolve_direction_targets(ticker, live_spot, direction, stop_loss_val)
-        
         if not gex_target:
             return
 
-        if entry_price > 0 and (option_pnl == 0.0 or option_pnl is None):
-            delta_val = float(delta) if ('delta' in locals() and delta and float(delta) > 0) else 0.50
-            t_dict = trade if 'trade' in locals() else (pos if 'pos' in locals() else (position if 'position' in locals() else {}))
-            entry_stock = float(t_dict.get('spot_price', 0) or t_dict.get('entry_spot', 0) or live_spot)
-            stock_move = (live_spot - entry_stock) if str(direction).upper() == 'CALL' else (entry_stock - live_spot)
-            effective_pnl = round(stock_move * delta_val * 100.0 * shares_cnt, 2) if entry_stock > 0 else 0.0
-        else:
-            effective_pnl = option_pnl
-
+        effective_pnl = option_pnl
         hit_prob = calculate_gex_hit_probability(live_spot, gex_target, gex_label)
         eval_spot = entry_price if (entry_price > 0 and option_pnl == 0.0 and live_spot > entry_price * 2.0) else live_spot
         cso_eval = evaluate_cso_informed_exit(eval_spot, gex_target, stop_loss_val, hit_prob, effective_pnl, shares_cnt)
@@ -151,14 +139,10 @@ class MicroScalpSidekick:
         now_ts = time.time()
         cached = self.cso_ev_state_cache.get(ticker, {"state": "HOLD", "last_ping": 0})
         
-        state_changed = (recommendation != cached["state"])
-        time_elapsed = now_ts - cached["last_ping"]
-
-        if state_changed or time_elapsed >= 120:
+        if (recommendation != cached["state"]) or (now_ts - cached["last_ping"] >= 120):
             print(f"[🧠 CSO EV ALERT] {ticker} -> Rec: {recommendation} | Effective PnL: ${effective_pnl:.2f} | Reason: {cso_eval['reason']}")
             self.cso_ev_state_cache[ticker] = {"state": recommendation, "last_ping": now_ts}
 
-        # --- TIER 1: NON-NEGOTIABLE HARD RISK CAP (-$30.00) ---
         if effective_pnl <= -30.00:
             print(f"[🚨 CSO HARD RISK CAP] {ticker} breached -$30.00 risk cap (${effective_pnl:.2f}). Executing Non-Discretionary Close!")
             with sqlite3.connect(DB_FILE, timeout=30.0) as conn_cso:
@@ -170,7 +154,6 @@ class MicroScalpSidekick:
                 conn_cso.commit()
             return
 
-        # --- TIER 2: CSO TACTICAL DECAY AUTO-EXIT ---
         if recommendation == "TIGHTEN_STOP" and effective_pnl <= -20.00:
             print(f"[🧠 CSO AUTO-EXIT] CSO EV Path degraded for {ticker} (${effective_pnl:.2f}). Executing Dynamic Exit!")
             with sqlite3.connect(DB_FILE, timeout=30.0) as conn_cso:
@@ -182,7 +165,6 @@ class MicroScalpSidekick:
                 conn_cso.commit()
             return
 
-        # --- TIER 3: TAKE PROFIT AUTO-LOCK ---
         if recommendation == "TAKE_PROFIT_NOW":
             print(f"[🎯 CSO AUTO-LOCK GAINS] Closing {ticker} to secure ${effective_pnl:+.2f} profit!")
             with sqlite3.connect(DB_FILE, timeout=30.0) as conn_cso:
@@ -217,18 +199,30 @@ class MicroScalpSidekick:
 
             from dashboard_server import get_live_quote
 
+            now_dt = datetime.now()
+
             for row in rows:
                 ticker = row[0]
                 spot_price = row[1]
                 stop_loss = row[2]
                 take_profit = row[3]
-                timestamp = row[4]
+                ts_str = row[4]
                 entry_price = float(row[5]) if (len(row) > 5 and row[5] is not None) else (float(row[1]) if row[1] else 0.0)
                 shares_cnt = float(row[6]) if (len(row) > 6 and row[6]) else 1.0
                 direction = row[7] if (len(row) > 7 and row[7]) else 'CALL'
                 trade_id = row[8]
                 peak_pnl_val = float(row[9]) if (len(row) > 9 and row[9] is not None) else 0.0
                 occ_sym = row[10] if (len(row) > 10 and row[10]) else None
+
+                # Compute exact elapsed minutes in trade
+                elapsed_minutes = 0.0
+                if ts_str:
+                    try:
+                        clean_ts = str(ts_str).split('.')[0].replace('T', ' ')
+                        entry_dt = datetime.strptime(clean_ts, "%Y-%m-%d %H:%M:%S")
+                        elapsed_minutes = round((now_dt - entry_dt).total_seconds() / 60.0, 1)
+                    except Exception:
+                        pass
 
                 t0 = time.time()
                 stock_quote = get_live_quote(ticker)
@@ -237,17 +231,21 @@ class MicroScalpSidekick:
                 live_spot = float(stock_quote.get('last') or spot_price) if (stock_quote and stock_quote.get('last')) else spot_price
                 ticker_data = self.levels_cache.get(ticker, {})
 
-                opt_quote = get_live_quote(occ_sym) if occ_sym else None
+                opt_quote = get_live_quote(occ_sym) if occ_sym else {}
                 
                 if opt_quote and opt_quote.get('last') and float(opt_quote['last']) > 0:
                     live_opt_price = float(opt_quote['last'])
                     option_pnl = round((live_opt_price - entry_price) * shares_cnt * 100.0, 2)
+                    theta_val = float(opt_quote.get('theta', -0.05))
+                    delta_val = float(opt_quote.get('delta', 0.50))
                 else:
-                    delta = 0.50
+                    delta_val = 0.50
+                    theta_val = -0.08
                     base_spot = spot_price if spot_price else live_spot
                     spot_diff = live_spot - base_spot if str(direction).upper() == 'CALL' else base_spot - live_spot
-                    option_pnl = round(spot_diff * delta * 100.0 * shares_cnt, 2)
-                    live_opt_price = entry_price + (option_pnl / (shares_cnt * 100.0)) if (shares_cnt > 0) else entry_price
+                    option_pnl = round(spot_diff * delta_val * 100.0 * shares_cnt, 2)
+
+                theta_delta_ratio = round(abs(theta_val) / max(0.01, abs(delta_val)), 2)
 
                 total_cost = max(30.0, entry_price * 100.0 * shares_cnt)
                 current_pnl_pct = option_pnl / total_cost if total_cost > 0 else 0.0
@@ -262,10 +260,8 @@ class MicroScalpSidekick:
 
                 self.peak_pnl_tracker[ticker] = max(self.peak_pnl_tracker.get(ticker, 0.0), db_peak_pct)
                 peak_pnl_pct = self.peak_pnl_tracker[ticker]
-                estimated_basis = max(30.0, entry_price * 100.0 * shares_cnt)
-                pnl_pct = option_pnl / estimated_basis
+                pnl_pct = option_pnl / total_cost if total_cost > 0 else 0.0
 
-                # --- CSO REASON EVALUATION & TELEMETRY UPDATE ---
                 cso_reason = get_cso_status_reason(
                     current_pnl_pct=current_pnl_pct,
                     peak_pnl_pct=peak_pnl_pct,
@@ -283,13 +279,13 @@ class MicroScalpSidekick:
                 tier_label = ""
 
                 if peak_pnl_pct >= 0.30:
-                    trail_buffer = 0.015 # Maximum 1.5% tight trail at +30%+ gain
+                    trail_buffer = 0.015
                     tier_label = "TIER 3 (+30% Peak / 1.5% Trail)"
                 elif peak_pnl_pct >= 0.20:
-                    trail_buffer = 0.03  # Tighter 3% trail at +20%+ gain
+                    trail_buffer = 0.03
                     tier_label = "TIER 2 (+20% Peak / 3% Trail)"
                 elif peak_pnl_pct >= 0.10:
-                    trail_buffer = 0.05  # Standard 5% trail at +10%+ gain
+                    trail_buffer = 0.05
                     tier_label = "TIER 1 (+10% Peak / 5% Trail)"
 
                 if trail_buffer > 0.0:
@@ -344,26 +340,35 @@ class MicroScalpSidekick:
                         conn_update.commit()
                     continue
 
-                # 4. STAGE 2: SOFT STOP (-20%) -> GEMINI CSO EVALUATION
+                # 4. STAGE 2: SOFT STOP (-20%) -> GEMINI TIME & DECAY AWARE CSO EVALUATION
                 elif pnl_pct <= -0.20 and evaluate_macro_rebound is not None:
                     now_ts = time.time()
                     last_cso_call = self.cso_cooldowns.get(ticker, 0)
 
                     if now_ts - last_cso_call > 180:
                         self.cso_cooldowns[ticker] = now_ts
-                        print(f"[🧠 CSO ESCALATION] {ticker} hit -20% soft stop. Requesting Gemini CSO Evaluation...")
+                        print(f"[🧠 CSO ESCALATION] {ticker} hit -20% soft stop ({elapsed_minutes}m in trade). Requesting Time/Decay Aware Gemini CSO Evaluation...")
 
                         override, regime, catalyst, directive, market_bias, asset_biases, risk_score = self.get_macro_safety_state()
                         
+                        decay_warning = "CRITICAL_THETA_BLEED" if (theta_delta_ratio > 0.30 or elapsed_minutes > 30) else "NORMAL"
+
                         telemetry_payload = {
                             "ticker": ticker,
-                            "entry_premium": estimated_basis / 100.0,
-                            "current_premium": (estimated_basis + option_pnl) / 100.0,
-                            "drawdown_pct": pnl_pct * 100.0,
+                            "time_in_trade_minutes": elapsed_minutes,
+                            "mttp_max_limit": 45,
+                            "entry_premium": entry_price,
+                            "current_premium": (entry_price + (option_pnl / (shares_cnt * 100.0))) if shares_cnt > 0 else entry_price,
+                            "drawdown_pct": round(pnl_pct * 100.0, 1),
                             "spot_price": live_spot,
                             "vwap": float(ticker_data.get("vwap", live_spot)),
                             "support_zone": str(ticker_data.get("support_a", "N/A")),
                             "resistance_zone": str(ticker_data.get("resistance_a", "N/A")),
+                            "theta": theta_val,
+                            "delta": delta_val,
+                            "theta_delta_ratio": theta_delta_ratio,
+                            "is_weekly_0dte": True if ticker in ["SOFI", "RIVN", "F", "INTC", "AAL"] else False,
+                            "decay_warning": decay_warning,
                             "market_trend": f"Regime: {regime} | Market Bias: {market_bias}"
                         }
 
@@ -372,7 +377,7 @@ class MicroScalpSidekick:
                         reasoning = cso_verdict.get("reasoning", "No reasoning provided.")
 
                         if verdict == "CUT_EARLY":
-                            print(f"[🛑 CSO MACRO CUT] {ticker}: Gemini CSO advised CUT_EARLY. Rationale: {reasoning}")
+                            print(f"[🛑 CSO MACRO CUT] {ticker}: Gemini CSO advised CUT_EARLY ({elapsed_minutes}m in trade). Rationale: {reasoning}")
                             with sqlite3.connect(DB_FILE, timeout=10.0) as conn_update:
                                 conn_update.execute("""
                                     UPDATE OR IGNORE trades 
