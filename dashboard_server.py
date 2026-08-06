@@ -405,7 +405,10 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
         cursor = conn.cursor()
 
         # 1. Fetch Active Trades with Live Option Mark-to-Market PnL
-        cursor.execute("SELECT * FROM trades WHERE exit_status = 'ACTIVE'")
+        dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
+    table = dynamodb.Table('HarmonizedTrades')
+    res = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE'))
+    active_items = res.get('Items', [])
         for r in cursor.fetchall():
             d = dict(r)
             occ = d.get('occ_symbol')
