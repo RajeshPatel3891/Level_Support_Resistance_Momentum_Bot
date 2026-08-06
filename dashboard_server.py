@@ -1,4 +1,43 @@
 
+def get_active_positions_from_dynamo():
+    try:
+        dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
+        table = dynamodb.Table('HarmonizedTrades')
+        res = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE'))
+        raw_items = res.get('Items', [])
+        
+        parsed_items = []
+        for item in raw_items:
+            try:
+                # Convert DynamoDB string fields to floats/ints for dashboard math
+                qty = float(item.get('shares', 1.0))
+                if qty <= 0:
+                    continue  # Skip short/credit legs for long card rendering
+                
+                parsed_items.append({
+                    'trade_id': str(item.get('trade_id')),
+                    'ticker': str(item.get('ticker')),
+                    'timestamp': str(item.get('timestamp', '')),
+                    'strategy': str(item.get('strategy', 'BREAKOUT')),
+                    'direction': str(item.get('direction', 'CALL')),
+                    'spot_price': float(item.get('spot_price', 0.0)),
+                    'entry_price': float(item.get('entry_price', 0.0)),
+                    'shares': qty,
+                    'stop_loss': float(item.get('stop_loss', 0.0)),
+                    'take_profit': float(item.get('take_profit', 0.0)),
+                    'net_pnl': float(item.get('net_pnl', 0.0)),
+                    'exit_status': 'ACTIVE',
+                    'is_live': int(item.get('is_live', 1)),
+                    'occ_symbol': str(item.get('occ_symbol', item.get('ticker')))
+                })
+            except Exception as parse_err:
+                continue
+                
+        return parsed_items
+    except Exception as e:
+        print(f"[-] Dashboard DynamoDB Read Error: {e}")
+        return []
+
 def get_dynamo_active_trades():
     try:
         dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
