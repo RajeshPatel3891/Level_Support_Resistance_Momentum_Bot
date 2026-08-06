@@ -58,8 +58,8 @@ INDEX_HTML_TEMPLATE = """
         <div class="flex items-center space-x-2">
             <form action="/" method="GET" class="flex items-center">
                 <input type="date" name="selected_date" value="{{ selected_date }}" 
-                      onchange="this.form.submit()" 
-                      class="bg-gray-800 text-xs text-white px-2 py-1 rounded border border-gray-700 focus:outline-none">
+                    onchange="this.form.submit()" 
+                    class="bg-gray-800 text-xs text-white px-2 py-1 rounded border border-gray-700 focus:outline-none">
             </form>
             <a href="/export/trades?selected_date={{ selected_date }}" 
               class="bg-green-600 hover:bg-green-500 text-white text-xs px-2 py-1 rounded font-bold">
@@ -130,7 +130,7 @@ INDEX_HTML_TEMPLATE = """
                         CSO: {{ trade.cso_recommendation }}
                     </span>
                 </div>
-                
+               
                 <div class="text-xs text-gray-400">
                     Live: <b class="text-gray-200">{{ trade.price }}</b> | Cost: <b class="text-gray-200">{{ trade.basis }}</b>
                 </div>
@@ -183,13 +183,13 @@ INDEX_HTML_TEMPLATE = """
                 const data = await res.json();
                 const container = document.getElementById('proximity-container');
                 if (!container) return;
-                
+               
                 let html = '';
                 for (const [ticker, info] of Object.entries(data)) {
                     const statusBg = info.armed ? 'rgba(0, 230, 118, 0.15)' : 'rgba(255, 255, 255, 0.05)';
                     const statusColor = info.armed ? '#00e676' : '#8f9bba';
                     const statusText = info.armed ? 'ARMED' : 'WAITING';
-                    
+                   
                     html += `
                         <div style="background: #111827; border: 1px solid #1f293d; border-radius: 8px; padding: 12px;">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
@@ -412,10 +412,10 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
             spot = float(d.get('spot_price') or 0.0)
             entry_prem = float(d.get('entry_price') or 0.0)
             contracts = float(d.get('shares') or 1.0)
-            
+           
             # Fetch live mark price for option contract (or calculate delta from stock movement)
             live_mark = get_live_quote(occ) if (occ and 'get_live_quote' in globals()) else None
-            
+           
             if live_mark and float(live_mark) > 0:
                 float_pnl = (float(live_mark) - entry_prem) * contracts * 100.0
             else:
@@ -430,7 +430,7 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
 
                 spot_diff = (live_spot - spot) if 'CALL' in direction else (spot - live_spot)
                 float_pnl = round(spot_diff * 0.50 * contracts * 100.0, 2)
-                
+               
             # Calculate defaults first to avoid UnboundLocalError
             total_floating_pnl += float_pnl
             cost_basis = entry_prem * contracts * 100.0
@@ -460,21 +460,26 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
             active_trades.append(d)
 
         # 2. Fetch Closed Trades
-        cursor.execute("SELECT * FROM trades WHERE (exit_status LIKE 'CSO_%' OR exit_status IN ('EXITED', 'FORCE_CLOSE', 'CLOSED')) AND DATE(timestamp) = DATE(?) ORDER BY id DESC LIMIT 10", (selected_date,))
+        cursor.execute("""
+        SELECT * FROM trades 
+        WHERE exit_status NOT IN ('ACTIVE', 'ARMED') 
+        AND DATE(timestamp) = DATE(?) 
+        ORDER BY id DESC LIMIT 10
+    """, (selected_date,))
         for r in cursor.fetchall():
             d = dict(r)
             pnl = float(d.get('net_pnl') or 0.0)
             total_closed_pnl += pnl
-            
+           
             # Ensure keys exist for template rendering
             d['entry_price'] = f"{float(d.get('cost') or d.get('entry_price') or 0.0):.2f}"
             d['exit_price'] = f"{float(d.get('exit_price') or 0.0):.2f}"
             d['dollar_pnl'] = f"${pnl:+,.2f}"
-            
+           
             # Use actual option cost/premium if stored, else fallback correctly
             entry = float(d.get('cost') or d.get('entry_price') or 0.0)
             exit_p = float(d.get('exit_price') or entry or 0.0)
-            
+           
             d['entry_price'] = f"{entry:.2f}"
             d['exit_price'] = f"{exit_p:.2f}"
             d['display_pnl'] = f"{pnl:+.2f}"
@@ -531,12 +536,13 @@ async def get_proximity():
                 gap_pct = f"{(gap_val / spot * 100.0):.2f}%" if spot > 0 and gex_target > 0 else "0.00%"
                 sup = info.get("support_zone", info.get("support", [0, 0]))
                 res = info.get("resistance_zone", info.get("resistance", [0, 0]))
-                
+               
                 # Direct Range Evaluation
                 in_sup = (sup[0] <= spot <= sup[1]) if isinstance(sup, list) and len(sup) == 2 and sup[0] > 0 else False
                 in_res = (res[0] <= spot <= res[1]) if isinstance(res, list) and len(res) == 2 and res[0] > 0 else False
-                
-                is_armed = bool(info.get('execution_armed')) or bool(info.get('armed')) or in_sup or in_res
+               
+                current_gap_pct = (gap_val / spot * 100.0) if spot > 0 and gex_target > 0 else 999.0
+                is_armed = bool(info.get('execution_armed')) or in_sup or in_res or (current_gap_pct <= 1.0)
 
                 proximity_data[ticker] = {
                     "armed": is_armed,
@@ -632,7 +638,7 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         tkr = str(t.get('ticker', '')).upper()
         opt_cost = float(t.get('entry_price') or t.get('basis') or t.get('cost') or 0.80)
         spot_entry = float(t.get('spot_price') or 100.0)
-        
+         
         # Use live spot tick if available, otherwise spot_entry
         current_spot = live_spots.get(tkr, float(t.get('price') or t.get('current_spot') or spot_entry))
         direction = str(t.get('direction', 'CALL')).upper()
@@ -674,7 +680,7 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         # Calculate fallback PnL, but honor dashboard_data.json overlay if present
         spot_diff = (current_spot - spot_entry) if 'CALL' in direction else (spot_entry - current_spot)
         dollar_pnl_val = round(spot_diff * 0.50 * 100.0, 2)
-        
+         
         # Parse numeric floating PnL for total summary header
         try:
             raw_num_str = str(t.get('dollar_pnl', '')).replace('$', '').replace('+', '').replace(',', '')
@@ -755,13 +761,13 @@ async def get_dashboard_data_json():
             with open(json_path, 'r') as f:
                 return json.load(f)
         return {"active_positions": [], "error": "File not found"}
-        
+         
         cursor.execute("SELECT ticker, direction, spot_price, exit_price, net_pnl, exit_status FROM trades WHERE (exit_status LIKE 'CSO_%' OR exit_status IN ('EXITED', 'FORCE_CLOSE', 'CLOSED')) AND DATE(timestamp) = DATE('now') ORDER BY id DESC LIMIT 10")
         closed = [{"ticker": r[0], "direction": r[1], "entry": r[2], "exit": r[3], "pnl": r[4], "status": r[5]} for r in cursor.fetchall()]
-        
+         
         cursor.execute("SELECT SUM(net_pnl) FROM trades WHERE (exit_status LIKE 'CSO_%' OR exit_status IN ('EXITED', 'FORCE_CLOSE', 'CLOSED')) AND DATE(timestamp) = DATE('now')")
         total_pnl = cursor.fetchone()[0] or 0.0
-        
+         
         conn.close()
         return {
             "active_positions": active,
@@ -777,5 +783,3 @@ if __name__ == '__main__':
     uvicorn.run(app, host='0.0.0.0', port=8000)
 
 import os
-
-
