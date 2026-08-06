@@ -385,6 +385,19 @@ def get_ticker_candles_and_vwap(symbol, db_path="harm_telemetry.db"):
     return [], 0.0
 
 def execute_order(symbol, ticker, quantity, side, limit_price=None, stop_loss=None):
+    # Guard Check: Verify active position does not already exist in SQLite
+    try:
+        conn_chk = sqlite3.connect("harm_telemetry.db", timeout=5.0)
+        cur_chk = conn_chk.cursor()
+        cur_chk.execute("SELECT COUNT(*) FROM trades WHERE ticker = ? AND exit_status = 'ACTIVE'", (symbol,))
+        if cur_chk.fetchone()[0] > 0:
+            print(f"[!] REJECTED: {symbol} active position already exists in database.")
+            conn_chk.close()
+            return False
+        conn_chk.close()
+    except Exception as e:
+        print(f"[-] Pre-execution DB Active Check Warning: {e}", file=sys.stderr)
+
     spot_val = float(limit_price) if limit_price else 100.00
     occ_symbol = fetch_occ_option_symbol(symbol, side, spot_val)
     
@@ -591,8 +604,20 @@ def on_message(ws, message):
                 if sym in PLAYBOOKS:
                     regime = evaluate_ticker_risk(sym)
                     
-                    if ACTIVE_TRADES.get(sym):
-                        pass
+                    # Before executing or placing an order for a ticker:
+                    try:
+                        conn_chk = sqlite3.connect("harm_telemetry.db", timeout=5.0)
+                        cursor_chk = conn_chk.cursor()
+                        cursor_chk.execute("SELECT COUNT(*) FROM trades WHERE ticker = ? AND exit_status = 'ACTIVE'", (sym,))
+                        is_already_active = cursor_chk.fetchone()[0] > 0
+                        conn_chk.close()
+                    except Exception:
+                        is_already_active = False
+
+                    if is_already_active or ACTIVE_TRADES.get(sym):
+                        ACTIVE_TRADES[sym] = True
+                        print(f"[!] Skipped {sym}: Active position already exists in database.")
+                        continue
                     else:
                         pb = PLAYBOOKS[sym]
                         candles_list, current_vwap = get_ticker_candles_and_vwap(sym)
