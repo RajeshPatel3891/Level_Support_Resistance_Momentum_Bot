@@ -323,6 +323,7 @@ def log_trade_to_database(ticker, spot_price, stop_loss=None, shares=1.0, direct
         take_profit = round(opt_premium * 1.50, 2)
 
         item = {
+            'tenant_id': 'default',
             'trade_id': trade_id,
             'ticker': ticker,
             'timestamp': timestamp,
