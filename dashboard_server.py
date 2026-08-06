@@ -740,25 +740,12 @@ async def close_all_positions():
 
 @app.get("/dashboard_data.json")
 async def get_dashboard_data_json():
-    import json, os
-    json_path = os.path.join(os.path.dirname(__file__), 'dashboard_data.json')
     try:
-        if os.path.exists(json_path):
-            with open(json_path, 'r') as f:
-                return json.load(f)
-        return {"active_positions": [], "error": "File not found"}
-         
-        cursor.execute("SELECT ticker, direction, spot_price, exit_price, net_pnl, exit_status FROM trades WHERE (exit_status LIKE 'CSO_%' OR exit_status IN ('EXITED', 'FORCE_CLOSE', 'CLOSED')) AND DATE(timestamp) = DATE('now') ORDER BY id DESC LIMIT 10")
-        closed = [{"ticker": r[0], "direction": r[1], "entry": r[2], "exit": r[3], "pnl": r[4], "status": r[5]} for r in cursor.fetchall()]
-         
-        cursor.execute("SELECT SUM(net_pnl) FROM trades WHERE (exit_status LIKE 'CSO_%' OR exit_status IN ('EXITED', 'FORCE_CLOSE', 'CLOSED')) AND DATE(timestamp) = DATE('now')")
-        total_pnl = cursor.fetchone()[0] or 0.0
-         
-        conn.close()
+        active = fetch_all_active_dynamo_positions()
         return {
             "active_positions": active,
-            "closed_positions": closed,
-            "realized_pnl": f"${total_pnl:+.2f}"
+            "closed_positions": [],
+            "status": "success"
         }
     except Exception as e:
         return {"active_positions": [], "closed_positions": [], "error": str(e)}
