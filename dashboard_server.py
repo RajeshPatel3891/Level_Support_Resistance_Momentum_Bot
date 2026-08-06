@@ -443,7 +443,7 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
 
     starting_balance = 6535.24
     unsettled = 0.0
-    active_trades = []
+    active_trades = get_active_positions_from_dynamo()
     db_closed = []
     total_closed_pnl = 0.0
     total_floating_pnl = 0.0
