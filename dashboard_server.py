@@ -1,4 +1,39 @@
 
+def fetch_all_active_dynamo_positions():
+    try:
+        dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
+        table = dynamodb.Table('HarmonizedTrades')
+        res = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE'))
+        items = res.get('Items', [])
+        
+        parsed = []
+        for item in items:
+            try:
+                shares = float(item.get('shares', 1.0))
+                entry_price = float(item.get('entry_price', 0.0))
+                parsed.append({
+                    'trade_id': str(item.get('trade_id')),
+                    'ticker': str(item.get('ticker')),
+                    'timestamp': str(item.get('timestamp', '')),
+                    'strategy': str(item.get('strategy', 'BREAKOUT')),
+                    'direction': str(item.get('direction', 'CALL')),
+                    'spot_price': float(item.get('spot_price', entry_price)),
+                    'entry_price': entry_price,
+                    'shares': abs(shares),
+                    'stop_loss': float(item.get('stop_loss', round(entry_price * 0.8, 2))),
+                    'take_profit': float(item.get('take_profit', round(entry_price * 1.5, 2))),
+                    'net_pnl': float(item.get('net_pnl', 0.0)),
+                    'exit_status': 'ACTIVE',
+                    'is_live': int(item.get('is_live', 1)),
+                    'occ_symbol': str(item.get('occ_symbol', item.get('ticker')))
+                })
+            except Exception:
+                continue
+        return parsed
+    except Exception as e:
+        print(f"[-] Dashboard DynamoDB Read Error: {e}")
+        return []
+
 def get_active_positions_from_dynamo():
     try:
         dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
@@ -443,7 +478,7 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
 
     starting_balance = 6535.24
     unsettled = 0.0
-    active_trades = get_active_positions_from_dynamo()
+    active_trades = fetch_all_active_dynamo_positions()
     db_closed = []
     total_closed_pnl = 0.0
     total_floating_pnl = 0.0
