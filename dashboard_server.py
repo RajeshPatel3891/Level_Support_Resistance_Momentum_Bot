@@ -1,3 +1,13 @@
+
+def get_dynamo_active_trades():
+    try:
+        dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
+        table = dynamodb.Table('HarmonizedTrades')
+        res = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE'))
+        return res.get('Items', [])
+    except Exception as e:
+        print(f"[-] Dashboard DynamoDB Read Error: {e}")
+        return []
 import os
 import json
 import tempfile
