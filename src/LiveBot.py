@@ -1,3 +1,5 @@
+import boto3
+from boto3.dynamodb.conditions import Key, Attr
 # =====================================================================
 # THETA DECAY & 0DTE INTRADAY ROLLOVER PROTECTION ENGINE
 # =====================================================================
@@ -287,15 +289,13 @@ signal.signal(signal.SIGTERM, handle_shutdown_signal)
 def sync_active_trades_from_db():
     global ACTIVE_TRADES
     try:
-        conn = sqlite3.connect("harm_telemetry.db", timeout=10.0)
-        cursor = conn.cursor()
-        cursor.execute("SELECT ticker FROM trades WHERE exit_status = 'ACTIVE'")
-        rows = cursor.fetchall()
-        ACTIVE_TRADES = {row[0]: True for row in rows}
-        conn.close()
-        print(f"[✓] Synced ACTIVE_TRADES state from database: {list(ACTIVE_TRADES.keys())}")
+        dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
+        table = dynamodb.Table('HarmonizedTrades')
+        res = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE'))
+        ACTIVE_TRADES = {item['ticker']: True for item in res.get('Items', [])}
+        print(f"[✓] Synced ACTIVE_TRADES state from DynamoDB: {list(ACTIVE_TRADES.keys())}")
     except Exception as e:
-        print(f"[-] Database Sync Error: {e}", file=sys.stderr)
+        print(f"[-] DynamoDB Sync Error: {e}", file=sys.stderr)
 
 sync_active_trades_from_db()
 
@@ -313,27 +313,35 @@ def get_order_status(order_id):
 
 def log_trade_to_database(ticker, spot_price, stop_loss=None, shares=1.0, direction="CALL", cost=None, occ_symbol=None):
     try:
-        conn = sqlite3.connect("harm_telemetry.db", timeout=10.0)
-        cursor = conn.cursor()
+        dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
+        table = dynamodb.Table('HarmonizedTrades')
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        trade_id = f"{ticker}_{int(time.time())}"
         
         opt_premium = float(cost) if (cost and float(cost) > 0) else round(max(0.80, spot_price * 0.012), 2)
         sl_val = stop_loss if stop_loss is not None else round(opt_premium * 0.80, 2)
         take_profit = round(opt_premium * 1.50, 2)
 
-        if not occ_symbol:
-            print(f'[⚠️ LIVEBOT] Aborting trade insertion for {ticker}: Missing OCC symbol.')
-            conn.close()
-            return
-        cursor.execute("""
-            INSERT INTO trades (ticker, timestamp, strategy, direction, spot_price, entry_price, shares, stop_loss, take_profit, net_pnl, exit_status, is_live, occ_symbol) 
-            VALUES (?, ?, 'BREAKOUT', ?, ?, ?, ?, ?, ?, 0.0, 'ACTIVE', 1, ?)
-        """, (ticker, timestamp, direction, spot_price, opt_premium, float(shares), sl_val, take_profit, occ_symbol))
-        conn.commit()
-        conn.close()
-        print(f"[✓] Logged verified LIVE OPTION trade for {ticker} ({occ_symbol or ticker}) | Contracts: {shares} | Entry Premium: ${opt_premium:.2f} | SL: ${sl_val:.2f}")
+        item = {
+            'trade_id': trade_id,
+            'ticker': ticker,
+            'timestamp': timestamp,
+            'strategy': 'BREAKOUT',
+            'direction': direction,
+            'spot_price': str(spot_price),
+            'entry_price': str(opt_premium),
+            'shares': str(shares),
+            'stop_loss': str(sl_val),
+            'take_profit': str(take_profit),
+            'net_pnl': '0.0',
+            'exit_status': 'ACTIVE',
+            'is_live': 1,
+            'occ_symbol': occ_symbol or ticker
+        }
+        table.put_item(Item=item)
+        print(f"[✓] Logged verified LIVE OPTION trade to DynamoDB for {ticker} ({occ_symbol or ticker}) | Contracts: {shares} | Premium: \${opt_premium:.2f}")
     except Exception as e:
-        print(f"[-] DB Log Error: {e}", file=sys.stderr)
+        print(f"[-] DynamoDB Log Error: {e}", file=sys.stderr)
 
 tick_queue = queue.Queue()
 
@@ -385,18 +393,18 @@ def get_ticker_candles_and_vwap(symbol, db_path="harm_telemetry.db"):
     return [], 0.0
 
 def execute_order(symbol, ticker, quantity, side, limit_price=None, stop_loss=None):
-    # Guard Check: Verify active position does not already exist in SQLite
+    # Guard Check: Verify active position does not already exist in DynamoDB
     try:
-        conn_chk = sqlite3.connect("harm_telemetry.db", timeout=5.0)
-        cur_chk = conn_chk.cursor()
-        cur_chk.execute("SELECT COUNT(*) FROM trades WHERE ticker = ? AND exit_status = 'ACTIVE'", (symbol,))
-        if cur_chk.fetchone()[0] > 0:
-            print(f"[!] REJECTED: {symbol} active position already exists in database.")
-            conn_chk.close()
+        dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
+        table = dynamodb.Table('HarmonizedTrades')
+        res = table.scan(
+            FilterExpression=Attr('ticker').eq(symbol) & Attr('exit_status').eq('ACTIVE')
+        )
+        if res.get('Count', 0) > 0:
+            print(f"[!] REJECTED: {symbol} active position already exists in DynamoDB.")
             return False
-        conn_chk.close()
     except Exception as e:
-        print(f"[-] Pre-execution DB Active Check Warning: {e}", file=sys.stderr)
+        print(f"[-] DynamoDB Active Check Warning: {e}", file=sys.stderr)
 
     spot_val = float(limit_price) if limit_price else 100.00
     occ_symbol = fetch_occ_option_symbol(symbol, side, spot_val)
