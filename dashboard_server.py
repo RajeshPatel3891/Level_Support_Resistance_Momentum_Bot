@@ -1,15 +1,19 @@
 
 def fetch_all_active_dynamo_positions():
+    import boto3, os
+    from boto3.dynamodb.conditions import Attr
     try:
         dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
         table = dynamodb.Table('HarmonizedTrades')
         res = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE'))
-        items = res.get('Items', [])
+        raw_items = res.get('Items', [])
         
         parsed = []
-        for item in items:
+        for item in raw_items:
             try:
                 shares = float(item.get('shares', 1.0))
+                if shares <= 0:
+                    continue  # Filter out short credit legs for long risk matrix
                 entry_price = float(item.get('entry_price', 0.0))
                 parsed.append({
                     'trade_id': str(item.get('trade_id')),
@@ -20,8 +24,8 @@ def fetch_all_active_dynamo_positions():
                     'spot_price': float(item.get('spot_price', entry_price)),
                     'entry_price': entry_price,
                     'shares': abs(shares),
-                    'stop_loss': float(item.get('stop_loss', round(entry_price * 0.8, 2))),
-                    'take_profit': float(item.get('take_profit', round(entry_price * 1.5, 2))),
+                    'stop_loss': float(item.get('stop_loss', round(entry_price * 0.80, 2))),
+                    'take_profit': float(item.get('take_profit', round(entry_price * 1.50, 2))),
                     'net_pnl': float(item.get('net_pnl', 0.0)),
                     'exit_status': 'ACTIVE',
                     'is_live': int(item.get('is_live', 1)),
@@ -31,8 +35,9 @@ def fetch_all_active_dynamo_positions():
                 continue
         return parsed
     except Exception as e:
-        print(f"[-] Dashboard DynamoDB Read Error: {e}")
+        print(f"[-] Dashboard DynamoDB Fetch Error: {e}")
         return []
+
 
 def get_active_positions_from_dynamo():
     try:
@@ -351,7 +356,7 @@ async function adjustTP(ticker, step) {
     let el = document.getElementById('tp-val-' + ticker);
     if (!el) return;
     
-    let match = el.innerText.match(/([+-]?\d+(\.\d+)?)/);
+    let match = el.innerText.match(/([+-]?\\d+(\\.\\d+)?)/);
     let current = match ? parseFloat(match[1]) : 50.0;
     
     // Lower floor limit to -100.0% so targets can be dialed into stop territory
@@ -461,128 +466,22 @@ def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A'
     return True
 
 def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
-    import sqlite3, json, os
-    from datetime import datetime
-
-    live_levels = {}
-    levels_file = os.path.join(os.path.dirname(__file__), 'trading_levels.json')
-    if os.path.exists(levels_file):
-        try:
-            with open(levels_file, 'r') as lf:
-                live_levels = json.load(lf)
-        except Exception as e:
-            print(f"[!] Warning reading trading_levels.json: {e}")
-
     if not selected_date:
         selected_date = datetime.now().strftime('%Y-%m-%d')
-
-    starting_balance = 6535.24
-    unsettled = 0.0
+        
     active_trades = fetch_all_active_dynamo_positions()
     db_closed = []
+    
+    # Calculate portfolio capital metrics
+    deployed_capital = sum(float(t.get('entry_price', 0.0)) * float(t.get('shares', 1.0)) * 100.0 for t in active_trades)
+    total_floating_pnl = sum(float(t.get('net_pnl', 0.0)) for t in active_trades)
     total_closed_pnl = 0.0
-    total_floating_pnl = 0.0
-
-    try:
-        conn = sqlite3.connect('harm_telemetry.db')
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-
-        # 1. Fetch Active Trades with Live Option Mark-to-Market PnL
-        dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
-    table = dynamodb.Table('HarmonizedTrades')
-    res = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE'))
-    active_items = res.get('Items', [])
-        for r in cursor.fetchall():
-            d = dict(r)
-            occ = d.get('occ_symbol')
-            spot = float(d.get('spot_price') or 0.0)
-            entry_prem = float(d.get('entry_price') or 0.0)
-            contracts = float(d.get('shares') or 1.0)
-           
-            # Fetch live mark price for option contract (or calculate delta from stock movement)
-            live_mark = get_live_quote(occ) if (occ and 'get_live_quote' in globals()) else None
-           
-            if live_mark and float(live_mark) > 0:
-                float_pnl = (float(live_mark) - entry_prem) * contracts * 100.0
-            else:
-                # Estimate live floating option PnL from stock spot ticks (0.50 Delta)
-                direction = str(d.get('direction', 'CALL')).upper()
-                # Use current price if available from market feed, otherwise spot
-                ticker = d.get('ticker')
-                t_info = live_levels.get(ticker, {}) if isinstance(live_levels, dict) else {}
-                live_spot = float(t_info.get('last_price') or t_info.get('last') or spot)
-                if live_spot == 0.0:
-                    live_spot = spot
-
-                spot_diff = (live_spot - spot) if 'CALL' in direction else (spot - live_spot)
-                float_pnl = round(spot_diff * 0.50 * contracts * 100.0, 2)
-               
-            # Calculate defaults first to avoid UnboundLocalError
-            total_floating_pnl += float_pnl
-            cost_basis = entry_prem * contracts * 100.0
-            pct = (float_pnl / cost_basis * 100.0) if cost_basis > 0 else 0.0
-            pnl_prefix = "+" if float_pnl >= 0 else ""
-
-            d['price'] = f"{live_spot:.2f}"
-            d['dollar_pnl'] = f"{pnl_prefix}${float_pnl:.2f}"
-            d['pnl_pct'] = f"{pnl_prefix}{pct:.1f}%"
-            d['pnl_class'] = "text-emerald-400" if float_pnl >= 0 else "text-red-400"
-
-            # Overlay dashboard_data.json safely if available
-            dash_file = os.path.join(os.path.dirname(__file__), 'dashboard_data.json')
-            if os.path.exists(dash_file):
-                try:
-                    with open(dash_file, 'r') as df:
-                        dj = json.load(df)
-                        dash_actives = {x.get('ticker'): x for x in dj.get('active_positions', [])}
-                        if ticker in dash_actives:
-                            match = dash_actives[ticker]
-                            d['price'] = match.get('price', d['price'])
-                            d['dollar_pnl'] = match.get('dollar_pnl', d['dollar_pnl'])
-                            d['pnl_pct'] = match.get('pnl_pct', d['pnl_pct'])
-                            d['pnl_class'] = match.get('pnl_class', d['pnl_class'])
-                except Exception:
-                    pass
-            active_trades.append(d)
-
-        # 2. Fetch Closed Trades
-        cursor.execute("""
-        SELECT * FROM trades 
-        WHERE exit_status NOT IN ('ACTIVE', 'ARMED') 
-        AND DATE(timestamp) = DATE(?) 
-        ORDER BY id DESC LIMIT 10
-    """, (selected_date,))
-        for r in cursor.fetchall():
-            d = dict(r)
-            pnl = float(d.get('net_pnl') or 0.0)
-            total_closed_pnl += pnl
-           
-            # Ensure keys exist for template rendering
-            d['entry_price'] = f"{float(d.get('cost') or d.get('entry_price') or 0.0):.2f}"
-            d['exit_price'] = f"{float(d.get('exit_price') or 0.0):.2f}"
-            d['dollar_pnl'] = f"${pnl:+,.2f}"
-           
-            # Use actual option cost/premium if stored, else fallback correctly
-            entry = float(d.get('cost') or d.get('entry_price') or 0.0)
-            exit_p = float(d.get('exit_price') or entry or 0.0)
-           
-            d['entry_price'] = f"{entry:.2f}"
-            d['exit_price'] = f"{exit_p:.2f}"
-            d['display_pnl'] = f"{pnl:+.2f}"
-            d['pnl'] = f"{pnl:+.2f}"
-            d['net_pnl'] = f"{pnl:+.2f}"
-            d['status'] = d.get('exit_status', 'CLOSED')
-            db_closed.append(d)
-
-        conn.close()
-    except Exception as e:
-        print(f"SQLite fetch_portfolio_state error: {e}")
-
-    settled_free = starting_balance + total_closed_pnl
-    deployed_capital = sum(float(t.get('entry_price') or 0.0) for t in active_trades)
+    starting_balance = 6535.24
+    settled_free = starting_balance - deployed_capital
+    unsettled = 0.0
 
     return active_trades, db_closed, total_floating_pnl, total_closed_pnl, selected_date, starting_balance, settled_free, deployed_capital, unsettled
+
 
 @app.get("/api/proximity")
 async def get_proximity():
@@ -655,7 +554,7 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         try:
             with open(dash_file, 'r') as df:
                 dj = json.load(df)
-                dash_actives = {x.get('ticker'): x for x in dj.get('active_positions', [])}
+                # dash_actives disabled - pure DynamoDB source
                 for t in trades:
                     tkr = t.get('ticker')
                     if tkr in dash_actives:
