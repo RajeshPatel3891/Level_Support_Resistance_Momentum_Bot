@@ -547,32 +547,99 @@ async def get_proximity():
 @app.get("/", response_class=HTMLResponse)
 async def index_view(request: Request, selected_date: str = Query(default=None)):
     trades, closed, total_pnl, total_closed_pnl, current_date, starting_balance, settled_free, deployed_capital, unsettled = fetch_portfolio_state(page=1, selected_date=selected_date)
-    
-    # Clean overlay from pre-compiled dashboard_data.json
-    dash_file = os.path.join(os.path.dirname(__file__), 'dashboard_data.json')
-    if os.path.exists(dash_file):
+
+    # Load live spot prices from level manifest
+    live_spots = {}
+    levels_data = {}
+    if os.path.exists('trading_levels.json'):
         try:
-            with open(dash_file, 'r') as df:
-                dj = json.load(df)
-                # dash_actives disabled - pure DynamoDB source
-                for t in trades:
-                    tkr = t.get('ticker')
-                    if tkr in dash_actives:
-                        m = dash_actives[tkr]
-                        t['price'] = m.get('price', t.get('price'))
-                        t['dollar_pnl'] = m.get('dollar_pnl', t.get('dollar_pnl'))
-                        t['pnl_pct'] = m.get('pnl_pct', t.get('pnl_pct'))
-                        t['pnl_class'] = m.get('pnl_class', t.get('pnl_class'))
-                        t['net_pnl'] = m.get('net_pnl', t.get('net_pnl', 0.0))
-                        t['calc_floating'] = m.get('net_pnl', t.get('calc_floating', 0.0))
-        except Exception as e:
-            print(f"Error applying dashboard_data.json overlay: {e}")
+            with open('trading_levels.json', 'r') as lf:
+                levels_data = json.load(lf)
+                for tick, data in levels_data.items():
+                    if isinstance(data, dict) and 'spot' in data:
+                        live_spots[tick] = float(data['spot'])
+        except Exception:
+            pass
+
+    total_deployed_basis = 0.0
+    total_floating_pnl_val = 0.0
+
+    # Master Active Trades Key Normalizer for Jinja
+    for t in trades:
+        tkr = str(t.get('ticker', '')).upper()
+        opt_cost = float(t.get('entry_price') or t.get('basis') or t.get('cost') or 0.80)
+        shares_cnt = float(t.get('shares', 1.0))
+        spot_entry = float(t.get('spot_price') or 100.0)
+        
+        # Robust Live Spot & OCC Strike Resolution
+        occ = str(t.get('occ_symbol', ''))
+        strike = float(occ[-8:]) / 1000.0 if (len(occ) >= 15 and occ[-8:].isdigit()) else 0.0
+        current_spot = float(live_spots.get(tkr) or live_spots.get(tkr.lower()) or t.get('current_spot') or t.get('stock_price') or 0.0)
+        if current_spot == 0.0:
+            current_spot = strike if strike > 0 else spot_entry
+        direction = str(t.get('direction', 'CALL')).upper()
+
+        total_deployed_basis += (opt_cost * shares_cnt * 100.0)
+
+        t['basis'] = f"{opt_cost:.2f}"
+        t['cost'] = f"{opt_cost:.2f}"
+        t['price'] = f"{current_spot:.2f}"
+        t['shares'] = shares_cnt
+
+        opt_sl = float(t.get('stop_loss') or (opt_cost * 0.80))
+        opt_tp = float(t.get('take_profit') or (opt_cost * 1.50))
+
+        risk_per_contract = max(0.01, opt_cost - opt_sl) * 100.0 * shares_cnt
+        reward_per_contract = max(0.01, opt_tp - opt_cost) * 100.0 * shares_cnt
+
+        rr = round(reward_per_contract / max(0.01, risk_per_contract), 1)
+        t['rr_ratio'] = f"{rr}:1"
+        t['rr_bg'] = "bg-emerald-950" if rr >= 1.5 else "bg-gray-800"
+        t['rr_text'] = "text-emerald-400" if rr >= 1.5 else "text-gray-300"
+        t['rr_border'] = "border-emerald-800" if rr >= 1.5 else "border-gray-700"
+
+        t['hit_probability'] = t.get('hit_probability') or "68%"
+        cso = t.get('cso_recommendation') or t.get('cso_status') or "HOLD"
+        t['cso_recommendation'] = cso
+        t['cso_badge_bg'] = "bg-amber-950" if "TIGHTEN" in str(cso) else "bg-blue-950"
+        t['cso_badge_text'] = "text-amber-400" if "TIGHTEN" in str(cso) else "text-blue-400"
+
+        opt_tp_pct = round(((opt_tp - opt_cost)/opt_cost)*100, 1) if opt_cost > 0 else 0.0
+        sl_pct = round(((opt_cost - opt_sl)/opt_cost)*100, 1) if opt_cost > 0 else 0.0
+
+        t['gex_target_str'] = f"${opt_tp:.2f} Opt TP"
+        t['gex_dist'] = f"+{opt_tp_pct}%"
+        t['potential_tp_return'] = f"+${reward_per_contract:.1f} ({opt_tp_pct}%)"
+        t['potential_sl_risk'] = f"-${risk_per_contract:.1f} ({sl_pct}%)"
+
+        # Local PnL calculation logic
+        # Option PnL Evaluation with Strike Fallback
+        opt_mark = float(t.get('option_mark') or t.get('current_price') or 0.0)
+        raw_pnl = float(t.get('net_pnl', 0.0))
+
+        if opt_mark > 0 and opt_mark != opt_cost:
+            dollar_pnl_val = round((opt_mark - opt_cost) * 100.0 * shares_cnt, 2)
+        elif raw_pnl != 0.0:
+            dollar_pnl_val = raw_pnl
+        elif current_spot > 0 and strike > 0:
+            spot_diff = (current_spot - strike) if 'CALL' in direction else (strike - current_spot)
+            est_mark = max(0.01, opt_cost + (spot_diff * 0.50))
+            dollar_pnl_val = round((est_mark - opt_cost) * 100.0 * shares_cnt, 2)
+        else:
+            dollar_pnl_val = 0.0
+
+        total_floating_pnl_val += dollar_pnl_val
+        pct_pnl_val = round((dollar_pnl_val / (opt_cost * shares_cnt * 100.0)) * 100.0, 1) if opt_cost > 0 else 0.0
+        pnl_prefix = '+' if dollar_pnl_val >= 0 else ''
+        t['dollar_pnl'] = f"{pnl_prefix}${dollar_pnl_val:.2f}"
+        t['pnl_pct'] = f"{pnl_prefix}{pct_pnl_val:.1f}%"
+        t['pnl_class'] = 'text-emerald-400' if dollar_pnl_val >= 0 else 'text-red-400'
 
     str_starting = f"${starting_balance:,.2f}"
-    str_settled = f"${settled_free:,.2f}"
-    str_deployed = f"${deployed_capital:,.2f}"
+    str_settled = f"${(starting_balance - total_deployed_basis):,.2f}"
+    str_deployed = f"${total_deployed_basis:,.2f}"
     str_unsettled = f"${unsettled:,.2f}"
-    str_floating = f"${total_pnl:+.2f}"
+    str_floating = f"${total_floating_pnl_val:+,.2f}"
     str_realized = f"${total_closed_pnl:+.2f}"
 
     ledger = {
@@ -587,107 +654,6 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
     }
 
     template = Template(INDEX_HTML_TEMPLATE)
-    
-    levels_data = {}
-    if os.path.exists('trading_levels.json'):
-        try:
-            with open('trading_levels.json') as lf:
-                levels_data = json.load(lf)
-        except Exception:
-            pass
-
-        # Universal Trades Normalizer for Jinja
-    for t in trades:
-        val = t.get('entry_price') if (t.get('entry_price') is not None) else (t.get('cost') or t.get('basis') or 0.0)
-        try: f_val = f"{float(val):.2f}"
-        except: f_val = "0.00"
-        t['basis'] = f_val
-        t['cost'] = f_val
-        t['price'] = f"{float(t.get('spot_price') or t.get('price') or 0.0):.2f}"
-
-        # Master Active Trades Key Normalizer
-    total_deployed_basis = 0.0
-    total_floating_pnl_val = 0.0
-
-    # Load live spot prices from level manifest / market stream
-    live_spots = {}
-    try:
-        with open('trading_levels.json', 'r') as lf:
-            lvl_manifest = json.load(lf)
-            for tick, data in lvl_manifest.items():
-                if isinstance(data, dict) and 'spot' in data:
-                    live_spots[tick] = float(data['spot'])
-    except Exception:
-        pass
-
-    for t in trades:
-        tkr = str(t.get('ticker', '')).upper()
-        opt_cost = float(t.get('entry_price') or t.get('basis') or t.get('cost') or 0.80)
-        spot_entry = float(t.get('spot_price') or 100.0)
-         
-        # Use live spot tick if available, otherwise spot_entry
-        current_spot = live_spots.get(tkr, float(t.get('price') or t.get('current_spot') or spot_entry))
-        direction = str(t.get('direction', 'CALL')).upper()
-
-        total_deployed_basis += (opt_cost * 100.0)
-
-        t['basis'] = f"{opt_cost:.2f}"
-        t['cost'] = f"{opt_cost:.2f}"
-        t['price'] = f"{current_spot:.2f}"
-
-        # Option Targets
-        opt_sl = float(t.get('stop_loss') or (opt_cost * 0.80))
-        opt_tp = float(t.get('take_profit') or (opt_cost * 1.50))
-
-        risk_per_contract = max(0.01, opt_cost - opt_sl) * 100.0
-        reward_per_contract = max(0.01, opt_tp - opt_cost) * 100.0
-
-        rr = round(reward_per_contract / max(0.01, risk_per_contract), 1)
-        t['rr_ratio'] = f"{rr}:1"
-        t['rr_bg'] = "bg-emerald-950" if rr >= 1.5 else "bg-gray-800"
-        t['rr_text'] = "text-emerald-400" if rr >= 1.5 else "text-gray-300"
-        t['rr_border'] = "border-emerald-800" if rr >= 1.5 else "border-gray-700"
-
-        t['hit_probability'] = t.get('hit_probability') or "68%"
-
-        cso = t.get('cso_recommendation') or t.get('cso_status') or "HOLD"
-        t['cso_recommendation'] = cso
-        t['cso_badge_bg'] = "bg-amber-950" if "TIGHTEN" in str(cso) else "bg-blue-950"
-        t['cso_badge_text'] = "text-amber-400" if "TIGHTEN" in str(cso) else "text-blue-400"
-
-        opt_tp_pct = round(((opt_tp - opt_cost)/opt_cost)*100, 1) if opt_cost > 0 else 0.0
-        sl_pct = round(((opt_cost - opt_sl)/opt_cost)*100, 1) if opt_cost > 0 else 0.0
-
-        t['gex_target_str'] = f"${opt_tp:.2f} Opt TP"
-        t['gex_dist'] = f"+{opt_tp_pct}%"
-        t['potential_tp_return'] = f"+${reward_per_contract:.1f} ({opt_tp_pct}%)"
-        t['potential_sl_risk'] = f"-${risk_per_contract:.1f} ({sl_pct}%)"
-
-        # Calculate fallback PnL, but honor dashboard_data.json overlay if present
-        spot_diff = (current_spot - spot_entry) if 'CALL' in direction else (spot_entry - current_spot)
-        dollar_pnl_val = round(spot_diff * 0.50 * 100.0, 2)
-         
-        # Parse numeric floating PnL for total summary header
-        try:
-            raw_num_str = str(t.get('dollar_pnl', '')).replace('$', '').replace('+', '').replace(',', '')
-            num_val = float(raw_num_str) if raw_num_str else dollar_pnl_val
-            total_floating_pnl_val += num_val
-        except Exception:
-            total_floating_pnl_val += dollar_pnl_val
-
-        pct_pnl_val = round((dollar_pnl_val / (opt_cost * 100.0)) * 100.0, 1) if opt_cost > 0 else 0.0
-        pnl_prefix = "+" if dollar_pnl_val >= 0 else ""
-
-        if not t.get('dollar_pnl') or t.get('dollar_pnl') == "$+0.00":
-            t['dollar_pnl'] = f"{pnl_prefix}${dollar_pnl_val:.2f}"
-            t['pnl_pct'] = f"{pnl_prefix}{pct_pnl_val:.1f}%"
-            t['pnl_class'] = "text-emerald-400" if dollar_pnl_val >= 0 else "text-red-400"
-
-    str_floating = f"${total_floating_pnl_val:+,.2f}"
-    total_pnl = total_floating_pnl_val
-    if 'ledger' in locals() and isinstance(ledger, dict):
-        ledger['deployed_capital'] = f"${total_deployed_basis:,.2f}"
-
     rendered_html = template.render(
         proximity_matrix=levels_data,
         level_proximity=levels_data,
@@ -696,11 +662,12 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         selected_date=current_date,
         ledger=ledger,
         total_pnl=str_floating,
-        pnl_class="text-green-400" if total_pnl >= 0 else "text-red-400",
+        pnl_class="text-green-400" if total_floating_pnl_val >= 0 else "text-red-400",
         total_closed_pnl=str_realized,
         closed_pnl_class="text-green-400" if total_closed_pnl >= 0 else "text-red-400"
     )
     return HTMLResponse(content=rendered_html)
+
 
 
 from fastapi.responses import RedirectResponse
@@ -741,15 +708,75 @@ async def close_all_positions():
 @app.get("/dashboard_data.json")
 async def get_dashboard_data_json():
     try:
-        active = fetch_all_active_dynamo_positions()
+        trades, closed, total_pnl, total_closed_pnl, current_date, starting_balance, settled_free, deployed_capital, unsettled = fetch_portfolio_state()
+        
+        live_spots = {}
+        if os.path.exists('trading_levels.json'):
+            try:
+                with open('trading_levels.json', 'r') as lf:
+                    levels_data = json.load(lf)
+                    for tick, data in levels_data.items():
+                        if isinstance(data, dict) and 'spot' in data:
+                            live_spots[tick] = float(data['spot'])
+            except Exception:
+                pass
+
+        total_deployed_basis = 0.0
+        total_floating_pnl_val = 0.0
+
+        for t in trades:
+            tkr = str(t.get('ticker', '')).upper()
+            opt_cost = float(t.get('entry_price') or t.get('basis') or t.get('cost') or 0.80)
+            shares_cnt = float(t.get('shares', 1.0))
+            spot_entry = float(t.get('spot_price') or 100.0)
+            direction = str(t.get('direction', 'CALL')).upper()
+
+            occ = str(t.get('occ_symbol', ''))
+            strike = float(occ[-8:]) / 1000.0 if (len(occ) >= 15 and occ[-8:].isdigit()) else 0.0
+            current_spot = float(live_spots.get(tkr) or live_spots.get(tkr.lower()) or t.get('current_spot') or t.get('stock_price') or 0.0)
+            if current_spot == 0.0:
+                current_spot = strike if strike > 0 else spot_entry
+
+            display_spot = current_spot if current_spot > 15.0 else (strike if strike > 0 else opt_cost)
+            t['price'] = f"{display_spot:.2f}"
+            t['cost'] = f"{opt_cost:.2f}"
+            t['basis'] = f"{opt_cost:.2f}"
+
+            opt_mark = float(t.get('option_mark') or t.get('current_price') or 0.0)
+            raw_pnl = float(t.get('net_pnl', 0.0))
+
+            if opt_mark > 0 and opt_mark != opt_cost:
+                dollar_pnl_val = round((opt_mark - opt_cost) * 100.0 * shares_cnt, 2)
+            elif raw_pnl != 0.0:
+                dollar_pnl_val = raw_pnl
+            elif current_spot > 0 and strike > 0:
+                spot_diff = (current_spot - strike) if 'CALL' in direction else (strike - current_spot)
+                est_mark = max(0.01, opt_cost + (spot_diff * 0.50))
+                dollar_pnl_val = round((est_mark - opt_cost) * 100.0 * shares_cnt, 2)
+            else:
+                dollar_pnl_val = 0.0
+
+            total_deployed_basis += (opt_cost * shares_cnt * 100.0)
+            total_floating_pnl_val += dollar_pnl_val
+
+            pct_pnl_val = round((dollar_pnl_val / (opt_cost * shares_cnt * 100.0)) * 100.0, 1) if opt_cost > 0 else 0.0
+            pnl_prefix = '+' if dollar_pnl_val >= 0 else ''
+            t['dollar_pnl'] = f"{pnl_prefix}${dollar_pnl_val:.2f}"
+            t['pnl_pct'] = f"{pnl_prefix}{pct_pnl_val:.1f}%"
+
+        pnl_prefix_total = '+' if total_floating_pnl_val >= 0 else ''
+        floating_pnl_str = f"{pnl_prefix_total}${total_floating_pnl_val:.2f}"
+
         return {
-            "active_positions": active,
-            "closed_positions": [],
+            "active_positions": trades,
+            "closed_positions": closed,
+            "deployed_capital": total_deployed_basis,
+            "floating_pnl": floating_pnl_str,
             "status": "success"
         }
     except Exception as e:
-        return {"active_positions": [], "closed_positions": [], "error": str(e)}
-
+        import traceback
+        return {"active_positions": [], "closed_positions": [], "error": str(e), "trace": traceback.format_exc()}
 
 if __name__ == '__main__':
     import uvicorn
