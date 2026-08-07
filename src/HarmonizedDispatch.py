@@ -1,3 +1,50 @@
+import sqlite3
+
+def get_db_connection(db_name="harmonized_trading.db"):
+    conn = sqlite3.connect(db_name, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    for t_name in ["trades", "gex_telemetry"]:
+        if t_name == "trades":
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS trades (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT,
+                    timestamp TEXT,
+                    strategy TEXT,
+                    direction TEXT,
+                    spot_price REAL DEFAULT 0.0,
+                    exit_price REAL DEFAULT 0.0,
+                    exit_status TEXT DEFAULT 'OPEN',
+                    net_pnl REAL DEFAULT 0.0,
+                    execution_origin TEXT DEFAULT 'LEGACY',
+                    take_profit REAL DEFAULT 0.0,
+                    stop_loss REAL DEFAULT 0.0,
+                    shares REAL DEFAULT 0.0,
+                    cost REAL DEFAULT 0.0,
+                    occ_symbol TEXT
+                );
+            """)
+        else:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS gex_telemetry (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ticker TEXT,
+                    spot_price REAL,
+                    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            
+    # Self-heal missing columns on trades table for any existing file
+    for col, ctype in [("take_profit", "REAL DEFAULT 0.0"), ("stop_loss", "REAL DEFAULT 0.0"), ("shares", "REAL DEFAULT 0.0"), ("cost", "REAL DEFAULT 0.0"), ("occ_symbol", "TEXT"), ("exit_status", "TEXT DEFAULT 'OPEN'"), ("spot_price", "REAL DEFAULT 0.0")]:
+        try:
+            cursor.execute(f"ALTER TABLE trades ADD COLUMN {col} {ctype};")
+        except Exception:
+            pass
+            
+    conn.commit()
+    return conn
+
 import os
 import sys
 import json
@@ -9,40 +56,36 @@ from datetime import datetime
 # Fetch environment tag; defaults to UNKNOWN-ORIGIN if omitted
 EXECUTION_ORIGIN = os.getenv("EXECUTION_ORIGIN", "UNKNOWN-ORIGIN")
 
-def init_db(db_path='harm_telemetry.db'):
-    """Ensures database table, execution_origin column, and unique composite index exist for UPSERT deduplication."""
-    conn = sqlite3.connect(db_path)
+def init_db():
+    conn = sqlite3.connect("harmonized_trading.db", timeout=30.0)
     cursor = conn.cursor()
-    
-    # 1. Create table with full schema if it doesn't exist
-    cursor.execute('''
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS trades (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ticker TEXT,
             timestamp TEXT,
             strategy TEXT,
             direction TEXT,
+            spot_price REAL DEFAULT 0.0,
+            exit_price REAL DEFAULT 0.0,
+            exit_status TEXT DEFAULT 'OPEN',
+            net_pnl REAL DEFAULT 0.0,
+            execution_origin TEXT DEFAULT 'LEGACY',
+            take_profit REAL DEFAULT 0.0,
+            stop_loss REAL DEFAULT 0.0,
+            shares REAL DEFAULT 0.0,
+            cost REAL DEFAULT 0.0,
+            occ_symbol TEXT
+        );
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS gex_telemetry (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ticker TEXT,
             spot_price REAL,
-            exit_price REAL,
-            exit_status TEXT,
-            net_pnl REAL,
-            execution_origin TEXT DEFAULT 'UNKNOWN-ORIGIN'
-        )
-    ''')
-    
-    # 2. Migration check: Add execution_origin column if missing from legacy tables
-    cursor.execute("PRAGMA table_info(trades);")
-    columns = [column[1] for column in cursor.fetchall()]
-    if "execution_origin" not in columns:
-        cursor.execute("ALTER TABLE trades ADD COLUMN execution_origin TEXT DEFAULT 'LEGACY';")
-        print("[✓] Migrated 'trades' table: Added 'execution_origin' column.")
-
-    # 3. Ensure deduplication index exists
-    cursor.execute('''
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_dedup_trades 
-        ON trades(ticker, spot_price, exit_price, exit_status)
-    ''')
-    
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+    """)
     conn.commit()
     conn.close()
 

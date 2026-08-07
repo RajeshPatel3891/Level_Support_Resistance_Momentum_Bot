@@ -41,7 +41,13 @@ def rebuild_and_seed():
             take_profit REAL,
             distance REAL,
             allowed_dist REAL,
-            proximity_score REAL,
+            entry_price REAL DEFAULT 0.0,
+        shares INTEGER DEFAULT 0,
+        proximity_score REAL DEFAULT 0.0,
+        is_live INTEGER DEFAULT 1,
+        cso_cleared INTEGER DEFAULT 0,
+        cso_notes TEXT DEFAULT '',
+        occ_symbol TEXT DEFAULT '',
             exit_status TEXT,           -- 'ACTIVE', 'TAKE_PROFIT', 'STOP_LOSS', 'FORCE_CLOSE'
             net_pnl REAL
         )

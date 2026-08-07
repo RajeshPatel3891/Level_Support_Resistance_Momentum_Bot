@@ -1,0 +1,11 @@
+requests>=2.31.0
+python-dotenv>=1.0.0
+google-genai>=0.1.0
+pytz>=2023.3
+pandas>=2.0.0
+numpy>=1.24.0
+websocket-client>=1.6.0
+flask>=3.0.0
+fastapi>=0.100.0
+uvicorn>=0.22.0
+boto3

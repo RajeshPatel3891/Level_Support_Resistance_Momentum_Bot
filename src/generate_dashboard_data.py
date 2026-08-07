@@ -23,7 +23,8 @@ def fetch_and_compile_telemetry():
         return
 
     try:
-        conn = sqlite3.connect(DB_PATH)
+        from HarmonizedDispatch import get_db_connection
+        conn = get_db_connection(DB_PATH)
         cursor = conn.cursor()
         today_str = datetime.now().strftime("%Y-%m-%d")
 
@@ -31,7 +32,7 @@ def fetch_and_compile_telemetry():
         cursor.execute("SELECT starting_settled_cash, available_settled_cash, unsettled_cash FROM account_ledger WHERE date = ?", (today_str,))
         ledger_row = cursor.fetchone()
 
-        starting_cash = ledger_row[0] if ledger_row else 2000.00
+        starting_cash = ledger_row[0] if ledger_row else 6535.24
         unsettled_cash = ledger_row[2] if ledger_row else 0.0
 
         # 2. Grab trades from SQLite database

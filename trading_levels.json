@@ -1,155 +1,227 @@
 {
   "AAPL": {
-    "spot_target_call": 338.97,
-    "spot_target_put": 335.59,
-    "resistance_zone": [
-      338.97,
-      344.05455
-    ],
+    "armed": true,
+    "status": "WAITING",
+    "spot": 314.035,
+    "vwap": 314.035,
+    "target": "GEX_BUY",
+    "gap_dollars": "-bash.00",
+    "gap_pct": "0.00%",
+    "last_price": 314.035,
+    "spot_target_call": 314.72,
+    "spot_target_put": 311.59,
     "support_zone": [
-      330.55614999999995,
-      335.59
+      308.47,
+      311.59
     ],
-    "last_price": 305.88,
-    "spot": 304.6,
-    "vwap": 304.6,
-    "execution_armed": false,
-    "status": "WAITING"
+    "resistance_zone": [
+      314.72,
+      317.87
+    ],
+    "support_a": 308.47,
+    "support_b": 311.59,
+    "resistance_a": 314.72,
+    "resistance_b": 317.87,
+    "execution_armed": false
   },
   "NVDA": {
-    "spot_target_call": 199.83,
-    "spot_target_put": 197.85,
-    "resistance_zone": [
-      199.83,
-      202.82745
-    ],
+    "armed": true,
+    "status": "WAITING",
+    "spot": 222.14,
+    "vwap": 222.14,
+    "target": "GEX_BUY",
+    "gap_dollars": "-bash.00",
+    "gap_pct": "0.00%",
+    "last_price": 222.14,
+    "spot_target_call": 222.74,
+    "spot_target_put": 220.52,
     "support_zone": [
-      194.88225,
-      197.85
+      218.31,
+      220.52
     ],
-    "last_price": 210.867,
-    "spot": 210.72,
-    "vwap": 210.72,
-    "execution_armed": false,
-    "status": "WAITING"
+    "resistance_zone": [
+      222.74,
+      224.97
+    ],
+    "support_a": 218.31,
+    "support_b": 220.52,
+    "resistance_a": 222.74,
+    "resistance_b": 224.97,
+    "execution_armed": false
   },
   "TSLA": {
-    "spot_target_call": 309.02,
-    "spot_target_put": 305.94,
-    "resistance_zone": [
-      309.02,
-      313.65529999999995
-    ],
+    "armed": true,
+    "status": "ARMED",
+    "spot": 326.335,
+    "vwap": 326.335,
+    "target": "GEX_BUY",
+    "gap_dollars": "-bash.00",
+    "gap_pct": "0.00%",
+    "last_price": 326.335,
+    "spot_target_call": 327.97,
+    "spot_target_put": 324.7,
     "support_zone": [
-      301.35089999999997,
-      305.94
+      321.45,
+      324.7
     ],
-    "last_price": 325.14,
-    "spot": 322.44,
-    "vwap": 322.44,
-    "execution_armed": false,
-    "status": "WAITING"
+    "resistance_zone": [
+      327.97,
+      331.25
+    ],
+    "support_a": 321.45,
+    "support_b": 324.7,
+    "resistance_a": 327.97,
+    "resistance_b": 331.25,
+    "execution_armed": true
   },
   "PLTR": {
-    "spot_target_call": 127.69,
-    "spot_target_put": 126.41,
-    "resistance_zone": [
-      127.69,
-      129.60535
-    ],
+    "armed": true,
+    "status": "ARMED",
+    "spot": 170.425,
+    "vwap": 170.425,
+    "target": "GEX_BUY",
+    "gap_dollars": "-bash.00",
+    "gap_pct": "0.00%",
+    "last_price": 170.425,
+    "spot_target_call": 171.28,
+    "spot_target_put": 169.57,
     "support_zone": [
-      124.51384999999999,
-      126.41
+      167.87,
+      169.57
     ],
-    "last_price": 160.19,
-    "spot": 152.2,
-    "vwap": 152.2,
-    "execution_armed": false,
-    "status": "WAITING"
+    "resistance_zone": [
+      171.28,
+      172.99
+    ],
+    "support_a": 167.87,
+    "support_b": 169.57,
+    "resistance_a": 171.28,
+    "resistance_b": 172.99,
+    "execution_armed": true
   },
   "RIVN": {
-    "spot_target_call": 16.66,
-    "spot_target_put": 16.49,
-    "resistance_zone": [
-      16.66,
-      16.909899999999997
-    ],
+    "armed": true,
+    "status": "WAITING",
+    "spot": 15.74,
+    "vwap": 15.74,
+    "target": "GEX_BUY",
+    "gap_dollars": "-bash.00",
+    "gap_pct": "0.00%",
+    "last_price": 15.74,
+    "spot_target_call": 15.82,
+    "spot_target_put": 15.67,
     "support_zone": [
-      16.242649999999998,
-      16.49
+      15.51,
+      15.67
     ],
-    "last_price": 15.875,
-    "spot": 15.56,
-    "vwap": 15.56,
-    "execution_armed": false,
-    "status": "WAITING"
-  },
-  "AAL": {
-    "spot_target_call": 0.0,
-    "spot_target_put": 0.0,
     "resistance_zone": [
-      0.0,
-      0.0
+      15.82,
+      15.98
     ],
-    "support_zone": [
-      0.0,
-      0.0
-    ],
-    "last_price": 16.4839,
-    "spot": 16.395,
-    "vwap": 16.395,
-    "execution_armed": false,
-    "status": "WAITING"
+    "support_a": 15.51,
+    "support_b": 15.67,
+    "resistance_a": 15.82,
+    "resistance_b": 15.98,
+    "execution_armed": false
   },
   "SOFI": {
-    "spot_target_call": 0.0,
-    "spot_target_put": 0.0,
-    "resistance_zone": [
-      0.0,
-      0.0
-    ],
+    "armed": true,
+    "status": "WAITING",
+    "spot": 18.365,
+    "vwap": 18.365,
+    "target": "GEX_BUY",
+    "gap_dollars": "-bash.00",
+    "gap_pct": "0.00%",
+    "last_price": 18.365,
+    "spot_target_call": 18.5,
+    "spot_target_put": 18.31,
     "support_zone": [
-      0.0,
-      0.0
+      18.13,
+      18.31
     ],
-    "last_price": 18.435,
-    "spot": 18.2051,
-    "vwap": 18.2051,
-    "execution_armed": false,
-    "status": "WAITING"
+    "resistance_zone": [
+      18.5,
+      18.68
+    ],
+    "support_a": 18.13,
+    "support_b": 18.31,
+    "resistance_a": 18.5,
+    "resistance_b": 18.68,
+    "execution_armed": false
   },
   "INTC": {
-    "spot_target_call": 0.0,
-    "spot_target_put": 0.0,
-    "resistance_zone": [
-      0.0,
-      0.0
-    ],
+    "armed": true,
+    "status": "ARMED",
+    "spot": 99.64,
+    "vwap": 99.64,
+    "target": "GEX_BUY",
+    "gap_dollars": "-bash.00",
+    "gap_pct": "0.00%",
+    "last_price": 99.64,
+    "spot_target_call": 100.91,
+    "spot_target_put": 99.91,
     "support_zone": [
-      0.0,
-      0.0
+      98.91,
+      99.91
     ],
-    "last_price": 100.19,
-    "spot": 98.185,
-    "vwap": 98.185,
-    "execution_armed": false,
-    "status": "WAITING"
+    "resistance_zone": [
+      100.91,
+      101.92
+    ],
+    "support_a": 98.91,
+    "support_b": 99.91,
+    "resistance_a": 100.91,
+    "resistance_b": 101.92,
+    "execution_armed": true
+  },
+  "AAL": {
+    "armed": true,
+    "status": "WAITING",
+    "spot": 15.8893,
+    "vwap": 15.8893,
+    "target": "GEX_BUY",
+    "gap_dollars": "-bash.00",
+    "gap_pct": "0.00%",
+    "last_price": 15.8893,
+    "spot_target_call": 16.36,
+    "spot_target_put": 16.19,
+    "support_zone": [
+      16.03,
+      16.19
+    ],
+    "resistance_zone": [
+      16.36,
+      16.52
+    ],
+    "support_a": 16.03,
+    "support_b": 16.19,
+    "resistance_a": 16.36,
+    "resistance_b": 16.52,
+    "execution_armed": false
   },
   "F": {
-    "spot_target_call": 0.0,
-    "spot_target_put": 0.0,
-    "resistance_zone": [
-      0.0,
-      0.0
-    ],
+    "armed": true,
+    "status": "WAITING",
+    "spot": 13.855,
+    "vwap": 13.855,
+    "target": "GEX_BUY",
+    "gap_dollars": "-bash.00",
+    "gap_pct": "0.00%",
+    "last_price": 13.855,
+    "spot_target_call": 13.98,
+    "spot_target_put": 13.85,
     "support_zone": [
-      0.0,
-      0.0
+      13.71,
+      13.85
     ],
-    "last_price": 14.1699,
-    "spot": 14.0299,
-    "vwap": 14.0299,
-    "execution_armed": false,
-    "status": "WAITING"
+    "resistance_zone": [
+      13.98,
+      14.12
+    ],
+    "support_a": 13.71,
+    "support_b": 13.85,
+    "resistance_a": 13.98,
+    "resistance_b": 14.12,
+    "execution_armed": false
   }
 }

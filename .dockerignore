@@ -1,0 +1,14 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+/quarantine
+**/*.csv
+**/*.db
+**/*.sqlite
+**/*.json
+!trading_levels.json
+!macro_state.json
+!system_config.json
+!.checksums.json

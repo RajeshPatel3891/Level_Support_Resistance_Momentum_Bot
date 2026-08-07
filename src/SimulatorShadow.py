@@ -3,7 +3,16 @@ from LiveBot import on_message, MASTER_DATA
 
 def run_suite():
     print("--- Starting Dynamic Level/Trend Suite ---", file=sys.stderr)
-    for ticker, data in MASTER_DATA["levels"].items():
+    
+import json
+try:
+    with open("trading_levels.json", "r") as jf:
+        levels_dict = json.load(jf)
+except Exception:
+    levels_dict = {}
+
+for ticker, data in levels_dict.get("levels", levels_dict).items():
+
         macro = data.get("algo_macro", {})
         support = macro.get("support", [0])[0]
         resistance = macro.get("resistance", [9999])[0]

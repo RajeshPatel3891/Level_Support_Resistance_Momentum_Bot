@@ -22,7 +22,8 @@ def get_live_quote(symbol):
 
 def get_db_tickers_by_status(statuses):
     try:
-        conn = sqlite3.connect("harm_telemetry.db")
+        from HarmonizedDispatch import get_db_connection
+        conn = get_db_connection("harm_telemetry.db")
         placeholders = ",".join("?" for _ in statuses)
         query = f"""
             SELECT ticker, spot_price, exit_status 
