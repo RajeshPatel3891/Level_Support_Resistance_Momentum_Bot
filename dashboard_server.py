@@ -1,4 +1,39 @@
 
+
+def fetch_closed_dynamo_positions(selected_date=None):
+    import boto3, os
+    from boto3.dynamodb.conditions import Attr
+    try:
+        dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
+        table = dynamodb.Table('HarmonizedTrades')
+        res = table.scan(FilterExpression=Attr('exit_status').ne('ACTIVE'))
+        raw_items = res.get('Items', [])
+        parsed = []
+        for item in raw_items:
+            try:
+                ts = str(item.get('exit_timestamp', item.get('timestamp', '')))
+                if selected_date and not ts.startswith(selected_date):
+                    continue
+                parsed.append({
+                    'trade_id': str(item.get('trade_id')),
+                    'ticker': str(item.get('ticker')),
+                    'timestamp': ts,
+                    'strategy': str(item.get('strategy', 'BREAKOUT')),
+                    'direction': str(item.get('direction', 'CALL')),
+                    'entry_price': float(item.get('entry_price', 0.0)),
+                    'exit_price': float(item.get('exit_price', 0.0)),
+                    'exit_status': str(item.get('exit_status', 'CLOSED')),
+                    'net_pnl': float(item.get('net_pnl', 0.0)),
+                    'shares': abs(float(item.get('shares', 1.0)))
+                })
+            except Exception:
+                continue
+        return parsed
+    except Exception as e:
+        print(f"Error fetching closed trades: {e}")
+        return []
+
+
 def fetch_all_active_dynamo_positions():
     import boto3, os
     from boto3.dynamodb.conditions import Attr
@@ -470,12 +505,12 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
         selected_date = datetime.now().strftime('%Y-%m-%d')
         
     active_trades = fetch_all_active_dynamo_positions()
-    db_closed = []
+    db_closed = fetch_closed_dynamo_positions(selected_date)
     
     # Calculate portfolio capital metrics
     deployed_capital = sum(float(t.get('entry_price', 0.0)) * float(t.get('shares', 1.0)) * 100.0 for t in active_trades)
     total_floating_pnl = sum(float(t.get('net_pnl', 0.0)) for t in active_trades)
-    total_closed_pnl = 0.0
+    total_closed_pnl = sum(float(t.get('net_pnl', 0.0)) for t in db_closed)
     starting_balance = 6535.24
     settled_free = starting_balance - deployed_capital
     unsettled = 0.0
