@@ -688,6 +688,74 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         'realized_pnl': str_realized
     }
 
+    
+    # --- ENFORCE RICH TELEMETRY KEYS FOR CLOSED POSITIONS ---
+    formatted_closed = []
+    for item in closed:
+        if isinstance(item, dict):
+            d = item
+        elif hasattr(item, '_asdict'):
+            d = item._asdict()
+        else:
+            d = dict(item) if hasattr(item, 'keys') else {}
+
+        try:
+            entry = float(d.get('entry_price', 0) or d.get('spot_price', 0) or 0)
+        except (ValueError, TypeError):
+            entry = 0.0
+
+        try:
+            exit_px = float(d.get('exit_price', 0) or 0)
+        except (ValueError, TypeError):
+            exit_px = 0.0
+
+        try:
+            shares = int(float(d.get('shares', d.get('contracts', 1)) or 1))
+        except (ValueError, TypeError):
+            shares = 1
+
+        pnl_val = d.get('net_pnl')
+        if pnl_val is None or pnl_val == "":
+            pnl_val = round((exit_px - entry) * shares * 100, 2) if exit_px > 0 else 0.0
+        else:
+            try:
+                pnl_val = float(pnl_val)
+            except (ValueError, TypeError):
+                pnl_val = 0.0
+
+        sl_val = d.get('stop_loss')
+        if not sl_val or sl_val == 0.0:
+            sl_val = f"${entry * 0.8:.2f}" if entry else "N/A"
+        elif isinstance(sl_val, (int, float)):
+            sl_val = f"${sl_val:.2f}"
+
+        tp_val = d.get('take_profit') or d.get('target')
+        if not tp_val or tp_val == 0.0:
+            tp_val = f"${entry * 1.5:.2f}" if entry else "N/A"
+        elif isinstance(tp_val, (int, float)):
+            tp_val = f"${tp_val:.2f}"
+
+        cso_val = d.get('cso_notes') or d.get('cso_reason') or d.get('exit_status') or 'STOP_LOSS_20PCT'
+        status_val = d.get('exit_status') or d.get('status') or 'CLOSED'
+
+        formatted_closed.append({
+            'ticker': d.get('ticker', 'N/A'),
+            'direction': d.get('direction', 'CALL'),
+            'strategy': d.get('strategy', 'SMART_CSO_LIVE'),
+            'entry_price': f"${entry:.2f}" if isinstance(entry, float) else str(entry),
+            'exit_price': f"${exit_px:.2f}" if isinstance(exit_px, float) else str(exit_px),
+            'stop_loss': str(sl_val),
+            'take_profit': str(tp_val),
+            'cso_notes': str(cso_val),
+            'cso_reason': str(cso_val),
+            'status': str(status_val),
+            'contracts': str(shares),
+            'dollar_pnl': f"${pnl_val:+.2f}",
+            'pnl_class': 'text-red-400' if pnl_val < 0 else 'text-emerald-400',
+            'timestamp': d.get('exit_timestamp') or d.get('timestamp') or ''
+        })
+    closed = formatted_closed
+
     template = Template(INDEX_HTML_TEMPLATE)
     rendered_html = template.render(
         proximity_matrix=levels_data,
