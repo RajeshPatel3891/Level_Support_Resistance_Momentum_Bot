@@ -1,3 +1,22 @@
+def resolve_trade_direction(item):
+    """Safely resolves trade direction (CALL/PUT) with OCC symbol parsing fallback."""
+    raw_dir = str(item.get('direction') or '').strip().upper()
+    if raw_dir and raw_dir != '-':
+        return raw_dir
+    
+    # Fallback: Parse OCC symbol (e.g., NVDA260812C00217500 -> C = CALL, P = PUT)
+    occ = str(item.get('occ_symbol') or '').upper()
+    ticker = str(item.get('ticker') or '').upper()
+    if occ and ticker and len(occ) > len(ticker):
+        suffix = occ[len(ticker):]
+        if 'C' in suffix[:7]:
+            return 'CALL'
+        elif 'P' in suffix[:7]:
+            return 'PUT'
+            
+    return 'CALL'
+
+
 def fetch_closed_dynamo_positions(selected_date=None):
     import boto3, os
     from boto3.dynamodb.conditions import Attr
@@ -17,7 +36,7 @@ def fetch_closed_dynamo_positions(selected_date=None):
                     'ticker': str(item.get('ticker')),
                     'timestamp': ts,
                     'strategy': str(item.get('strategy', 'BREAKOUT')),
-                    'direction': str(item.get('direction', 'CALL')),
+                    'direction': resolve_trade_direction(item),
                     'entry_price': float(item.get('entry_price', 0.0)),
                     'exit_price': float(item.get('exit_price', 0.0)),
                     'exit_status': str(item.get('exit_status', 'CLOSED')),
@@ -53,7 +72,7 @@ def fetch_all_active_dynamo_positions():
                     'ticker': str(item.get('ticker')),
                     'timestamp': str(item.get('timestamp', '')),
                     'strategy': str(item.get('strategy', 'BREAKOUT')),
-                    'direction': str(item.get('direction', 'CALL')),
+                    'direction': resolve_trade_direction(item),
                     'spot_price': float(item.get('spot_price', entry_price)),
                     'entry_price': entry_price,
                     'shares': abs(shares),
@@ -94,7 +113,7 @@ def get_active_positions_from_dynamo():
                     'ticker': str(item.get('ticker')),
                     'timestamp': str(item.get('timestamp', '')),
                     'strategy': str(item.get('strategy', 'BREAKOUT')),
-                    'direction': str(item.get('direction', 'CALL')),
+                    'direction': resolve_trade_direction(item),
                     'spot_price': float(item.get('spot_price', 0.0)),
                     'entry_price': float(item.get('entry_price', 0.0)),
                     'shares': qty,
@@ -245,7 +264,7 @@ INDEX_HTML_TEMPLATE = """
             <div class="space-y-1">
                 <div class="flex items-center space-x-2">
                     <span class="font-black text-sm">{{ trade.ticker }}</span>
-                    <span class="text-[10px] bg-gray-800 text-gray-300 px-1.5 py-0.5 rounded uppercase">{{ trade.status }}</span>
+                    <span class="text-[10px] {% if trade.direction == 'PUT' %}bg-rose-950 text-rose-300 border border-rose-800{% else %}bg-emerald-950 text-emerald-300 border border-emerald-800{% endif %} px-1.5 py-0.5 rounded font-bold uppercase">{{ trade.direction or 'CALL' }}</span>
                     <span class="text-[9px] bg-purple-950 text-purple-300 border border-purple-800 px-1.5 py-0.5 rounded font-bold">
                         PROB: {{ trade.hit_probability }}
                     </span>
@@ -627,10 +646,11 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         current_spot = float(live_spots.get(tkr) or live_spots.get(tkr.lower()) or t.get('current_spot') or t.get('stock_price') or 0.0)
         if current_spot == 0.0:
             current_spot = strike if strike > 0 else spot_entry
-        direction = str(t.get('direction', 'CALL')).upper()
+        direction = resolve_trade_direction(t)
 
         total_deployed_basis += (opt_cost * shares_cnt * 100.0)
 
+        t['direction'] = direction
         t['basis'] = f"{opt_cost:.2f}"
         t['cost'] = f"{opt_cost:.2f}"
         t['price'] = f"{current_spot:.2f}"
@@ -769,7 +789,7 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
 
         formatted_closed.append({
             'ticker': d.get('ticker', 'N/A'),
-            'direction': d.get('direction', 'CALL'),
+            'direction': resolve_trade_direction(d),
             'strategy': d.get('strategy', 'SMART_CSO_LIVE'),
             'entry_price': f"${entry:.2f}" if isinstance(entry, float) else str(entry),
             'exit_price': f"${exit_px:.2f}" if isinstance(exit_px, float) else str(exit_px),
@@ -860,7 +880,7 @@ async def get_dashboard_data_json():
             opt_cost = float(t.get('entry_price') or t.get('basis') or t.get('cost') or 0.80)
             shares_cnt = float(t.get('shares', 1.0))
             spot_entry = float(t.get('spot_price') or 100.0)
-            direction = str(t.get('direction', 'CALL')).upper()
+            direction = resolve_trade_direction(t)
 
             occ = str(t.get('occ_symbol', ''))
             strike = float(occ[-8:]) / 1000.0 if (len(occ) >= 15 and occ[-8:].isdigit()) else 0.0
@@ -869,6 +889,7 @@ async def get_dashboard_data_json():
                 current_spot = strike if strike > 0 else spot_entry
 
             display_spot = current_spot if current_spot > 15.0 else (strike if strike > 0 else opt_cost)
+            t['direction'] = direction
             t['price'] = f"{display_spot:.2f}"
             t['cost'] = f"{opt_cost:.2f}"
             t['basis'] = f"{opt_cost:.2f}"
