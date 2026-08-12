@@ -118,28 +118,84 @@ def get_live_quote(occ_symbol):
     return 0.0, TRADIER_BASE_URL
 
 
-def execute_tradier_close(occ_symbol, ticker, shares, base_url):
-    """Execute sell_to_close market order on Tradier API."""
+def execute_tradier_close(occ_symbol, ticker, shares, base_url, max_wait_seconds=15):
+    """Execute sell_to_close order on Tradier API using Adaptive Limit Midpoint Guard & Early Momentum Urgency Intercept."""
     if not TRADIER_TOKEN or not TRADIER_ACCOUNT_ID:
         print(f"[-] Tradier credentials missing. Could not close {shares}x {occ_symbol}")
         return False
+    
     headers = {"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"}
+    
+    start_time = time.time()
+    initial_midpoint = None
+    best_midpoint = None
+    tick_count = 0
+    
+    print(f"[ADAPTIVE GUARD] Monitoring order book for {occ_symbol} (Max {max_wait_seconds}s window)...")
+    
+    while (time.time() - start_time) < max_wait_seconds:
+        tick_count += 1
+        try:
+            quote_res = requests.get(f"{base_url}/markets/quotes", params={"symbols": occ_symbol}, headers=headers, timeout=3)
+            if quote_res.status_code == 200:
+                q_data = quote_res.json().get('quotes', {}).get('quote', {})
+                if isinstance(q_data, list) and q_data:
+                    q_data = q_data[0]
+                bid = float(q_data.get('bid', 0.0) or 0.0)
+                ask = float(q_data.get('ask', 0.0) or 0.0)
+                
+                if bid > 0 and ask > 0:
+                    current_midpoint = round((bid + ask) / 2.0, 2)
+                    
+                    if initial_midpoint is None:
+                        initial_midpoint = current_midpoint
+                        best_midpoint = current_midpoint
+                    
+                    # Early Urgency Intercept (Within first 3 seconds)
+                    elapsed = time.time() - start_time
+                    if elapsed <= 3.0:
+                        if current_midpoint >= initial_midpoint * 1.015:  # 1.5% favorable bump
+                            print(f"[URGENCY INTERCEPT] Favorable momentum detected at T={elapsed:.1f}s! Midpoint jumped to ${current_midpoint}. Executing immediately.")
+                            best_midpoint = current_midpoint
+                            break
+                    
+                    # Track best midpoint for selling (higher is better)
+                    if current_midpoint > best_midpoint:
+                        best_midpoint = current_midpoint
+        except Exception as q_err:
+            pass
+            
+        time.sleep(1.0)
+        
+    order_type = 'market'
+    limit_price = None
+    
+    if best_midpoint and best_midpoint > 0:
+        order_type = 'limit'
+        limit_price = str(best_midpoint)
+        print(f"[ADAPTIVE GUARD] Final Limit Order Pegged at: ${limit_price} after {tick_count} ticks.")
+    else:
+        print(f"[ADAPTIVE GUARD WARNING] Could not establish dynamic midpoint. Falling back to market order.")
+
     payload = {
         'class': 'option',
         'symbol': ticker,
         'option_symbol': occ_symbol,
         'side': 'sell_to_close',
         'quantity': str(abs(int(shares))),
-        'type': 'market',
+        'type': order_type,
         'duration': 'day'
     }
+    if order_type == 'limit' and limit_price:
+        payload['price'] = limit_price
+
     try:
         res = requests.post(f"{base_url}/accounts/{TRADIER_ACCOUNT_ID}/orders", data=payload, headers=headers, timeout=5)
         if res.status_code == 200:
             body = res.json()
             order_info = body.get('order', {})
             if order_info.get('id') or order_info.get('status') in ['ok', 'pending']:
-                print(f"[✓ TRADIER CLOSE SUCCESS] {shares}x {occ_symbol} | Order ID: {order_info.get('id')}")
+                print(f"[✓ TRADIER CLOSE SUCCESS ({order_type.upper()})] {shares}x {occ_symbol} | Order ID: {order_info.get('id')}" + (f" | Limit Price: ${limit_price}" if limit_price else ""))
                 return True
             print(f"[-] Tradier Rejected Order: {body}")
             return False

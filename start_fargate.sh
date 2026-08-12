@@ -18,6 +18,18 @@ echo "[2/10] Initializing & Migrating Database Schemas..."
 python3 rebuild_db.py
 python3 preboot_db_fix.py
 
+echo "[2.5/10] 🧪 Executing Master Pre-Flight Unit Test Suite..."
+if python3 test_master_suite.py; then
+    echo "[✓] All pre-flight tests passed! Proceeding with boot..."
+else
+    echo "----------------------------------------------------------"
+    echo "⛔ [CRITICAL PRE-FLIGHT FAILURE] Unit tests failed!"
+    echo "⛔ Aborting launch sequence to protect live capital."
+    echo "----------------------------------------------------------"
+    pkill -P $$ 2>/dev/null
+    exit 1
+fi
+
 echo "[3/10] Running Non-Blocking Broker Position Sync..."
 if [ -f "src/sync_broker_positions.py" ]; then
     python3 src/sync_broker_positions.py &
@@ -54,5 +66,5 @@ while true; do
     sleep 300
 done &
 
-echo "[✓] All 10 Harmonized trading daemons are online!"
+echo "[✓] All Harmonized trading daemons are verified and online!"
 wait

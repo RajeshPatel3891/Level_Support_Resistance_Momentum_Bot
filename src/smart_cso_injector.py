@@ -115,7 +115,7 @@ def search_smart_option_chain(ticker, direction="CALL", spot_price=0.0):
             if bid < 0.05 or ask <= 0:
                 continue
             spread_pct = (ask - bid) / ask
-            if spread_pct > 0.15:
+            if spread_pct > 0.08:  # Enforce tight 8% maximum spread threshold for entry options
                 continue
             valid_contracts.append(opt)
             
@@ -141,30 +141,81 @@ def fetch_occ_symbol(underlying, option_type, spot_price):
     occ = f"{underlying}{date_str}{type_code}{strike_fmt}"
     return occ, 1.00
 
-def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1):
+def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_wait_seconds=10):
     """
-    Strictly executes order via Tradier API and mandates a verified execution receipt 
-    before signaling success to the trade database registration pipeline.
+    Executes order via Tradier API using Adaptive Limit Midpoint Guard & Urgency Intercept.
+    Polls quote book for up to max_wait_seconds to find optimal midpoint entry.
+    Fires early if favorable breakout momentum (>= 1.5%) is detected within T <= 3.0s.
     """
     if not TRADIER_TOKEN or not TRADIER_ACCOUNT_ID:
         log_msg("[!] Tradier Token or Account ID missing. Strict live execution requires valid API credentials.")
         return False, 0.0, ""
 
     headers = {"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"}
-    order_side = "buy_to_open" if side.upper() == "CALL" else "sell_to_open"
-    
+    order_side = "buy_to_open"
+
+    start_time = time.time()
+    initial_midpoint = None
+    best_midpoint = None
+    tick_count = 0
+
+    log_msg(f"[*] [ADAPTIVE ENTRY GUARD] Monitoring book for {occ_symbol} (Max {max_wait_seconds}s window)...")
+
+    while (time.time() - start_time) < max_wait_seconds:
+        tick_count += 1
+        try:
+            q = get_live_quote(occ_symbol)
+            bid = float(q.get("bid") or 0.0)
+            ask = float(q.get("ask") or 0.0)
+
+            if bid > 0 and ask > 0:
+                current_midpoint = round((bid + ask) / 2.0, 2)
+
+                if initial_midpoint is None:
+                    initial_midpoint = current_midpoint
+                    best_midpoint = current_midpoint
+
+                elapsed = time.time() - start_time
+
+                # Urgency Intercept (Early breakout detection within 3 seconds)
+                if elapsed <= 3.0:
+                    if current_midpoint >= initial_midpoint * 1.015:
+                        log_msg(f"[🚀 URGENCY BREAKOUT] Fast momentum detected at T={elapsed:.1f}s! Midpoint jumped to ${current_midpoint}. Executing limit entry immediately!")
+                        best_midpoint = current_midpoint
+                        break
+
+                # For buy entries, lower midpoint is better
+                if current_midpoint < best_midpoint:
+                    best_midpoint = current_midpoint
+        except Exception as q_err:
+            pass
+
+        time.sleep(0.8)
+
+    order_type = 'market'
+    limit_price = None
+
+    if best_midpoint and best_midpoint > 0:
+        order_type = 'limit'
+        limit_price = str(best_midpoint)
+        log_msg(f"[✓ ADAPTIVE GUARD] Limit Order Pegged at: ${limit_price} after {tick_count} ticks.")
+    else:
+        log_msg(f"[⚠️ ADAPTIVE GUARD WARNING] Could not resolve clean midpoint. Falling back to market order.")
+
     payload = {
         "class": "option",
         "symbol": underlying,
         "option_symbol": occ_symbol,
         "side": order_side,
         "quantity": str(int(quantity)),
-        "type": "market",
+        "type": order_type,
         "duration": "day"
     }
+    if order_type == 'limit' and limit_price:
+        payload["price"] = limit_price
 
     try:
-        log_msg(f"[*] Submitting strict market order to Tradier for {occ_symbol}...")
+        log_msg(f"[*] Submitting strict {order_type.upper()} order to Tradier for {occ_symbol}...")
         response = requests.post(
             f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders",
             data=payload,
@@ -187,7 +238,7 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1):
                 if status_res.status_code == 200:
                     detailed = status_res.json().get("order", {})
                     final_status = detailed.get("status", "")
-                    fill_price = float(detailed.get("avg_fill_price") or detailed.get("price") or 0.0)
+                    fill_price = float(detailed.get("avg_fill_price") or detailed.get("price") or (best_midpoint or 0.0))
                     
                     log_msg(f"    -> Receipt Poll [{attempt+1}/4] Status: {final_status} | Fill Price: ${fill_price:.2f}")
                     

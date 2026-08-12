@@ -115,12 +115,12 @@ def run_armed_injection():
 
     print(f"\n🎯 Identified {len(armed_tickers)} ARMED Ticker(s): {armed_tickers}\n")
 
-    # 4. Trigger smart_cso_injector.py for each armed ticker
+    # 4. Trigger smart_cso_injector.py for each armed ticker with expanded execution window timeout (35s)
     for ticker in armed_tickers:
         print(f"🚀 Triggering CSO Live Injection for: {ticker}...")
         cmd = [sys.executable, "src/smart_cso_injector.py", "--ticker", ticker]
         try:
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=35)
             if res.returncode == 0:
                 print(f"[✓] {ticker} Injector Output:\n{res.stdout.strip()}\n")
             else:
