@@ -37,7 +37,7 @@ echo "[*] Step 2: Running premarket prep & schema verification..."
 python3 premarket_prep.py 2>/dev/null || echo "[!] Premarket prep completed."
 
 echo "[*] Step 3: Building Docker container image..."
-docker build -t $IMAGE_NAME:latest .
+docker build --no-cache -t $IMAGE_NAME:latest .
 
 echo "[*] Step 4: Fetching AWS Account ID & logging into ECR..."
 AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text)

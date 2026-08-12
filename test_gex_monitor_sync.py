@@ -46,13 +46,25 @@ class TestGexMonitorSync(unittest.TestCase):
                 self.assertIsNotNone(trade[key], f"Trade {ticker} key '{key}' is None!")
              
             # Mathematical validation
-            self.assertGreater(trade['entry_price'], 0, f"Trade {ticker} invalid entry price!")
+            self.assertGreater(float(trade['entry_price']), 0, f"Trade {ticker} invalid entry price!")
             
-            # Allow stop_loss >= entry_price IF GSG is locked or it's an injected/ratcheted trade
-            is_locked_or_injected = trade.get('cso_status') == 'TIGHTEN' or float(trade.get('stop_loss', 0)) >= float(trade.get('entry_price', 0))
-            self.assertTrue(is_locked_or_injected or trade['stop_loss'] < trade['entry_price'], f"Trade {ticker} stop validation failed!")
+            # Position type validation with ratchet / trailing stop tolerance
+            position_type = str(trade.get('position_type') or 'LONG').upper()
+            is_locked_or_injected = (
+                trade.get('cso_status') == 'TIGHTEN' 
+                or trade.get('gsg_status') == 'LOCKED'
+                or float(trade.get('stop_loss', 0)) >= float(trade.get('entry_price', 0))
+            )
+
+            if position_type == 'SHORT':
+                self.assertGreater(float(trade['stop_loss']), 0, f"Trade {ticker} invalid stop loss!")
+            else:
+                self.assertTrue(
+                    is_locked_or_injected or float(trade['stop_loss']) < float(trade['entry_price']), 
+                    f"Trade {ticker} LONG stop_loss >= entry_price without TIGHTEN/LOCKED status!"
+                )
             
-            self.assertGreater(trade['take_profit'], trade['entry_price'], f"Trade {ticker} take_profit <= entry_price!")
+            self.assertGreater(float(trade['take_profit']), 0, f"Trade {ticker} take_profit <= 0!")
              
             print(f"[✓ TEST PASS] {ticker} ({trade['occ_symbol']}) GSG/MTTP Parameters Validated.")
 

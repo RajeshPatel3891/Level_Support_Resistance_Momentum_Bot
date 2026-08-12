@@ -1,7 +1,6 @@
 # Version control & environments
 .git
 .gitignore
-.env
 __pycache__/
 *.pyc
 *.pyo
@@ -12,4 +11,3 @@ logs/
 *.db
 *.db-journal
 *.log
-*.json
