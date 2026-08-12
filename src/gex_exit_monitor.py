@@ -56,12 +56,16 @@ def get_live_spot(ticker):
 
 
 def ensure_schema():
-    """Ensure local SQLite schema supports peak prices, contract counts, and runner states."""
+    """Ensure local SQLite schema supports peak prices, contract counts, and WAL concurrency mode."""
     db_file = "harm_telemetry.db"
     if os.path.exists(db_file):
         try:
             conn = sqlite3.connect(db_file, timeout=10.0)
             cursor = conn.cursor()
+            
+            # Enable Write-Ahead Logging (WAL) for high concurrency
+            cursor.execute("PRAGMA journal_mode=WAL;")
+            
             for col in ["exit_timestamp TEXT", "peak_price REAL", "is_runner INTEGER", "partial_pnl REAL"]:
                 try:
                     cursor.execute(f"ALTER TABLE trades ADD COLUMN {col}")
@@ -94,7 +98,7 @@ def get_live_quote(occ_symbol):
 
 
 def execute_tradier_close(occ_symbol, ticker, shares):
-    """Execute sell_to_close market order on Tradier API for specified contract quantity."""
+    """Execute sell_to_close market order on Tradier API and validate order ID in body."""
     if not TRADIER_TOKEN or not TRADIER_ACCOUNT_ID:
         print(f"[-] Tradier credentials missing. Could not close {shares}x {occ_symbol}")
         return False
@@ -115,10 +119,19 @@ def execute_tradier_close(occ_symbol, ticker, shares):
             headers=headers,
             timeout=5
         )
-        print(f"[✓] Tradier Close Order Sent: {shares}x {occ_symbol} | Status: {res.status_code}")
-        return res.status_code == 200
+        # Check for order ID in response body to confirm execution
+        if res.status_code == 200:
+            body = res.json()
+            order_info = body.get('order', {})
+            if order_info.get('id') or order_info.get('status') in ['ok', 'pending']:
+                print(f"[✓] Tradier Close Order Confirmed: {shares}x {occ_symbol} | Order ID: {order_info.get('id')}")
+                return True
+            print(f"[-] Tradier Rejected Order: {body}")
+            return False
+        print(f"[-] Tradier Close Error: Status {res.status_code}")
+        return False
     except Exception as e:
-        print(f"[-] Tradier Close Error for {occ_symbol}: {e}")
+        print(f"[-] Tradier Close Exception for {occ_symbol}: {e}")
         return False
 
 
@@ -145,7 +158,7 @@ def evaluate_gex_exits():
         dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
         table = dynamodb.Table('HarmonizedTrades')
         
-        # Query active positions directly from DynamoDB
+        # Scan only ACTIVE trades directly from DynamoDB
         res = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE'))
         active_items = res.get('Items', [])
 
@@ -156,10 +169,17 @@ def evaluate_gex_exits():
         now = dt.now()
         now_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
+        allowed_tickers = [t.strip().upper() for t in os.getenv("ACTIVE_TICKERS", "").split(",") if t.strip()]
+
         for item in active_items:
             t_id = item.get('trade_id')
             tenant_id = item.get('tenant_id', 'default')
-            ticker = item.get('ticker')
+            ticker = item.get('ticker', '').upper()
+
+            # Dynamic Ticker Filter Guard
+            if allowed_tickers and ticker not in allowed_tickers:
+                continue
+
             occ_symbol = item.get('occ_symbol', ticker)
             entry_price = float(item.get('entry_price', 0.0))
             total_shares = int(float(item.get('shares', 1.0)))
@@ -182,10 +202,16 @@ def evaluate_gex_exits():
                 except Exception:
                     pass
 
-            # Fetch live option quote and GEMMA level distance
+            # Fetch live quote and GEMMA target info
             quote = get_live_quote(occ_symbol)
             spot, gex_target, gex_gap_pct = get_gex_target_info(ticker)
-            current_price = float(quote.get('bid', quote.get('last', entry_price))) if quote else entry_price
+
+            # Skip tick if API quote failed to prevent false trailing exits
+            if not quote or ('bid' not in quote and 'last' not in quote):
+                print(f"[!] Quote unavailable for {occ_symbol}. Skipping exit evaluation this tick to prevent false trailing exits.")
+                continue
+
+            current_price = float(quote.get('bid', quote.get('last')))
 
             # High-Water Mark (Peak Price) Update
             peak_price = max(stored_peak, current_price)
@@ -210,26 +236,25 @@ def evaluate_gex_exits():
                 
                 print(f"🚀 [CSO TRANCHE EXIT] Scaling {scale_shares}x contracts on {ticker} at {pnl_pct:+.1f}% | Banking ${realized_scale_pnl:+.2f} | Leaving 1 RUNNER")
                 
-                execute_tradier_close(occ_symbol, ticker, scale_shares)
-
-                table.update_item(
-                    Key={'tenant_id': tenant_id, 'trade_id': t_id},
-                    UpdateExpression='SET shares = :sh, is_runner = :r, partial_pnl = :pp, peak_price = :pk, cso_status = :cs',
-                    ExpressionAttributeValues={
-                        ':sh': '1',
-                        ':r': True,
-                        ':pp': str(accumulated_pnl + realized_scale_pnl),
-                        ':pk': str(peak_price),
-                        ':cs': 'SMART_CSO_RUNNER'
-                    }
-                )
-                sync_local_sqlite_exit(t_id, ticker, "PARTIAL_SCALE_OUT", current_price, now_str, realized_scale_pnl, remaining_shares=1)
+                if execute_tradier_close(occ_symbol, ticker, scale_shares):
+                    table.update_item(
+                        Key={'tenant_id': tenant_id, 'trade_id': t_id},
+                        UpdateExpression='SET shares = :sh, is_runner = :r, partial_pnl = :pp, peak_price = :pk, cso_status = :cs',
+                        ExpressionAttributeValues={
+                            ':sh': '1',
+                            ':r': True,
+                            ':pp': str(accumulated_pnl + realized_scale_pnl),
+                            ':pk': str(peak_price),
+                            ':cs': 'SMART_CSO_RUNNER'
+                        }
+                    )
+                    sync_local_sqlite_exit(t_id, ticker, "PARTIAL_SCALE_OUT", current_price, now_str, realized_scale_pnl, remaining_shares=1)
                 continue
 
             # Scenario B: Full / Final Exit Conditions
             exit_reason = None
 
-            # 1. Runner Trailing Stop (Dynamic GEMMA Room: 12% cushion for massive +100%+ runs, 10% standard)
+            # 1. Runner Trailing Stop (Dynamic GEMMA Room)
             if is_runner:
                 trail_cushion = 12.0 if peak_pnl_pct >= 100.0 else 10.0
                 if pnl_pct <= (peak_pnl_pct - trail_cushion):
@@ -247,9 +272,9 @@ def evaluate_gex_exits():
             elif peak_pnl_pct >= 20.0 and pnl_pct <= (peak_pnl_pct - 10.0):
                 exit_reason = f"MTTP_TRAIL_TIER2_LOCK_(PEAK_{peak_pnl_pct:.0f}PCT)"
 
-            # 5. Tier 1 Breakeven Lock (+12%+ Peak, Pullback to 0% or lower)
-            elif peak_pnl_pct >= 12.0 and pnl_pct <= 0.0:
-                exit_reason = f"MTTP_BREAKEVEN_LOCK_(PEAK_{peak_pnl_pct:.0f}PCT)"
+            # 5. Tier 1 "Green Stay Green" Lock (+12%+ Peak, Pullback to +3% Floor)
+            elif peak_pnl_pct >= 12.0 and pnl_pct <= 3.0:
+                exit_reason = f"MTTP_GREEN_STAY_GREEN_LOCK_(PEAK_{peak_pnl_pct:.0f}PCT)"
 
             # 6. Hard Risk Floor (-20% Stop Loss)
             elif pnl_pct <= -20.0:
@@ -263,26 +288,25 @@ def evaluate_gex_exits():
             if exit_reason:
                 print(f"🚨 [FINAL EXIT TRIGGERED] ID {t_id} ({ticker} {occ_symbol}) -> Reason: {exit_reason} logged at {now_str}")
                 
-                execute_tradier_close(occ_symbol, ticker, total_shares)
+                if execute_tradier_close(occ_symbol, ticker, total_shares):
+                    final_leg_pnl = round((current_price - entry_price) * total_shares * 100.0, 2)
+                    total_realized_pnl = round(accumulated_pnl + final_leg_pnl, 2)
 
-                final_leg_pnl = round((current_price - entry_price) * total_shares * 100.0, 2)
-                total_realized_pnl = round(accumulated_pnl + final_leg_pnl, 2)
-
-                table.update_item(
-                    Key={'tenant_id': tenant_id, 'trade_id': t_id},
-                    UpdateExpression='SET exit_status = :status, exit_price = :px, exit_timestamp = :ts, net_pnl = :pnl, cso_reason = :reason, shares = :sh',
-                    ExpressionAttributeValues={
-                        ':status': exit_reason,
-                        ':px': str(current_price),
-                        ':ts': now_str,
-                        ':pnl': str(total_realized_pnl),
-                        ':reason': exit_reason,
-                        ':sh': '0'
-                    }
-                )
-                
-                sync_local_sqlite_exit(t_id, ticker, exit_reason, current_price, now_str, total_realized_pnl, remaining_shares=0)
-                print(f"[✓] Final Exit Logged for {ticker} | Total Realized PnL: ${total_realized_pnl:+.2f}")
+                    table.update_item(
+                        Key={'tenant_id': tenant_id, 'trade_id': t_id},
+                        UpdateExpression='SET exit_status = :status, exit_price = :px, exit_timestamp = :ts, net_pnl = :pnl, cso_reason = :reason, shares = :sh',
+                        ExpressionAttributeValues={
+                            ':status': exit_reason,
+                            ':px': str(current_price),
+                            ':ts': now_str,
+                            ':pnl': str(total_realized_pnl),
+                            ':reason': exit_reason,
+                            ':sh': '0'
+                        }
+                    )
+                    
+                    sync_local_sqlite_exit(t_id, ticker, exit_reason, current_price, now_str, total_realized_pnl, remaining_shares=0)
+                    print(f"[✓] Final Exit Logged for {ticker} | Total Realized PnL: ${total_realized_pnl:+.2f}")
 
     except Exception as e:
         print(f"[-] GEX Exit Monitor Error: {e}")

@@ -184,7 +184,7 @@ nohup python3 src/MasterSentry.py > sentry_production.log 2>&1 &
             </div>
             <div class="tile" style="background: #020617; font-family: monospace; border: 1px solid #10b981;">
                 <span class="text-emerald">⚡ HARM.AI SIDEKICK // SIGNAL FIRED</span><br>
-                <span style="color: #64748b;">Asset Target:</span> <strong>MSFT</strong><br>
+                <span style="color: #64748b;">Asset Target:</span> <span class="val">${{ trade.target or trade.take_profit }}</span> <strong>MSFT</strong><br>
                 <span style="color: #64748b;">Impulse Vector Range:</span> <strong>$1.05</strong><br><br>
                 <span style="color: #38bdf8;">[AUTOMATED BRACKET PARAMETERS]</span><br>
                 • Position Size : 5 Contracts (0DTE)<br>

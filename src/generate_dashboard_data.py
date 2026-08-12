@@ -1,251 +1,75 @@
-import os
-import json
 import sqlite3
-from datetime import datetime
+import json
+import os
 
-current_dir = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(os.path.dirname(current_dir), 'harm_telemetry.db')
-JSON_OUTPUT_PATH = os.path.join(os.path.dirname(current_dir), 'dashboard_data.json')
+DB_PATH = "harm_telemetry.db"
+OUTPUT_PATH = "dashboard_data.json"
 
-def fetch_and_compile_telemetry():
-    # Load live market data from trading_levels.json
-    levels_path = os.path.join(os.path.dirname(current_dir), 'trading_levels.json')
-    data = {}
-    if os.path.exists(levels_path):
-        try:
-            with open(levels_path, 'r') as lf:
-                data = json.load(lf)
-        except Exception as e:
-            print(f"[!] Error loading trading_levels.json: {e}")
-
+def generate_data():
     if not os.path.exists(DB_PATH):
-        print(f"[*] Database not found at {DB_PATH}")
+        print("[!] Database not found.")
         return
 
-    try:
-        from HarmonizedDispatch import get_db_connection
-        conn = get_db_connection(DB_PATH)
-        cursor = conn.cursor()
-        today_str = datetime.now().strftime("%Y-%m-%d")
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
 
-        # 1. Fetch Ledger Base Values
-        cursor.execute("SELECT starting_settled_cash, available_settled_cash, unsettled_cash FROM account_ledger WHERE date = ?", (today_str,))
-        ledger_row = cursor.fetchone()
+    cursor.execute("SELECT * FROM trades ORDER BY id DESC")
+    rows = cursor.fetchall()
+    conn.close()
 
-        starting_cash = ledger_row[0] if ledger_row else 6535.24
-        unsettled_cash = ledger_row[2] if ledger_row else 0.0
+    active_trades = []
+    closed_trades = []
+    total_realized_pnl = 0.0
 
-        # 2. Grab trades from SQLite database
-        cursor.execute("""
-            SELECT timestamp, ticker, direction, spot_price, exit_status, stop_loss, take_profit, net_pnl, entry_price, entry_price 
-            FROM trades 
-            ORDER BY timestamp ASC
-        """)
-        rows = cursor.fetchall()
-
-        active_positions = []
-        closed_trades_by_day = {}
-        deployed_capital = 0.0
-        today_realized_pnl = 0.0
-        floating_pnl = 0.0
-
-        # Process each trade row chronologically
-        for r in rows:
-            timestamp_str, ticker, direction, spot_price, exit_status = r[0], r[1], r[2], r[3], r[4]
-            stop_loss = r[5] if len(r) > 5 else None
-            take_profit = r[6] if len(r) > 6 else None
-            net_pnl = r[7] if len(r) > 7 and r[7] is not None else 0.0
-            entry_price = float(r[8]) if len(r) > 8 and r[8] is not None else 0.0
-            
-            spot_price = float(spot_price) if spot_price is not None else 0.0
-            
-            try:
-                date_key = timestamp_str.split(" ")[0]
-            except Exception:
-                date_key = today_str
-
-            trade_obj = {
-                "timestamp": timestamp_str,
-                "ticker": ticker,
-                "direction": direction,
-                "spot_price": spot_price,
-                "stop_loss": stop_loss,
-                "take_profit": take_profit,
-                "net_pnl": net_pnl,
-                "basis": f"{float(r[8]):.2f}" if (len(r) > 8 and r[8] is not None) else "0.00",
-                "cost": f"{float(r[8]):.2f}" if (len(r) > 8 and r[8] is not None) else "0.00",
-                "price": f"{float(r[3]):.2f}" if (len(r) > 3 and r[3] is not None) else "0.00",
-                "entry_price": entry_price,
-                "cost": f"{entry_price:.2f}",
-                "basis": f"{entry_price:.2f}",
-                "price": f"{spot_price:.2f}",
-                "basis": f"{entry_price:.2f}",
-                "exit_status": exit_status
-            }
-
-            if exit_status == "ACTIVE":
-                # 1. Option Entry Cost (entry_price or spot_price fallback)
-                opt_cost = entry_price if entry_price > 0 else spot_price
-                if opt_cost <= 0:
-                    opt_cost = 0.80
-                
-                # Multiply per-share premium by 100 shares per contract
-                deployed_capital += (opt_cost * 100.0)
-                
-                # 2. Dynamic Live Option PnL based on stock movement
-                # Calculate spot change relative to baseline stock price
-                # Check for live option mark in trading levels/quotes
-                occ_sym = trade_obj.get("occ_symbol") or ""
-                if not occ_sym and "OCC:" in str(trade_obj.get("cso_notes")):
-                    import re
-                    m = re.search(r'OCC:\s*([A-Z0-9]+)', str(trade_obj.get("cso_notes")))
-                    if m: occ_sym = m.group(1)
-                
-                opt_mark = 0.0
-                # Direct Tradier live quote fetch for active option contracts
-                tradier_token = os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN")
-                tradier_base = os.getenv("TRADIER_BASE_URL", "https://sandbox.tradier.com/v1")
-                
-                if occ_sym and tradier_token:
-                    try:
-                        import urllib.request
-                        q_url = f"{tradier_base}/markets/quotes?symbols={occ_sym},{ticker}"
-                        req = urllib.request.Request(q_url, headers={
-                            "Authorization": f"Bearer {tradier_token}",
-                            "Accept": "application/json"
-                        })
-                        with urllib.request.urlopen(req, timeout=3) as resp:
-                            if resp.status == 200:
-                                q_data = json.loads(resp.read().decode())
-                                quotes = q_data.get("quotes", {}).get("quote", [])
-                                if isinstance(quotes, dict): quotes = [quotes]
-                                for q in quotes:
-                                    if q.get("symbol") == occ_sym:
-                                        opt_mark = float(q.get("last") or q.get("ask") or q.get("bid") or 0.0)
-                                    elif q.get("symbol") == ticker:
-                                        t_info["last_price"] = float(q.get("last") or q.get("close") or 0.0)
-                    except Exception as e:
-                        print(f"[-] Tradier quote fetch exception for {occ_sym}: {e}")
-
-                # Extract live stock price directly from data dict loaded at start of function
-                t_info = data.get(ticker, {}) if isinstance(data, dict) else {}
-                live_stock_spot = float(t_info.get("last_price") or t_info.get("last") or t_info.get("spot") or 0.0)
-                if live_stock_spot == 0.0:
-                    live_stock_spot = float(spot_price or 0.0)
-
-                spot_now = live_stock_spot
-                entry_stock_spot = float(spot_price) if spot_price > 0 else live_stock_spot
-
-                if opt_mark > 0.0:
-                    calc_floating = round((opt_mark - opt_cost) * 100.0, 2)
-                else:
-                    # Delta PnL estimation: ($0.50 delta x 100 shares per contract)
-                    spot_diff = (live_stock_spot - entry_stock_spot) if "CALL" in str(direction).upper() else (entry_stock_spot - live_stock_spot)
-                    calc_floating = round(spot_diff * 0.50 * 100.0, 2)
-                
-                trade_obj["net_pnl"] = calc_floating
-                floating_pnl += calc_floating
-                
-                # 3. Populate exact UI template keys for dashboard cards
-                trade_obj["basis"] = f"{opt_cost:.2f}"
-                trade_obj["cost"] = f"{opt_cost:.2f}"
-                trade_obj["price"] = f"{spot_now:.2f}"
-                
-                opt_sl = float(stop_loss or (opt_cost * 0.80))
-                opt_tp = float(take_profit or (opt_cost * 1.50))
-                
-                risk_amt = max(0.01, opt_cost - opt_sl) * 100.0
-                reward_amt = max(0.01, opt_tp - opt_cost) * 100.0
-                rr = round(reward_amt / max(0.01, risk_amt), 1)
-                
-                trade_obj["rr_ratio"] = f"{rr}:1"
-                trade_obj["rr_bg"] = "bg-emerald-950" if rr >= 1.5 else "bg-gray-800"
-                trade_obj["rr_text"] = "text-emerald-400" if rr >= 1.5 else "text-gray-300"
-                trade_obj["rr_border"] = "border-emerald-800" if rr >= 1.5 else "border-gray-700"
-                
-                trade_obj["hit_probability"] = "68%"
-                cso_val = "HOLD"
-                trade_obj["cso_recommendation"] = cso_val
-                trade_obj["cso_badge_bg"] = "bg-blue-950"
-                trade_obj["cso_badge_text"] = "text-blue-400"
-                
-                trade_obj["gex_target_str"] = f"${opt_tp:.2f} Opt TP"
-                trade_obj["gex_dist"] = f"+{round(((opt_tp - opt_cost)/opt_cost)*100, 1)}%"
-                trade_obj["potential_tp_return"] = f"+${reward_amt:.1f} ({round((opt_tp - opt_cost)/opt_cost*100, 1)}%)"
-                trade_obj["potential_sl_risk"] = f"-${risk_amt:.1f} ({round((opt_cost - opt_sl)/opt_cost*100, 1)}%)"
-                
-                pnl_prefix = "+" if calc_floating >= 0 else ""
-                trade_obj["dollar_pnl"] = f"{pnl_prefix}${calc_floating:.2f}"
-                trade_obj["pnl_pct"] = f"{pnl_prefix}{round((calc_floating / (opt_cost * 100.0))*100.0, 1)}%"
-                trade_obj["pnl_class"] = "text-emerald-400" if calc_floating >= 0 else "text-red-400"
-                
-                active_positions.append(trade_obj)
-            else:
-                if date_key not in closed_trades_by_day:
-                    closed_trades_by_day[date_key] = {
-                        "trades": [],
-                        "daily_pnl": 0.0
-                    }
-                
-                closed_trades_by_day[date_key]["trades"].append(trade_obj)
-                closed_trades_by_day[date_key]["daily_pnl"] += net_pnl
-                
-                if date_key == today_str:
-                    today_realized_pnl += net_pnl
-
-        # Calculate effective available settled cash dynamically
-        effective_available = starting_cash - deployed_capital
-
-        # Update account_ledger with latest calculated available settled cash
-        cursor.execute("UPDATE account_ledger SET available_settled_cash = ? WHERE date = ?", (round(effective_available, 2), today_str))
-        conn.commit()
-        conn.close()
-
-        # Sort daily stats by date descending for UI display readability
-        sorted_daily_stats = []
-        cumulative_pnl_tracker = 0.0
+    for row in rows:
+        d = dict(row)
+        entry = float(d.get("entry_price", d.get("spot_price", 0.0) or 0.0))
+        exit_px = float(d.get("exit_price", 0.0) or 0.0)
+        shares = int(d.get("shares", 1) or 1)
         
-        for date in sorted(closed_trades_by_day.keys()):
-            day_data = closed_trades_by_day[date]
-            cumulative_pnl_tracker += day_data["daily_pnl"] 
-            sorted_daily_stats.append({
-                "date": date,
-                "closed_count": len(day_data["trades"]),
-                "daily_pnl": round(day_data["daily_pnl"], 2),
-                "trades": day_data["trades"],
-                "cumulative_pnl_to_date": round(cumulative_pnl_tracker, 2)
-            })
-        
-        sorted_daily_stats.reverse() # Newest days first
+        status = str(d.get("exit_status", "ACTIVE")).upper()
+        pnl = 0.0
+        if status != "ACTIVE" and exit_px > 0:
+            pnl = round((exit_px - entry) * shares * 100, 2)
+            total_realized_pnl += pnl
 
-        payload = {
-            "summary": {
-                "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "total_active_count": len(active_positions),
-                "total_closed_days": len(sorted_daily_stats),
-                "floating_pnl": round(floating_pnl, 2),
-                "today_realized_pnl": round(today_realized_pnl, 2)
-            },
-            "ledger": {
-                "starting_settled_cash": starting_cash,
-                "available_settled_cash": round(effective_available, 2),
-                "deployed_capital": round(deployed_capital, 2),
-                "unsettled_cash": round(unsettled_cash, 2)
-            },
-            "active_positions": active_positions,
-            "daily_closed_history": sorted_daily_stats
+        sl = d.get("stop_loss")
+        tp = d.get("take_profit")
+        reason = d.get("cso_reason") or d.get("strategy") or "SMART_CSO_LIVE"
+
+        trade_obj = {
+            "id": d.get("id"),
+            "ticker": d.get("ticker"),
+            "direction": d.get("direction"),
+            "strategy": d.get("strategy", "SMART_CSO_LIVE"),
+            "entry_price": entry,
+            "exit_price": exit_px,
+            "stop_loss": f"${float(sl):.2f}" if sl else f"${entry * 0.80:.2f}",
+            "take_profit": f"${float(tp):.2f}" if tp else f"${entry * 1.50:.2f}",
+            "target": f"${float(tp):.2f}" if tp else f"${entry * 1.50:.2f}",
+            "cso_reason": reason,
+            "exit_status": status,
+            "timestamp": d.get("timestamp"),
+            "occ_symbol": d.get("occ_symbol", ""),
+            "realized_pnl": pnl
         }
 
-        # Safe atomic swap write
-        temp_path = f"{JSON_OUTPUT_PATH}.tmp"
-        with open(temp_path, 'w') as f:
-            json.dump(payload, f, indent=4)
-        os.replace(temp_path, JSON_OUTPUT_PATH)
-        
-        print(f"[✓] Compiled dashboard: {len(active_positions)} active flights (${deployed_capital:,.2f} deployed) | Available Cash: ${effective_available:,.2f}")
+        if status == "ACTIVE":
+            active_trades.append(trade_obj)
+        else:
+            closed_trades.append(trade_obj)
 
-    except sqlite3.OperationalError as e:
-        print(f"[🚨] DB Operational Error: {e}")
+    data = {
+        "active_trades": active_trades,
+        "closed_trades": closed_trades,
+        "total_realized_closed": round(total_realized_pnl, 2)
+    }
 
-if __name__ == '__main__':
-    fetch_and_compile_telemetry()
+    with open(OUTPUT_PATH, "w") as f:
+        json.dump(data, f, indent=2)
+
+    print(f"[✓] Re-compiled {len(active_trades)} active, {len(closed_trades)} closed. Realized PnL: ${total_realized_pnl:.2f}")
+
+if __name__ == "__main__":
+    generate_data()

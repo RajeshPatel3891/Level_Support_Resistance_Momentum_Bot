@@ -127,7 +127,7 @@ def force_entry(ticker, direction, force_override=False, live_mode=False):
 
         cursor.execute("""
             INSERT INTO trades (ticker, spot_price, stop_loss, take_profit, timestamp, entry_price, shares, direction, exit_status, strategy, is_live, occ_symbol)
-            VALUES (?, ?, ?, ?, ?, ?, 5.0, ?, 'ACTIVE', 'TACTICAL_FORCE_SIM', 0, ?)
+            VALUES (?, ?, ?, ?, ?, ?, 5.0, ?, 'FORCE_CLOSE', 'TACTICAL_FORCE_SIM', 0, ?)
         """, (ticker, real_spot, sl_opt_price, tp_opt_price, now_str, opt_entry_premium, direction, occ_symbol))
         
         conn.commit()

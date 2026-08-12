@@ -1,13 +1,12 @@
-import os
-import time
-import boto3
-from boto3.dynamodb.conditions import Attr
-from dotenv import load_dotenv
+import re
 
-load_dotenv()
+with open("run_gex_monitor.py", "r") as f:
+    code = f.read()
 
-def fetch_active_trades():
-    """Fetch active trades directly from DynamoDB for GSG and MTTP monitoring."""
+# Upgraded position fetcher pointing directly to DynamoDB
+new_fetcher = """def fetch_active_trades():
+    import boto3, os
+    from boto3.dynamodb.conditions import Attr
     try:
         dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
         table = dynamodb.Table('HarmonizedTrades')
@@ -32,31 +31,11 @@ def fetch_active_trades():
         return parsed
     except Exception as e:
         print(f"[-] DynamoDB Fetch Error in GEX Monitor: {e}")
-        return []
+        return []"""
 
-def run_monitor_cycle():
-    """Execute a single scan cycle across active positions."""
-    trades = fetch_active_trades()
-    if not trades:
-        print("[⚙️ GEX/MTTP MONITOR] Scanning... 0 active trades pending GEX exit.")
-        return
-
-    print(f"[⚙️ GEX/MTTP MONITOR] Scanning... {len(trades)} active trades pending GEX exit.")
-    for trade in trades:
-        ticker = trade['ticker']
-        entry_p = trade['entry_price']
-        trade_id = trade['id']
-        print(f"[⚙️ MTTP MONITOR] ID {trade_id[:8]} ({ticker}) | Entry: ${entry_p:.2f} | GSG: {trade['gsg_status']} | MTTP: {trade['mttp_status']}")
-
-def main():
-    """Continuous background loop for Fargate execution."""
-    print("🚀 Starting Continuous GEX & MTTP Exit Daemon...")
-    while True:
-        try:
-            run_monitor_cycle()
-        except Exception as e:
-            print(f"[!] Exception during GEX/MTTP cycle: {e}")
-        time.sleep(10)
-
-if __name__ == "__main__":
-    main()
+if "def fetch_active_trades" in code:
+    pattern = r"def fetch_active_trades\(.*?\):.+?return\s+.*?\n"
+    code = re.sub(pattern, new_fetcher + "\n", code, flags=re.DOTALL)
+    with open("run_gex_monitor.py", "w") as f:
+        f.write(code)
+    print("[✓] Successfully patched run_gex_monitor.py to pull active positions directly from DynamoDB!")

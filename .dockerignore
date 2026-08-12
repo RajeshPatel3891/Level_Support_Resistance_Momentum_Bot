@@ -1,14 +1,15 @@
+# Version control & environments
 .git
-.venv
-venv
-__pycache__
+.gitignore
+.env
+__pycache__/
 *.pyc
-/quarantine
-**/*.csv
-**/*.db
-**/*.sqlite
-**/*.json
-!trading_levels.json
-!macro_state.json
-!system_config.json
-!.checksums.json
+*.pyo
+
+# Local storage, backups, logs, and data JSON files
+backups/
+logs/
+*.db
+*.db-journal
+*.log
+*.json
