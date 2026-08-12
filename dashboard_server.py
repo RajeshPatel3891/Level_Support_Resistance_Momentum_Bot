@@ -259,7 +259,7 @@ INDEX_HTML_TEMPLATE = """
                 </div>
                 
                 <div class="text-xs text-gray-400">
-                    Live: <b class="text-gray-200">{{ trade.price }}</b> | Cost: <b class="text-gray-200">{{ trade.basis }}</b>
+                    Live: <b class="text-gray-200">{{ trade.price }}</b> | Cost: <b class="text-gray-200">{{ trade.basis }}</b> | Stop: <b class="text-amber-400">{{ trade.stop_display }}</b>
                 </div>
 
                 <div class="text-[11px] text-purple-400">
@@ -429,6 +429,25 @@ def get_live_quote(symbol):
     return {}
 
 
+def fetch_tradier_balances():
+    token = os.getenv("TRADIER_TOKEN") or os.getenv("TRADIER_SANDBOX_TOKEN")
+    acct = os.getenv("TRADIER_ACCOUNT_ID")
+    base_url = os.getenv("TRADIER_BASE_URL", "https://sandbox.tradier.com/v1")
+    if token and acct:
+        headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
+        try:
+            r = requests.get(f"{base_url}/accounts/{acct}/balances", headers=headers, timeout=3)
+            if r.status_code == 200:
+                bal = r.json().get('balances', {})
+                equity = float(bal.get('total_equity', 6535.24) or 6535.24)
+                cash = float(bal.get('total_cash', bal.get('cash', {}).get('cash_available', 5565.24)) or 5565.24)
+                unsettled = float(bal.get('unsettled_funds', 0.0) or 0.0)
+                return equity, cash, unsettled
+        except Exception as e:
+            print(f"[-] Tradier Balance Read Error: {e}")
+    return 6535.24, 5565.24, 0.0
+
+
 def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A'):
     import sqlite3, os, subprocess
     from datetime import datetime
@@ -506,9 +525,10 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
     deployed_capital = sum(float(t.get('entry_price', 0.0)) * float(t.get('shares', 1.0)) * 100.0 for t in active_trades)
     total_floating_pnl = sum(float(t.get('net_pnl', 0.0)) for t in active_trades)
     total_closed_pnl = sum(float(t.get('net_pnl', 0.0)) for t in db_closed)
-    starting_balance = 6535.24
-    settled_free = starting_balance - deployed_capital
-    unsettled = 0.0
+    
+    starting_balance, settled_free, unsettled = fetch_tradier_balances()
+    if settled_free == 5565.24 and starting_balance == 6535.24:
+        settled_free = starting_balance - deployed_capital
 
     return active_trades, db_closed, total_floating_pnl, total_closed_pnl, selected_date, starting_balance, settled_free, deployed_capital, unsettled
 
@@ -618,6 +638,7 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
 
         opt_sl = float(t.get('stop_loss') or (opt_cost * 0.80))
         opt_tp = float(t.get('take_profit') or (opt_cost * 1.50))
+        t['stop_display'] = f"${opt_sl:.2f}"
 
         risk_per_contract = max(0.01, opt_cost - opt_sl) * 100.0 * shares_cnt
         reward_per_contract = max(0.01, opt_tp - opt_cost) * 100.0 * shares_cnt
@@ -680,7 +701,7 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         t['pnl_class'] = 'text-emerald-400' if dollar_pnl_val >= 0 else 'text-red-400'
 
     str_starting = f"${starting_balance:,.2f}"
-    str_settled = f"${(starting_balance - total_deployed_basis):,.2f}"
+    str_settled = f"${settled_free:,.2f}"
     str_deployed = f"${total_deployed_basis:,.2f}"
     str_unsettled = f"${unsettled:,.2f}"
     str_floating = f"${total_floating_pnl_val:+,.2f}"

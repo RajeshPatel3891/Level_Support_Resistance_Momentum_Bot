@@ -4,6 +4,7 @@
 __pycache__/
 *.pyc
 *.pyo
+venv/
 
 # Local storage, backups, logs, and data JSON files
 backups/
