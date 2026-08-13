@@ -117,7 +117,10 @@ def force_entry(ticker, direction, force_override=False, live_mode=False):
 
         # Inject with standard option contract parameters so CSO evaluates EV & -$30 Risk Cap
         now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        exp_date_str = datetime.datetime.now().strftime('%y%m%d')
+        today = datetime.datetime.now()
+        days_until_friday = (4 - today.weekday()) % 7
+        friday_date = today + datetime.timedelta(days=days_until_friday)
+        exp_date_str = friday_date.strftime('%y%m%d')
         strike_int = int(round(real_spot))
         occ_symbol = f"{ticker}{exp_date_str}{'C' if direction == 'CALL' else 'P'}{strike_int:08d}"
 

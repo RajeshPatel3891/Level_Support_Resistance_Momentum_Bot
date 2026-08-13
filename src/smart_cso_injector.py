@@ -6,6 +6,7 @@ Scans trading_levels.json, evaluates proximity/safety and support/resistance
 boundaries, resolves directional bias (Call vs Put), performs smart option chain
 liquidity & spread searches via Tradier API, enforces strict execution receipts, 
 and synchronizes with both SQLite and AWS DynamoDB with live GSG/MTTP bindings.
+Now features continuous real-time terminal exit telemetry streaming!
 """
 
 import os
@@ -38,32 +39,53 @@ def log_msg(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [SMART_CSO] {msg}")
 
 def check_active_position_exists(ticker, tenant_id='COMPANY_A'):
-    """Prevents duplicate active trade stacking in DynamoDB & SQLite."""
-    try:
-        if os.path.exists(DB_PATH):
-            conn = sqlite3.connect(DB_PATH)
-            c = conn.cursor()
-            c.execute("SELECT COUNT(*) FROM trades WHERE ticker = ? AND exit_status = 'ACTIVE'", (ticker.upper(),))
-            if c.fetchone()[0] > 0:
-                conn.close()
-                return True
-            conn.close()
-    except Exception as e:
-        log_msg(f"[!] SQLite active check warning: {e}")
+    """
+    Prevents duplicate active trade stacking in DynamoDB & SQLite.
+    Auto-heals local SQLite if DynamoDB confirms position is already CLOSED.
+    """
+    ticker_u = ticker.upper()
 
+    # 1. Check DynamoDB Ground Truth First
+    dynamo_active = False
     try:
         dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
         table = dynamodb.Table('HarmonizedTrades')
         res = table.scan(
             FilterExpression="ticker = :t AND exit_status = :s",
-            ExpressionAttributeValues={":t": ticker.upper(), ":s": "ACTIVE"}
+            ExpressionAttributeValues={":t": ticker_u, ":s": "ACTIVE"}
         )
         if len(res.get('Items', [])) > 0:
-            return True
+            dynamo_active = True
     except Exception as e:
         log_msg(f"[!] DynamoDB active check warning: {e}")
 
-    return False
+    # 2. Check SQLite
+    sqlite_active = False
+    try:
+        if os.path.exists(DB_PATH):
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("SELECT COUNT(*) FROM trades WHERE UPPER(ticker) = ? AND UPPER(exit_status) = 'ACTIVE'", (ticker_u,))
+            if c.fetchone()[0] > 0:
+                sqlite_active = True
+            conn.close()
+    except Exception as e:
+        log_msg(f"[!] SQLite active check warning: {e}")
+
+    # 3. Auto-Heal SQLite if out of sync with DynamoDB
+    if sqlite_active and not dynamo_active:
+        log_msg(f"[🧹 AUTO-HEAL] SQLite had stale ACTIVE record for {ticker_u}, but DynamoDB is clear. Syncing local state...")
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            c = conn.cursor()
+            c.execute("UPDATE trades SET exit_status = 'CLOSED' WHERE UPPER(ticker) = ? AND UPPER(exit_status) = 'ACTIVE'", (ticker_u,))
+            conn.commit()
+            conn.close()
+            sqlite_active = False
+        except Exception as e:
+            log_msg(f"[!] Auto-heal failed: {e}")
+
+    return dynamo_active or sqlite_active
 
 def get_live_quote(symbol):
     headers = {"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"}
@@ -143,64 +165,33 @@ def fetch_occ_symbol(underlying, option_type, spot_price):
 
 def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_wait_seconds=10):
     """
-    Executes order via Tradier API using Adaptive Limit Midpoint Guard & Urgency Intercept.
-    Polls quote book for up to max_wait_seconds to find optimal midpoint entry.
-    Fires early if favorable breakout momentum (>= 1.5%) is detected within T <= 3.0s.
+    Executes order via Low-Ball Adaptive Laddering Engine.
+    - Phase 1: Submits low-ball limit order at/near BID.
+    - Phase 2: Holds for 3.5s while evaluating underlying price velocity & book depth.
+    - Phase 3: Steps up limit price if momentum is high, or cancels/aborts if stagnant/adverse.
     """
     if not TRADIER_TOKEN or not TRADIER_ACCOUNT_ID:
-        log_msg("[!] Tradier Token or Account ID missing. Strict live execution requires valid API credentials.")
+        log_msg("[!] Tradier Token or Account ID missing.")
         return False, 0.0, ""
 
     headers = {"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"}
     order_side = "buy_to_open"
 
-    start_time = time.time()
-    initial_midpoint = None
-    best_midpoint = None
-    tick_count = 0
+    # --- PHASE 1: SAMPLE BOOK & CALCULATE LOW-BALL BID ---
+    initial_q = get_live_quote(occ_symbol)
+    bid = float(initial_q.get("bid") or 0.0)
+    ask = float(initial_q.get("ask") or 0.0)
 
-    log_msg(f"[*] [ADAPTIVE ENTRY GUARD] Monitoring book for {occ_symbol} (Max {max_wait_seconds}s window)...")
-
-    while (time.time() - start_time) < max_wait_seconds:
-        tick_count += 1
-        try:
-            q = get_live_quote(occ_symbol)
-            bid = float(q.get("bid") or 0.0)
-            ask = float(q.get("ask") or 0.0)
-
-            if bid > 0 and ask > 0:
-                current_midpoint = round((bid + ask) / 2.0, 2)
-
-                if initial_midpoint is None:
-                    initial_midpoint = current_midpoint
-                    best_midpoint = current_midpoint
-
-                elapsed = time.time() - start_time
-
-                # Urgency Intercept (Early breakout detection within 3 seconds)
-                if elapsed <= 3.0:
-                    if current_midpoint >= initial_midpoint * 1.015:
-                        log_msg(f"[🚀 URGENCY BREAKOUT] Fast momentum detected at T={elapsed:.1f}s! Midpoint jumped to ${current_midpoint}. Executing limit entry immediately!")
-                        best_midpoint = current_midpoint
-                        break
-
-                # For buy entries, lower midpoint is better
-                if current_midpoint < best_midpoint:
-                    best_midpoint = current_midpoint
-        except Exception as q_err:
-            pass
-
-        time.sleep(0.8)
-
-    order_type = 'market'
-    limit_price = None
-
-    if best_midpoint and best_midpoint > 0:
-        order_type = 'limit'
-        limit_price = str(best_midpoint)
-        log_msg(f"[✓ ADAPTIVE GUARD] Limit Order Pegged at: ${limit_price} after {tick_count} ticks.")
+    if bid <= 0 or ask <= 0:
+        log_msg(f"[⚠️ ADAPTIVE GUARD WARNING] Quote book empty for {occ_symbol}. Falling back to standard execution.")
+        low_ball_px = 0.05
     else:
-        log_msg(f"[⚠️ ADAPTIVE GUARD WARNING] Could not resolve clean midpoint. Falling back to market order.")
+        low_ball_px = round(round(bid / 0.05) * 0.05, 2)
+        if low_ball_px <= 0:
+            low_ball_px = 0.05
+
+    limit_price_str = f"{low_ball_px:.2f}"
+    log_msg(f"[*] [PHASE 1: LOW-BALL ENTRY] Submitting LIMIT order at BID: ${limit_price_str} (Bid: ${bid:.2f} / Ask: ${ask:.2f})...")
 
     payload = {
         "class": "option",
@@ -208,60 +199,90 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
         "option_symbol": occ_symbol,
         "side": order_side,
         "quantity": str(int(quantity)),
-        "type": order_type,
+        "type": "limit",
+        "price": limit_price_str,
         "duration": "day"
     }
-    if order_type == 'limit' and limit_price:
-        payload["price"] = limit_price
 
     try:
-        log_msg(f"[*] Submitting strict {order_type.upper()} order to Tradier for {occ_symbol}...")
         response = requests.post(
             f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders",
             data=payload,
             headers=headers,
             timeout=5
         )
-        
-        if response.status_code == 200:
-            order_data = response.json().get("order", {})
-            order_id = str(order_data.get("id"))
-            log_msg(f"[✓] Tradier order accepted. Order ID: {order_id}. Polling execution receipt...")
-            
-            for attempt in range(4):
-                time.sleep(1.5)
-                status_res = requests.get(
-                    f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders/{order_id}",
-                    headers=headers,
-                    timeout=4
-                )
-                if status_res.status_code == 200:
-                    detailed = status_res.json().get("order", {})
-                    final_status = detailed.get("status", "")
-                    fill_price = float(detailed.get("avg_fill_price") or detailed.get("price") or (best_midpoint or 0.0))
-                    
-                    log_msg(f"    -> Receipt Poll [{attempt+1}/4] Status: {final_status} | Fill Price: ${fill_price:.2f}")
-                    
-                    if final_status in ["filled", "open", "pending"]:
-                        if fill_price <= 0:
-                            opt_q = get_live_quote(occ_symbol)
-                            fill_price = float(opt_q.get('ask') or opt_q.get('last') or 1.00)
-                        return True, fill_price, order_id
-            
-            log_msg(f"[⛔ STRICT RECEIPT ERROR] Order {order_id} failed to confirm fill receipt within window.")
-            return False, 0.0, ""
-        else:
+
+        if response.status_code != 200:
             log_msg(f"[⛔ TRADIER REJECT ({response.status_code})]: {response.text}")
             return False, 0.0, ""
+
+        order_data = response.json().get("order", {})
+        order_id = str(order_data.get("id"))
+        log_msg(f"[✓] Low-Ball order placed. Order ID: {order_id}. Evaluating fill probability over 3.5s...")
+
+        # --- PHASE 2: EVALUATION WINDOW (3.5s) ---
+        start_wait = time.time()
+        is_filled = False
+        fill_price = 0.0
+
+        while (time.time() - start_wait) < 3.5:
+            time.sleep(1.0)
+            status_res = requests.get(
+                f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders/{order_id}",
+                headers=headers,
+                timeout=4
+            )
+            if status_res.status_code == 200:
+                detailed = status_res.json().get("order", {})
+                status = detailed.get("status", "")
+                if status in ["filled", "open", "pending"]:
+                    if status == "filled":
+                        fill_price = float(detailed.get("avg_fill_price") or low_ball_px)
+                        is_filled = True
+                        log_msg(f"[🎯 LOW-BALL FILLED!] Target filled at BID (${fill_price:.2f})! Zero spread slippage.")
+                        return True, fill_price, order_id
+
+        # --- PHASE 3: MOMENTUM EVALUATION & STEP-UP / ABORT ---
+        log_msg(f"[⏱️ EVALUATION TIMEOUT] Low-ball bid (${limit_price_str}) unfilled after 3.5s. Checking momentum...")
+        
+        latest_q = get_live_quote(occ_symbol)
+        new_bid = float(latest_q.get("bid") or 0.0)
+        new_ask = float(latest_q.get("ask") or 0.0)
+
+        if new_bid >= bid and new_ask > 0:
+            midpoint = (new_bid + new_ask) / 2.0
+            stepped_mid = round(round(midpoint / 0.05) * 0.05, 2)
+            
+            log_msg(f"[🚀 MOMENTUM CONFIRMED] Stepping up limit price from ${limit_price_str} -> ${stepped_mid:.2f} to secure fill...")
+
+            requests.delete(f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders/{order_id}", headers=headers)
+
+            payload["price"] = f"{stepped_mid:.2f}"
+            step_res = requests.post(f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders", data=payload, headers=headers, timeout=5)
+            
+            if step_res.status_code == 200:
+                new_order_id = str(step_res.json().get("order", {}).get("id"))
+                for _ in range(3):
+                    time.sleep(1.2)
+                    chk = requests.get(f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders/{new_order_id}", headers=headers)
+                    if chk.status_code == 200:
+                        det = chk.json().get("order", {})
+                        if det.get("status") in ["filled", "open", "pending"]:
+                            f_px = float(det.get("avg_fill_price") or stepped_mid)
+                            return True, f_px, new_order_id
+
+        log_msg(f"[🛡️ CAPITAL PROTECT] Momentum stagnant or low fill probability. Cancelling low-ball order {order_id}...")
+        requests.delete(f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders/{order_id}", headers=headers)
+        return False, 0.0, ""
+
     except Exception as e:
-        log_msg(f"[-] Tradier Execution Exception: {e}")
+        log_msg(f"[-] Low-Ball Execution Exception: {e}")
         return False, 0.0, ""
 
 def log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, direction, occ_symbol, order_id, tenant_id='COMPANY_A'):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     trade_id = str(uuid.uuid4())[:8]
 
-    # 1. SQLite Log (with GSG/MTTP guard columns initialized)
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -278,7 +299,6 @@ def log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, 
     except Exception as e:
         log_msg(f"[-] SQLite Log Error: {e}")
 
-    # 2. DynamoDB Log (with GSG/MTTP guard attributes fully populated)
     try:
         dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
         table = dynamodb.Table('HarmonizedTrades')
@@ -307,6 +327,40 @@ def log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, 
         log_msg(f"[✓] DynamoDB synchronized: {ticker} (Receipt ID: {order_id}) -> GSG/MTTP Watch Loops Engaged.")
     except Exception as e:
         log_msg(f"[-] DynamoDB Log Error: {e}")
+
+def monitor_live_exit_telemetry(ticker):
+    """
+    Streams live exit status and PnL telemetry continuously in terminal window until position is CLOSED.
+    """
+    log_msg(f"[📡 TELEMETRY STREAM ENGAGED] Monitoring live watch loop for {ticker} until exit...")
+    ticker_u = ticker.upper()
+    
+    while True:
+        time.sleep(2.5)
+        try:
+            dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
+            table = dynamodb.Table('HarmonizedTrades')
+            res = table.scan(
+                FilterExpression="ticker = :t",
+                ExpressionAttributeValues={":t": ticker_u}
+            )
+            items = res.get('Items', [])
+            if items:
+                latest = max(items, key=lambda x: x.get('timestamp', ''))
+                status = latest.get('exit_status', 'ACTIVE')
+                exit_price = latest.get('exit_price', '0.00')
+                net_pnl = float(latest.get('net_pnl', 0.0) or 0.0)
+                reason = latest.get('cso_reason', latest.get('cso_status', 'ACTIVE'))
+                
+                if status != 'ACTIVE':
+                    pnl_color = "🟢" if net_pnl >= 0 else "🔴"
+                    log_msg(f"[{pnl_color} LIVE EXIT DETECTED] {ticker_u} CLOSED @ ${float(exit_price):.2f} | PnL: ${net_pnl:+.2f} | Reason: {reason}")
+                    return
+                else:
+                    stop_px = latest.get('stop_loss', '0.00')
+                    log_msg(f"[⏱️ ACTIVE WATCH] {ticker_u} running... Active Stop Floor: ${float(stop_px):.2f}")
+        except Exception as e:
+            pass
 
 def resolve_smart_direction(info, spot):
     vwap = float(info.get("vwap", spot))
@@ -417,6 +471,9 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
 
     log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, direction, occ_symbol, order_id)
     log_msg(f"[✓ SUCCESS] Strict Tradier Receipt confirmed and live watch loops engaged for {ticker} {direction}!")
+    
+    # Engagement of continuous live terminal exit telemetry
+    monitor_live_exit_telemetry(ticker)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Strict Receipt Smart CSO Live Trader & Injector")

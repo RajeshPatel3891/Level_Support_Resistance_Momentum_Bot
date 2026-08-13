@@ -1,11 +1,13 @@
 #!/bin/bash
+set -e
+
 echo "=========================================================="
 echo "🚀 LAUNCHING HARMONIZED MULTI-SERVICE TRADING SUITE"
 echo "=========================================================="
 
 echo "[0/10] Cleaning up lingering processes & port bindings..."
-pkill -f python3 2>/dev/null
-fuser -k 8000/tcp 8080/tcp 2>/dev/null
+pkill -f python3 2>/dev/null || true
+fuser -k 8000/tcp 8080/tcp 2>/dev/null || true
 sleep 1
 
 # Trap Ctrl+C (SIGINT) to automatically terminate all background services on exit
@@ -14,9 +16,9 @@ trap "echo '[!] Shutting down all Harmonized daemons...'; pkill -P $$; pkill -f 
 echo "[1/10] Launching Harmonized Dashboard Server IMMEDIATELY (Port 8080)..."
 python3 -u -m uvicorn dashboard_server:app --host 0.0.0.0 --port 8080 &
 
-echo "[2/10] Initializing & Migrating Database Schemas..."
-python3 rebuild_db.py
-python3 preboot_db_fix.py
+echo "[2/10] 🛠️ Executing Pre-Boot Database Migrations..."
+python3 rebuild_db.py || true
+python3 preboot_db_fix.py || true
 
 echo "[2.5/10] 🧪 Executing Master Pre-Flight Unit Test Suite..."
 if python3 test_master_suite.py; then
@@ -50,7 +52,14 @@ echo "[7/10] Launching Proximity DB Engine..."
 while true; do python3 -u proximity_db.py; sleep 2; done &
 
 echo "[8/10] Launching Continuous GEX & MTTP Exit Daemon..."
-while true; do python3 -u run_gex_monitor.py; sleep 2; done &
+while true; do
+    if [ -f "run_gex_monitor.py" ]; then
+        python3 -u run_gex_monitor.py
+    elif [ -f "src/gex_exit_monitor.py" ]; then
+        python3 -u src/gex_exit_monitor.py
+    fi
+    sleep 2
+done &
 
 echo "[9/10] Launching Live DynamoDB GSG Guard & Persisted Recovery Protector..."
 while true; do python3 -u live_gsg_guard.py; sleep 2; done &

@@ -107,7 +107,7 @@ def get_active_positions_from_dynamo():
                 qty = float(item.get('shares', 1.0))
                 if qty <= 0:
                     continue  # Skip short/credit legs for long card rendering
-                
+                 
                 parsed_items.append({
                     'trade_id': str(item.get('trade_id')),
                     'ticker': str(item.get('ticker')),
@@ -128,7 +128,7 @@ def get_active_positions_from_dynamo():
                 })
             except Exception as parse_err:
                 continue
-                
+                 
         return parsed_items
     except Exception as e:
         print(f"[-] Dashboard DynamoDB Read Error: {e}")
@@ -257,7 +257,7 @@ INDEX_HTML_TEMPLATE = """
     <div class="flex items-center justify-between mb-3">
         <h2 class="text-xs font-bold text-gray-400 uppercase tracking-wider">ACTIVE POSITIONS, GEX TARGETS & RISK MATRIX</h2>
     </div>
-    
+     
     <div class="space-y-3 mb-6">
         {% for trade in trades %}
         <div class="bg-gray-900/60 p-3 rounded-xl border {% if trade.near_target %}border-emerald-500 shadow-lg shadow-emerald-950/50{% else %}border-gray-800{% endif %} flex justify-between items-center">
@@ -276,7 +276,7 @@ INDEX_HTML_TEMPLATE = """
                         CSO: {{ trade.cso_recommendation }}
                     </span>
                 </div>
-                
+                 
                 <div class="text-xs text-gray-400">
                     Live: <b class="text-gray-200">{{ trade.price }}</b> | Cost: <b class="text-gray-200">{{ trade.basis }}</b> | Stop: <b class="text-amber-400">{{ trade.stop_display }}</b>
                 </div>
@@ -329,13 +329,13 @@ INDEX_HTML_TEMPLATE = """
                 const data = await res.json();
                 const container = document.getElementById('proximity-container');
                 if (!container) return;
-                
+                 
                 let html = '';
                 for (const [ticker, info] of Object.entries(data)) {
                     const statusBg = info.armed ? 'rgba(0, 230, 118, 0.15)' : 'rgba(255, 255, 255, 0.05)';
                     const statusColor = info.armed ? '#00e676' : '#8f9bba';
                     const statusText = info.armed ? 'ARMED' : 'WAITING';
-                    
+                     
                     html += `
                         <div style="background: #111827; border: 1px solid #1f293d; border-radius: 8px; padding: 12px;">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
@@ -404,17 +404,17 @@ async function adjustTP(ticker, step) {
     if (!ticker) return;
     let el = document.getElementById('tp-val-' + ticker);
     if (!el) return;
-    
-    let match = el.innerText.match(/([+-]?\\d+(\\.\\d+)?)/);
+     
+    let match = el.innerText.match(/([+-]?\d+(\.\d+)?)/);
     let current = match ? parseFloat(match[1]) : 50.0;
-    
+     
     // Lower floor limit to -100.0% so targets can be dialed into stop territory
     let nextVal = Math.max(-100.0, current + step);
-    
+     
     // Format display string (+/-)
     let sign = nextVal > 0 ? '+' : '';
     el.innerText = sign + nextVal.toFixed(1) + '%';
-    
+     
     try {
         let res = await fetch(`/api/update_tp_target/${ticker}/${nextVal}`, { method: 'POST' });
         let data = await res.json();
@@ -492,7 +492,7 @@ def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A'
     occ_symbol = trade['option_symbol'] or trade['occ_symbol']
     entry_cost = float(trade['entry_price'] or 0.0)
     shares = int(trade['shares'] or 1)
-    
+     
     # Query option mark with robust fallback to spot-price estimation
     exit_price = entry_cost * 1.05 # Default slight gain fallback if quote unavailable
     if occ_symbol and len(occ_symbol) > 10:
@@ -536,15 +536,15 @@ def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A'
 def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
     if not selected_date:
         selected_date = datetime.now().strftime('%Y-%m-%d')
-        
+         
     active_trades = fetch_all_active_dynamo_positions()
     db_closed = fetch_closed_dynamo_positions(selected_date)
-    
+     
     # Calculate portfolio capital metrics
     deployed_capital = sum(float(t.get('entry_price', 0.0)) * float(t.get('shares', 1.0)) * 100.0 for t in active_trades)
     total_floating_pnl = sum(float(t.get('net_pnl', 0.0)) for t in active_trades)
     total_closed_pnl = sum(float(t.get('net_pnl', 0.0)) for t in db_closed)
-    
+     
     starting_balance, settled_free, unsettled = fetch_tradier_balances()
     if settled_free == 5565.24 and starting_balance == 6535.24:
         settled_free = starting_balance - deployed_capital
@@ -591,11 +591,11 @@ async def get_proximity():
                 gap_pct = f"{(gap_val / spot * 100.0):.2f}%" if spot > 0 and gex_target > 0 else "0.00%"
                 sup = info.get("support_zone", info.get("support", [0, 0]))
                 res = info.get("resistance_zone", info.get("resistance", [0, 0]))
-                
+                 
                 # Direct Range Evaluation
                 in_sup = (sup[0] <= spot <= sup[1]) if isinstance(sup, list) and len(sup) == 2 and sup[0] > 0 else False
                 in_res = (res[0] <= spot <= res[1]) if isinstance(res, list) and len(res) == 2 and res[0] > 0 else False
-                
+                 
                 current_gap_pct = (gap_val / spot * 100.0) if spot > 0 and gex_target > 0 else 999.0
                 is_armed = bool(info.get('execution_armed')) or in_sup or in_res or (current_gap_pct <= 1.0)
 
@@ -639,7 +639,7 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         opt_cost = float(t.get('entry_price') or t.get('basis') or t.get('cost') or 0.80)
         shares_cnt = float(t.get('shares', 1.0))
         spot_entry = float(t.get('spot_price') or 100.0)
-        
+         
         # Robust Live Spot & OCC Strike Resolution
         occ = str(t.get('occ_symbol', ''))
         strike = float(occ[-8:]) / 1000.0 if (len(occ) >= 15 and occ[-8:].isdigit()) else 0.0
@@ -670,7 +670,7 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         t['rr_border'] = "border-emerald-800" if rr >= 1.5 else "border-gray-700"
 
         t['hit_probability'] = t.get('hit_probability') or "68%"
-        
+         
         # Safe & Crash-Proof CSO Resolution
         raw_pnl_str = str(t.get('net_pnl', 0) or 0).replace('$', '').replace('+', '').strip()
         try:
@@ -697,8 +697,7 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         t['potential_tp_return'] = f"+${reward_per_contract:.1f} ({opt_tp_pct}%)"
         t['potential_sl_risk'] = f"-${risk_per_contract:.1f} ({sl_pct}%)"
 
-        # Local PnL calculation logic
-        # Option PnL Evaluation with Strike Fallback
+        # Local PnL calculation logic (CLEANED OF FAKE SPOT-DIFF ESTIMATION)
         opt_mark = float(t.get('option_mark') or t.get('current_price') or 0.0)
         raw_pnl = float(t.get('net_pnl', 0.0))
 
@@ -706,10 +705,6 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
             dollar_pnl_val = round((opt_mark - opt_cost) * 100.0 * shares_cnt, 2)
         elif raw_pnl != 0.0:
             dollar_pnl_val = raw_pnl
-        elif current_spot > 0 and strike > 0:
-            spot_diff = (current_spot - strike) if 'CALL' in direction else (strike - current_spot)
-            est_mark = max(0.01, opt_cost + (spot_diff * 0.50))
-            dollar_pnl_val = round((est_mark - opt_cost) * 100.0 * shares_cnt, 2)
         else:
             dollar_pnl_val = 0.0
 
@@ -860,7 +855,7 @@ async def close_all_positions():
 async def get_dashboard_data_json():
     try:
         trades, closed, total_pnl, total_closed_pnl, current_date, starting_balance, settled_free, deployed_capital, unsettled = fetch_portfolio_state()
-        
+         
         live_spots = {}
         if os.path.exists('trading_levels.json'):
             try:
@@ -901,10 +896,6 @@ async def get_dashboard_data_json():
                 dollar_pnl_val = round((opt_mark - opt_cost) * 100.0 * shares_cnt, 2)
             elif raw_pnl != 0.0:
                 dollar_pnl_val = raw_pnl
-            elif current_spot > 0 and strike > 0:
-                spot_diff = (current_spot - strike) if 'CALL' in direction else (strike - current_spot)
-                est_mark = max(0.01, opt_cost + (spot_diff * 0.50))
-                dollar_pnl_val = round((est_mark - opt_cost) * 100.0 * shares_cnt, 2)
             else:
                 dollar_pnl_val = 0.0
 

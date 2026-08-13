@@ -158,11 +158,17 @@ def sync_local_sqlite_exit(t_id, ticker, exit_reason, exit_price, exit_timestamp
             conn = sqlite3.connect(db_file, timeout=5.0)
             cursor = conn.cursor()
             status = exit_reason if remaining_shares == 0 else "SMART_CSO_RUNNER"
+            ticker_u = ticker.upper()
             if dynamic_stop is not None:
-                cursor.execute("UPDATE trades SET stop_loss = ? WHERE id = ? OR ticker = ?", (dynamic_stop, t_id, ticker))
+                cursor.execute(
+                    "UPDATE trades SET stop_loss = ? WHERE (id = ? OR UPPER(ticker) = ?) AND (UPPER(exit_status) = 'ACTIVE' OR UPPER(exit_status) LIKE '%TRIGGERED%')",
+                    (dynamic_stop, t_id, ticker_u)
+                )
             cursor.execute(
-                "UPDATE trades SET exit_status = ?, exit_price = ?, exit_timestamp = ?, net_pnl = ?, shares = ? WHERE id = ? OR ticker = ?",
-                (status, exit_price, exit_timestamp, net_pnl, remaining_shares, t_id, ticker)
+                """UPDATE trades 
+                   SET exit_status = ?, exit_price = ?, exit_timestamp = ?, net_pnl = ?, shares = ?, cso_status = ? 
+                   WHERE (id = ? OR UPPER(ticker) = ?) AND (UPPER(exit_status) = 'ACTIVE' OR UPPER(exit_status) LIKE '%TRIGGERED%' OR id = ?)""",
+                (status, exit_price, exit_timestamp, net_pnl, remaining_shares, exit_reason, t_id, ticker_u, t_id)
             )
             conn.commit()
             conn.close()
@@ -199,7 +205,7 @@ def evaluate_gex_exits():
             total_shares = int(float(item.get('shares', 1.0)))
             ts_str = item.get('timestamp')
             trade_dir = item.get('direction', 'CALL')
-            stored_peak = float(item.get('peak_price', entry_price) or entry_price)
+            stored_peak = float(item.get('peak_price', 0.0) or entry_price)
             is_runner = bool(item.get('is_runner', False))
             accumulated_pnl = float(item.get('partial_pnl', 0.0) or 0.0)
 
@@ -226,7 +232,7 @@ def evaluate_gex_exits():
             pnl_pct = ((current_price - entry_price) / entry_price) * 100.0 if entry_price > 0 else 0.0
 
             # ------------------------------------------------------------------
-            # FEATURE 1: Persist min_pnl_seen (Yesterday's Drawdown Tracker)
+            # FEATURE 1: Persist min_pnl_seen
             # ------------------------------------------------------------------
             raw_min_seen = item.get('min_pnl_seen')
             if raw_min_seen is None:
@@ -249,24 +255,32 @@ def evaluate_gex_exits():
                     min_seen = db_min_seen
 
             # ------------------------------------------------------------------
-            # FEATURE 2: High-Water Mark Peak PnL Tracking (Today's Engine)
+            # FEATURE 2: High-Water Mark Peak PnL Tracking & Dynamic Stop Floor
             # ------------------------------------------------------------------
             peak_price = max(stored_peak, current_price)
             peak_pnl_pct = ((peak_price - entry_price) / entry_price) * 100.0 if entry_price > 0 else 0.0
 
-            # --- DYNAMIC TRAILING STOP DOLLAR CALCULATION ---
+            # Force Dynamic High-Water Trail Lock
             if is_runner:
                 cushion = 12.0 if peak_pnl_pct >= 100.0 else 10.0
                 dynamic_stop_pct = max(3.0, peak_pnl_pct - cushion)
                 dynamic_stop = round(entry_price * (1.0 + dynamic_stop_pct / 100.0), 2)
             elif peak_pnl_pct >= 35.0:
-                dynamic_stop = round(entry_price * (1.0 + (peak_pnl_pct - 10.0) / 100.0), 2)
-            elif peak_pnl_pct >= 20.0:
-                dynamic_stop = round(entry_price * (1.0 + (peak_pnl_pct - 10.0) / 100.0), 2)
-            elif peak_pnl_pct >= 12.0:
-                dynamic_stop = round(entry_price * 1.03, 2)
+                dynamic_stop = round(peak_price - 0.06, 2)
+            elif peak_pnl_pct >= 25.0:
+                dynamic_stop = round(peak_price - 0.04, 2)
+            elif peak_pnl_pct >= 15.0:
+                dynamic_stop = round(peak_price - 0.03, 2)
+            elif peak_pnl_pct >= 10.0:
+                # Force instant break-even + buffer as soon as trade hits +10% peak
+                dynamic_stop = round(entry_price * 1.05, 2)
             else:
                 dynamic_stop = round(entry_price * 0.80, 2)
+
+            # Enforce non-decreasing stop floor (Stop Loss can only ratchet UP)
+            existing_sl = float(item.get('stop_loss', 0.0) or 0.0)
+            if existing_sl > dynamic_stop:
+                dynamic_stop = existing_sl
 
             # Persist Peak Price, Dynamic Stop Loss & Min PnL to DynamoDB
             table.update_item(
@@ -283,10 +297,10 @@ def evaluate_gex_exits():
             print(f"[⚙️ MASTER EXIT] {ticker} | {total_shares}x | Entry: ${entry_price:.2f} | Live: ${current_price:.2f} ({pnl_pct:+.1f}%) | Peak: ${peak_price:.2f} (+{peak_pnl_pct:.1f}%) | Active Stop: ${dynamic_stop:.2f} | Min Seen: ${min_seen:+.2f}")
 
             # ------------------------------------------------------------------
-            # FEATURE 3: Red-to-Green Recovery Exit (Bail out if trade dipped)
+            # FEATURE 3: Red-to-Green Recovery Exit (Bypass IF trade hit +5% peak)
             # ------------------------------------------------------------------
-            if min_seen < 0.0 and dollar_pnl >= 1.00:
-                print(f"🛡️ [GSG RECOVERY EXIT] {ticker} dipped red (${min_seen:.2f}) & recovered to green (+${dollar_pnl:.2f}). CLOSING!")
+            if min_seen < 0.0 and dollar_pnl >= 1.00 and peak_pnl_pct < 5.0:
+                print(f"🛡️ [GSG RECOVERY EXIT] {ticker} dipped red (${min_seen:.2f}) & recovered. CLOSING BEFORE PEAK!")
                 if execute_tradier_close(occ_symbol, ticker, total_shares, active_base_url):
                     table.update_item(
                         Key={'tenant_id': tenant_id, 'trade_id': t_id},
@@ -365,4 +379,4 @@ if __name__ == "__main__":
     print("[⚙️] Unified CSO Master Exit Monitor Routine Initialized.")
     while True:
         evaluate_gex_exits()
-        time.sleep(10)
+        time.sleep(3)

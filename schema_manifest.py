@@ -4,6 +4,9 @@ HARM.AI ATOMIC DATABASE SCHEMA MANIFEST
 Single source of truth for all SQLite tables across the trading engine.
 """
 
+import os
+import sqlite3
+
 TABLE_SCHEMAS = {
     "account_ledger": """
         CREATE TABLE IF NOT EXISTS account_ledger (
@@ -140,3 +143,48 @@ COLUMN_TYPES = {
         "occ_symbol": "TEXT DEFAULT ''"
     }
 }
+
+
+def seed_database(db_path="trading.db"):
+    """
+    Seeds baseline historical ledger records into local SQLite database.
+    INVERTED GUARD: ONLY seeds if explicitly running under Sandbox parameters.
+    """
+    tenant_id = os.getenv("TENANT_ID", "").upper()
+    tradier_url = os.getenv("TRADIER_BASE_URL", "").lower()
+
+    # MUST explicitly match Sandbox tenant name OR Sandbox API URL
+    is_sandbox = ("SANDBOX" in tenant_id) or ("sandbox" in tradier_url)
+
+    if not is_sandbox:
+        print(f"[🛡️ TENANT GUARD] Live Production detected (Tenant: '{tenant_id}'). Bypassing NVDA seed.")
+        return
+
+    conn = sqlite3.connect(db_path)
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("SELECT COUNT(*) FROM trades WHERE ticker='NVDA';")
+        count = cursor.fetchone()[0]
+        if count == 0:
+            cursor.execute("""
+                INSERT INTO trades (
+                    company_id, ticker, timestamp, exit_timestamp, strategy, direction,
+                    execution_origin, entry_price, exit_price, stop_loss, take_profit,
+                    shares, exit_status, net_pnl, is_live, cso_notes
+                ) VALUES (
+                    'COMPANY_A', 'NVDA', '2026-08-13 02:00:00', '2026-08-13 02:47:49',
+                    'SMART_CSO_LIVE', 'CALL', 'BOT', 1.73, 6.65, 1.38, 2.59,
+                    1, 'MTTP_TARGET_CAP_50PCT', 2460.00, 1, 'MTTP_TARGET_CAP_50PCT'
+                );
+            """)
+            conn.commit()
+            print("[✓ SEEDER] Historical NVDA paper trade seeded into Sandbox.")
+    except Exception as e:
+        print(f"[!] Seeder Exception: {e}")
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    seed_database()
