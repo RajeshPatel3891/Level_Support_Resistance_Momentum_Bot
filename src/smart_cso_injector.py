@@ -6,7 +6,8 @@ Scans trading_levels.json, evaluates proximity/safety and support/resistance
 boundaries, resolves directional bias (Call vs Put), performs smart option chain
 liquidity & spread searches via Tradier API, enforces strict execution receipts, 
 and synchronizes with both SQLite and AWS DynamoDB with live GSG/MTTP bindings.
-Now features continuous real-time terminal exit telemetry streaming!
+Now features continuous real-time terminal exit telemetry streaming and dynamic
+execution environment tagging (PRODUCTION vs SANDBOX).
 """
 
 import os
@@ -283,19 +284,30 @@ def log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     trade_id = str(uuid.uuid4())[:8]
 
+    # Determine execution environment mode dynamically from env
+    exec_env = os.getenv("EXECUTION_ENV", "SANDBOX").upper()
+    is_live_flag = 1 if exec_env in ["PROD", "PRODUCTION", "LIVE"] else 0
+
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+        
+        # Ensure execution_env column exists in SQLite table schema
+        cursor.execute("PRAGMA table_info(trades)")
+        columns = [column[1] for column in cursor.fetchall()]
+        if 'execution_env' not in columns:
+            cursor.execute("ALTER TABLE trades ADD COLUMN execution_env TEXT DEFAULT 'SANDBOX'")
+        
         cursor.execute('''
             INSERT INTO trades (
                 ticker, timestamp, strategy, direction, spot_price, 
                 entry_price, exit_status, stop_loss, take_profit, shares, occ_symbol, is_live,
-                gsg_status, mttp_status, cso_status
-            ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, 1, 'ARMED', 'ACTIVE_45M_GUARD', 'HOLD')
-        ''', (ticker, timestamp, 'SMART_CSO_LIVE', direction, spot, fill_price, stop_loss, take_profit, shares, occ_symbol))
+                gsg_status, mttp_status, cso_status, execution_env
+            ) VALUES (?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, 'ARMED', 'ACTIVE_45M_GUARD', 'HOLD', ?)
+        ''', (ticker, timestamp, 'SMART_CSO_LIVE', direction, spot, fill_price, stop_loss, take_profit, shares, occ_symbol, is_live_flag, exec_env))
         conn.commit()
         conn.close()
-        log_msg(f"[✓] SQLite logged active position for {ticker} with active GSG/MTTP guards.")
+        log_msg(f"[✓] SQLite logged active position for {ticker} (Env: {exec_env}, IsLive: {is_live_flag}) with active GSG/MTTP guards.")
     except Exception as e:
         log_msg(f"[-] SQLite Log Error: {e}")
 
@@ -316,7 +328,8 @@ def log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, 
             'take_profit': str(take_profit),
             'net_pnl': '0.0',
             'exit_status': 'ACTIVE',
-            'is_live': 1,
+            'is_live': is_live_flag,
+            'execution_env': exec_env,
             'occ_symbol': occ_symbol,
             'gsg_status': 'ARMED',
             'mttp_status': 'ACTIVE_45M_GUARD',
@@ -324,7 +337,7 @@ def log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, 
             'order_id': str(order_id)
         }
         table.put_item(Item=item)
-        log_msg(f"[✓] DynamoDB synchronized: {ticker} (Receipt ID: {order_id}) -> GSG/MTTP Watch Loops Engaged.")
+        log_msg(f"[✓] DynamoDB synchronized: {ticker} (Receipt ID: {order_id}, Env: {exec_env}) -> GSG/MTTP Watch Loops Engaged.")
     except Exception as e:
         log_msg(f"[-] DynamoDB Log Error: {e}")
 

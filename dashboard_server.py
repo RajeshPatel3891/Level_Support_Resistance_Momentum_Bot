@@ -1,3 +1,38 @@
+import os
+import sys
+import json
+import sqlite3
+import requests
+import tempfile
+import traceback
+import subprocess
+import pandas as pd
+from datetime import datetime, date, timedelta
+from fastapi import FastAPI, Request, Query
+from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse, RedirectResponse
+from jinja2 import Template
+from dotenv import load_dotenv
+import boto3
+from boto3.dynamodb.conditions import Attr
+
+load_dotenv()
+
+# Environment Isolation Settings
+CURRENT_ENV = os.getenv("EXECUTION_ENV", "PRODUCTION").upper()
+TARGET_IS_LIVE = 1 if CURRENT_ENV in ["PROD", "PRODUCTION", "LIVE"] else 0
+DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'harm_telemetry.db')
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if CURRENT_DIR not in sys.path:
+    sys.path.append(CURRENT_DIR)
+
+from src.RiskEngine import (
+    calculate_gex_hit_probability,
+    calculate_risk_return_dollars,
+    resolve_direction_targets,
+    evaluate_cso_informed_exit
+)
+
 def resolve_trade_direction(item):
     """Safely resolves trade direction (CALL/PUT) with OCC symbol parsing fallback."""
     raw_dir = str(item.get('direction') or '').strip().upper()
@@ -18,12 +53,17 @@ def resolve_trade_direction(item):
 
 
 def fetch_closed_dynamo_positions(selected_date=None):
-    import boto3, os
-    from boto3.dynamodb.conditions import Attr
+    """Fetch closed positions from DynamoDB matching the current host environment."""
     try:
         dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
         table = dynamodb.Table('HarmonizedTrades')
-        res = table.scan(FilterExpression=Attr('exit_status').ne('ACTIVE'))
+        
+        # Build filter: exit_status != ACTIVE AND (execution_env == CURRENT_ENV OR is_live == TARGET_IS_LIVE)
+        filter_expr = Attr('exit_status').ne('ACTIVE') & (
+            Attr('execution_env').eq(CURRENT_ENV) | Attr('is_live').eq(TARGET_IS_LIVE)
+        )
+        
+        res = table.scan(FilterExpression=filter_expr)
         raw_items = res.get('Items', [])
         parsed = []
         for item in raw_items:
@@ -52,12 +92,17 @@ def fetch_closed_dynamo_positions(selected_date=None):
 
 
 def fetch_all_active_dynamo_positions():
-    import boto3, os
-    from boto3.dynamodb.conditions import Attr
+    """Fetch active positions from DynamoDB matching the current host environment."""
     try:
         dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
         table = dynamodb.Table('HarmonizedTrades')
-        res = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE'))
+        
+        # Build filter: exit_status == ACTIVE AND (execution_env == CURRENT_ENV OR is_live == TARGET_IS_LIVE)
+        filter_expr = Attr('exit_status').eq('ACTIVE') & (
+            Attr('execution_env').eq(CURRENT_ENV) | Attr('is_live').eq(TARGET_IS_LIVE)
+        )
+        
+        res = table.scan(FilterExpression=filter_expr)
         raw_items = res.get('Items', [])
         
         parsed = []
@@ -80,7 +125,7 @@ def fetch_all_active_dynamo_positions():
                     'take_profit': float(item.get('take_profit', round(entry_price * 1.50, 2))),
                     'net_pnl': float(item.get('net_pnl', 0.0)),
                     'exit_status': 'ACTIVE',
-                    'is_live': int(item.get('is_live', 1)),
+                    'is_live': int(item.get('is_live', TARGET_IS_LIVE)),
                     'occ_symbol': str(item.get('occ_symbol', item.get('ticker'))),
                     'cso_notes': item.get('cso_notes') or item.get('cso_reason'),
                     'cso_recommendation': item.get('cso_recommendation') or item.get('cso_status')
@@ -97,17 +142,19 @@ def get_active_positions_from_dynamo():
     try:
         dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
         table = dynamodb.Table('HarmonizedTrades')
-        res = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE'))
+        filter_expr = Attr('exit_status').eq('ACTIVE') & (
+            Attr('execution_env').eq(CURRENT_ENV) | Attr('is_live').eq(TARGET_IS_LIVE)
+        )
+        res = table.scan(FilterExpression=filter_expr)
         raw_items = res.get('Items', [])
         
         parsed_items = []
         for item in raw_items:
             try:
-                # Convert DynamoDB string fields to floats/ints for dashboard math
                 qty = float(item.get('shares', 1.0))
                 if qty <= 0:
-                    continue  # Skip short/credit legs for long card rendering
-                 
+                    continue  # Skip short/credit legs
+                  
                 parsed_items.append({
                     'trade_id': str(item.get('trade_id')),
                     'ticker': str(item.get('ticker')),
@@ -121,14 +168,14 @@ def get_active_positions_from_dynamo():
                     'take_profit': float(item.get('take_profit', 0.0)),
                     'net_pnl': float(item.get('net_pnl', 0.0)),
                     'exit_status': 'ACTIVE',
-                    'is_live': int(item.get('is_live', 1)),
+                    'is_live': int(item.get('is_live', TARGET_IS_LIVE)),
                     'occ_symbol': str(item.get('occ_symbol', item.get('ticker'))),
                     'cso_notes': item.get('cso_notes') or item.get('cso_reason'),
                     'cso_recommendation': item.get('cso_recommendation') or item.get('cso_status')
                 })
-            except Exception as parse_err:
+            except Exception:
                 continue
-                 
+                  
         return parsed_items
     except Exception as e:
         print(f"[-] Dashboard DynamoDB Read Error: {e}")
@@ -138,15 +185,14 @@ def get_dynamo_active_trades():
     try:
         dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
         table = dynamodb.Table('HarmonizedTrades')
-        res = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE'))
+        filter_expr = Attr('exit_status').eq('ACTIVE') & (
+            Attr('execution_env').eq(CURRENT_ENV) | Attr('is_live').eq(TARGET_IS_LIVE)
+        )
+        res = table.scan(FilterExpression=filter_expr)
         return res.get('Items', [])
     except Exception as e:
         print(f"[-] Dashboard DynamoDB Read Error: {e}")
         return []
-
-import os
-import json
-import tempfile
 
 def atomic_json_dump(data, filepath):
     dir_name = os.path.dirname(os.path.abspath(filepath)) or '.'
@@ -155,36 +201,9 @@ def atomic_json_dump(data, filepath):
         temp_name = tf.name
     os.replace(temp_name, filepath)
 
-from datetime import datetime, timedelta
-import sys
-import sqlite3
-import os
-import requests
-import traceback
-import json
-import pandas as pd
-from datetime import datetime, date
-from fastapi import FastAPI, Request, Query
-from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse, RedirectResponse
-from jinja2 import Template
-from dotenv import load_dotenv
-
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-if CURRENT_DIR not in sys.path:
-    sys.path.append(CURRENT_DIR)
-
-from src.RiskEngine import (
-    calculate_gex_hit_probability,
-    calculate_risk_return_dollars,
-    resolve_direction_targets,
-    evaluate_cso_informed_exit
-)
-
-load_dotenv()
-
 app = FastAPI(title="HARM.AI Mobile Matrix Gateway")
 
-INDEX_HTML_TEMPLATE = """
+INDEX_HTML_TEMPLATE = r"""
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -260,58 +279,62 @@ INDEX_HTML_TEMPLATE = """
      
     <div class="space-y-3 mb-6">
         {% for trade in trades %}
-        <div class="bg-gray-900/60 p-3 rounded-xl border {% if trade.near_target %}border-emerald-500 shadow-lg shadow-emerald-950/50{% else %}border-gray-800{% endif %} flex justify-between items-center">
-            <div class="space-y-1">
-                <div class="flex items-center space-x-2">
-                    <span class="font-black text-sm">{{ trade.ticker }}</span>
-                    <span class="text-[10px] {% if trade.direction == 'PUT' %}bg-rose-950 text-rose-300 border border-rose-800{% else %}bg-emerald-950 text-emerald-300 border border-emerald-800{% endif %} px-1.5 py-0.5 rounded font-bold uppercase">{{ trade.direction or 'CALL' }}</span>
-                    <span class="text-[9px] bg-purple-950 text-purple-300 border border-purple-800 px-1.5 py-0.5 rounded font-bold">
-                        PROB: {{ trade.hit_probability }}
-                    </span>
-                    <span class="text-[9px] {{ trade.rr_bg }} {{ trade.rr_text }} {{ trade.rr_border }} border px-1.5 py-0.5 rounded font-bold">
-                        R:R {{ trade.rr_ratio }}
-                    </span>
-                    <!-- CSO Dynamic Recommendation Badge -->
-                    <span class="text-[9px] {{ trade.cso_badge_bg }} {{ trade.cso_badge_text }} px-1.5 py-0.5 rounded font-black tracking-wide">
-                        CSO: {{ trade.cso_recommendation }}
-                    </span>
-                </div>
-                 
-                <div class="text-xs text-gray-400">
-                    Live: <b class="text-gray-200">{{ trade.price }}</b> | Cost: <b class="text-gray-200">{{ trade.basis }}</b> | Stop: <b class="text-amber-400">{{ trade.stop_display }}</b>
+        <div class="bg-gray-900/60 p-3 rounded-xl border {% if trade.near_target %}border-emerald-500 shadow-lg shadow-emerald-950/50{% else %}border-gray-800{% endif %} flex flex-col gap-2">
+            <div class="flex justify-between items-center w-full">
+                <div class="space-y-1">
+                    <div class="flex items-center space-x-2">
+                        <span class="font-black text-sm">{{ trade.ticker }}</span>
+                        <span class="text-[10px] {% if trade.direction == 'PUT' %}bg-rose-950 text-rose-300 border border-rose-800{% else %}bg-emerald-950 text-emerald-300 border border-emerald-800{% endif %} px-1.5 py-0.5 rounded font-bold uppercase">{{ trade.direction or 'CALL' }}</span>
+                        <span class="text-[9px] bg-purple-950 text-purple-300 border border-purple-800 px-1.5 py-0.5 rounded font-bold">
+                            PROB: {{ trade.hit_probability }}
+                        </span>
+                        <span class="text-[9px] {{ trade.rr_bg }} {{ trade.rr_text }} {{ trade.rr_border }} border px-1.5 py-0.5 rounded font-bold">
+                            R:R {{ trade.rr_ratio }}
+                        </span>
+                        <span class="text-[9px] {{ trade.cso_badge_bg }} {{ trade.cso_badge_text }} px-1.5 py-0.5 rounded font-black tracking-wide">
+                            CSO: {{ trade.cso_recommendation }}
+                        </span>
+                    </div>
+                     
+                    <div class="text-xs text-gray-400">
+                        Live: <b class="text-gray-200">{{ trade.price }}</b> | Cost: <b class="text-gray-200">{{ trade.basis }}</b> | Stop: <b class="text-amber-400">{{ trade.stop_display }}</b>
+                    </div>
+
+                    <div class="text-[11px] text-purple-400">
+                        GEX Target: <strong class="text-purple-300">{{ trade.gex_target_str }}</strong> 
+    <span class="inline-flex items-center gap-1 bg-purple-950/60 border border-purple-500/40 rounded px-1.5 py-0.5 text-[10px] ml-1">
+        <button type="button" onclick="adjustTP('{{ trade.ticker }}', -1.0)" class="text-purple-300 hover:text-white font-bold px-1 hover:bg-purple-800/50 rounded transition-colors">-</button>
+        <span id="tp-val-{{ trade.ticker }}" class="text-purple-300 font-bold">(Dist: {{ trade.gex_dist }})</span>
+        <button type="button" onclick="adjustTP('{{ trade.ticker }}', 1.0)" class="text-purple-300 hover:text-white font-bold px-1 hover:bg-purple-800/50 rounded transition-colors">+</button>
+    </span>
+                    </div>
+
+                    <div class="flex items-center space-x-3 text-[10px] pt-1 border-t border-gray-800/80">
+                        <span class="text-emerald-400 font-bold">
+                            🎯 TP Return: {{ trade.potential_tp_return }}
+                        </span>
+                        <span class="text-red-400 font-bold">
+                            🛑 SL Risk: {{ trade.potential_sl_risk }}
+                        </span>
+                        <button type="button" onclick="toggleActiveStream('{{ trade.ticker }}')" class="bg-indigo-950 hover:bg-indigo-900 text-indigo-300 border border-indigo-800 text-[9px] px-1.5 py-0.5 rounded font-bold uppercase transition-colors">
+                            📡 LOGS
+                        </button>
+                    </div>
                 </div>
 
-                <div class="text-[11px] text-purple-400">
-                    GEX Target: <strong class="text-purple-300">{{ trade.gex_target_str }}</strong> 
-<span class="inline-flex items-center gap-1 bg-purple-950/60 border border-purple-500/40 rounded px-1.5 py-0.5 text-[10px] ml-1">
-    <button type="button" onclick="adjustTP('{{ trade.ticker }}', -1.0)" class="text-purple-300 hover:text-white font-bold px-1 hover:bg-purple-800/50 rounded transition-colors">-</button>
-    <span id="tp-val-{{ trade.ticker }}" class="text-purple-300 font-bold">(Dist: {{ trade.gex_dist }})</span>
-    <button type="button" onclick="adjustTP('{{ trade.ticker }}', 1.0)" class="text-purple-300 hover:text-white font-bold px-1 hover:bg-purple-800/50 rounded transition-colors">+</button>
-</span>
-                </div>
-
-                <!-- Explicit Dollar Risk & Return Overlay -->
-                <div class="flex items-center space-x-3 text-[10px] pt-1 border-t border-gray-800/80">
-                    <span class="text-emerald-400 font-bold">
-                        🎯 TP Return: {{ trade.potential_tp_return }}
-                    </span>
-                    <span class="text-red-400 font-bold">
-                        🛑 SL Risk: {{ trade.potential_sl_risk }}
-                    </span>
+                <div class="text-right flex items-center space-x-3">
+                    <div>
+                        <div class="font-bold text-sm {{ trade.pnl_class }}">{{ trade.dollar_pnl }}</div>
+                        <div class="text-[10px] {{ trade.pnl_class }}">{{ trade.pnl_pct }}</div>
+                    </div>
+                    <form action="/close-position/{{ trade.ticker }}" method="POST" onsubmit="return confirm('Close {{ trade.ticker }} position?');">
+                        <button type="submit" class="bg-red-950/80 hover:bg-red-800 text-red-300 border border-red-800 text-[10px] px-2 py-1 rounded font-bold uppercase">
+                            Close
+                        </button>
+                    </form>
                 </div>
             </div>
-
-            <div class="text-right flex items-center space-x-3">
-                <div>
-                    <div class="font-bold text-sm {{ trade.pnl_class }}">{{ trade.dollar_pnl }}</div>
-                    <div class="text-[10px] {{ trade.pnl_class }}">{{ trade.pnl_pct }}</div>
-                </div>
-                <form action="/close-position/{{ trade.ticker }}" method="POST" onsubmit="return confirm('Close {{ trade.ticker }} position?');">
-                    <button type="submit" class="bg-red-950/80 hover:bg-red-800 text-red-300 border border-red-800 text-[10px] px-2 py-1 rounded font-bold uppercase">
-                        Close
-                    </button>
-                </form>
-            </div>
+            <pre id="active-console-{{ trade.ticker }}" class="hidden p-2 bg-black text-emerald-400 font-mono text-[10px] rounded max-h-36 overflow-y-auto whitespace-pre-wrap leading-tight border border-gray-800 text-left w-full"></pre>
         </div>
         {% endfor %}
     </div>
@@ -323,6 +346,39 @@ INDEX_HTML_TEMPLATE = """
     </div>
 
     <script>
+        let activeStreams = {};
+
+        function toggleActiveStream(ticker) {
+            const consoleDiv = document.getElementById(`active-console-${ticker}`);
+            if (!consoleDiv) return;
+
+            if (!consoleDiv.classList.contains('hidden')) {
+                consoleDiv.classList.add('hidden');
+                if (activeStreams[ticker]) {
+                    activeStreams[ticker].close();
+                    delete activeStreams[ticker];
+                }
+                return;
+            }
+
+            consoleDiv.classList.remove('hidden');
+            consoleDiv.innerHTML = `> Connecting to live telemetry stream for ${ticker}...\n`;
+
+            const eventSource = new EventSource(`/api/position_stream/${ticker}`);
+            activeStreams[ticker] = eventSource;
+
+            eventSource.onmessage = function(event) {
+                consoleDiv.innerHTML += event.data + "\n";
+                consoleDiv.scrollTop = consoleDiv.scrollHeight;
+            };
+
+            eventSource.onerror = function() {
+                consoleDiv.innerHTML += "\n[📡 TELEMETRY STREAM PAUSED]";
+                eventSource.close();
+                delete activeStreams[ticker];
+            };
+        }
+
         async function fetchProximity() {
             try {
                 const res = await fetch('/api/proximity');
@@ -335,12 +391,22 @@ INDEX_HTML_TEMPLATE = """
                     const statusBg = info.armed ? 'rgba(0, 230, 118, 0.15)' : 'rgba(255, 255, 255, 0.05)';
                     const statusColor = info.armed ? '#00e676' : '#8f9bba';
                     const statusText = info.armed ? 'ARMED' : 'WAITING';
+                    
+                    const injectBtn = info.armed ? `
+                        <button id="btn-inject-${ticker}" onclick="triggerUiInjectStream('${ticker}')" 
+                                class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] px-2 py-1 rounded transition-colors ml-2">
+                            ⚡ INJECT
+                        </button>
+                    ` : '';
                      
                     html += `
                         <div style="background: #111827; border: 1px solid #1f293d; border-radius: 8px; padding: 12px;">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                                 <span style="font-weight: 800; font-size: 16px; color: #ffffff;">${ticker}</span>
-                                <span style="background: ${statusBg}; color: ${statusColor}; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 4px;">${statusText}</span>
+                                <div>
+                                    <span style="background: ${statusBg}; color: ${statusColor}; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 4px;">${statusText}</span>
+                                    ${injectBtn}
+                                </div>
                             </div>
                             <div style="font-size: 12px; color: #8f9bba; display: flex; justify-content: space-between; margin-bottom: 4px;">
                                 <span>Spot: <strong style="color: #fff;">$${info.spot.toFixed(2)}</strong></span>
@@ -350,6 +416,7 @@ INDEX_HTML_TEMPLATE = """
                                 <span>Target: <strong style="color: #3b82f6;">${info.target}</strong></span>
                                 <span>Gap: <strong style="color: #ffb74d;">${info.gap_dollars} (${info.gap_pct})</strong></span>
                             </div>
+                            <pre id="console-${ticker}" class="hidden mt-2 p-2 bg-black text-emerald-400 font-mono text-[10px] rounded max-h-36 overflow-y-auto whitespace-pre-wrap leading-tight border border-gray-800 text-left"></pre>
                         </div>
                     `;
                 }
@@ -358,6 +425,79 @@ INDEX_HTML_TEMPLATE = """
                 console.error("Proximity fetch error:", e);
             }
         }
+
+        function triggerUiInjectStream(ticker) {
+            const btn = document.getElementById(`btn-inject-${ticker}`);
+            if (btn) {
+                btn.disabled = true;
+                btn.innerText = "⏳ EXECUTING...";
+                btn.className = "bg-amber-600 text-white font-bold text-[10px] px-2 py-1 rounded cursor-not-allowed ml-2";
+            }
+
+            const consoleDiv = document.getElementById(`console-${ticker}`);
+            if (consoleDiv) {
+                consoleDiv.classList.remove('hidden');
+                consoleDiv.innerHTML = `> Initiating execution stream for ${ticker}...\n`;
+            }
+
+            const eventSource = new EventSource(`/api/inject_stream/${ticker}`);
+
+            eventSource.onmessage = function(event) {
+                if (consoleDiv) {
+                    consoleDiv.innerHTML += event.data;
+                    consoleDiv.scrollTop = consoleDiv.scrollHeight;
+                }
+            };
+
+            eventSource.onerror = function() {
+                if (consoleDiv) {
+                    consoleDiv.innerHTML += "\n[✓ STREAM CLOSED / POSITION LOCKED]\n";
+                }
+                eventSource.close();
+                if (btn) {
+                    btn.innerText = "✓ EXECUTED";
+                    btn.className = "bg-blue-600 text-white font-bold text-[10px] px-2 py-1 rounded ml-2";
+                }
+                setTimeout(() => window.location.reload(), 2000);
+            };
+        }
+
+        async function triggerUiInject(ticker) {
+            const btn = document.getElementById(`btn-inject-${ticker}`);
+            if (btn) {
+                btn.disabled = true;
+                btn.innerText = "⏳ EXECUTING...";
+                btn.className = "bg-amber-600 text-white font-bold text-[10px] px-2 py-1 rounded cursor-not-allowed ml-2";
+            }
+
+            try {
+                const res = await fetch(`/api/inject/${ticker}`, { method: 'POST' });
+                const data = await res.json();
+                
+                if (data.status === "success") {
+                    if (btn) {
+                        btn.innerText = "✓ FILLED";
+                        btn.className = "bg-blue-600 text-white font-bold text-[10px] px-2 py-1 rounded ml-2";
+                    }
+                    setTimeout(() => window.location.reload(), 1500);
+                } else {
+                    alert(`Execution Alert for ${ticker}: ${data.error || data.detail || 'Failed'}`);
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.innerText = "⚡ INJECT";
+                        btn.className = "bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] px-2 py-1 rounded transition-colors ml-2";
+                    }
+                }
+            } catch (err) {
+                console.error("Injection failed:", err);
+                if (btn) {
+                    btn.disabled = false;
+                    btn.innerText = "⚡ INJECT";
+                    btn.className = "bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] px-2 py-1 rounded transition-colors ml-2";
+                }
+            }
+        }
+
         fetchProximity();
         setInterval(fetchProximity, 3000);
     </script>
@@ -372,7 +512,7 @@ INDEX_HTML_TEMPLATE = """
               <span class="font-bold text-white text-lg">{{ trade.ticker }}</span>
               <span class="text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-300 font-mono">{{ trade.direction }}</span>
               <span class="text-xs font-bold font-mono text-emerald-400">{{ trade.dollar_pnl }}</span>
-          <span class="text-xs px-2 py-0.5 rounded bg-amber-950 text-amber-400 font-mono border border-amber-800/80 font-bold">{{ trade.contracts }}x</span>
+              <span class="text-xs px-2 py-0.5 rounded bg-amber-950 text-amber-400 font-mono border border-amber-800/80 font-bold">{{ trade.contracts }}x</span>
               <span class="text-xs px-2 py-0.5 rounded bg-blue-950 text-blue-400 font-mono border border-blue-800">{{ trade.status }}</span>
             </div>
             <div class="text-right">
@@ -381,7 +521,6 @@ INDEX_HTML_TEMPLATE = """
             </div>
           </div>
 
-          <!-- Rich Telemetry Sub-Panel -->
           <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs bg-slate-950 p-2 rounded border border-slate-800/60 font-mono">
             <div><span class="text-slate-500">Strategy:</span> <span class="text-slate-300">{{ trade.strategy }}</span></div>
             <div><span class="text-slate-500">Entry/Exit:</span> <span class="text-slate-300">{{ trade.entry_price }} / {{ trade.exit_price }}</span></div>
@@ -389,7 +528,6 @@ INDEX_HTML_TEMPLATE = """
             <div><span class="text-slate-500">Target:</span> <span class="text-emerald-400">{{ trade.take_profit }}</span></div>
           </div>
 
-          <!-- CSO Reason Overlay -->
           <div class="text-xs bg-slate-950/80 px-2 py-1 rounded border border-slate-800/40 text-slate-400 font-mono flex items-center gap-1">
             <span class="text-amber-400 font-bold">📝 CSO Reason:</span> 
             <span class="text-slate-300">{{ trade.cso_notes }}</span>
@@ -408,10 +546,7 @@ async function adjustTP(ticker, step) {
     let match = el.innerText.match(/([+-]?\d+(\.\d+)?)/);
     let current = match ? parseFloat(match[1]) : 50.0;
      
-    // Lower floor limit to -100.0% so targets can be dialed into stop territory
     let nextVal = Math.max(-100.0, current + step);
-     
-    // Format display string (+/-)
     let sign = nextVal > 0 ? '+' : '';
     el.innerText = sign + nextVal.toFixed(1) + '%';
      
@@ -447,7 +582,6 @@ def get_live_quote(symbol):
         print(f"Tradier fetch error: {e}")
     return {}
 
-
 def fetch_tradier_balances():
     token = os.getenv("TRADIER_TOKEN") or os.getenv("TRADIER_SANDBOX_TOKEN")
     acct = os.getenv("TRADIER_ACCOUNT_ID")
@@ -466,11 +600,7 @@ def fetch_tradier_balances():
             print(f"[-] Tradier Balance Read Error: {e}")
     return 6535.24, 5565.24, 0.0
 
-
 def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A'):
-    import sqlite3, os, subprocess
-    from datetime import datetime
-
     db_path = os.path.join(os.path.dirname(__file__), 'harm_telemetry.db')
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -488,13 +618,11 @@ def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A'
     spot = float(trade['spot_price'] or 0.0)
     cost = float(trade['entry_price'] or 0.0)
 
-    # Fetch live option mark or spot for proper PnL calculation
     occ_symbol = trade['option_symbol'] or trade['occ_symbol']
     entry_cost = float(trade['entry_price'] or 0.0)
     shares = int(trade['shares'] or 1)
      
-    # Query option mark with robust fallback to spot-price estimation
-    exit_price = entry_cost * 1.05 # Default slight gain fallback if quote unavailable
+    exit_price = entry_cost * 1.05
     if occ_symbol and len(occ_symbol) > 10:
         try:
             quote = get_live_quote(occ_symbol)
@@ -506,15 +634,13 @@ def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A'
             elif last > 0:
                 exit_price = last
             else:
-                # Fallback to estimated move based on spot price change
                 spot_now = float(trade['spot_price'] or 1.0)
-                exit_price = round(entry_cost * 1.10, 2) # Est 10% gain on manual close if no quote
+                exit_price = round(entry_cost * 1.10, 2)
         except Exception as e:
             print(f"[!] Warning fetching exit quote for {occ_symbol}: {e}")
 
     realized_pnl = round((exit_price - entry_cost) * 100 * shares, 2)
 
-    # Close trade in harm_telemetry.db with accurate PnL & exit option price
     cursor.execute('''
         UPDATE trades 
         SET exit_status = 'FORCE_CLOSE', exit_price = ?, net_pnl = ? 
@@ -524,7 +650,6 @@ def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A'
     conn.commit()
     conn.close()
 
-    # Re-compile dashboard JSON immediately
     try:
         subprocess.run(["./venv/bin/python3", "src/generate_dashboard_data.py"], check=True)
     except Exception as e:
@@ -540,7 +665,6 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
     active_trades = fetch_all_active_dynamo_positions()
     db_closed = fetch_closed_dynamo_positions(selected_date)
      
-    # Calculate portfolio capital metrics
     deployed_capital = sum(float(t.get('entry_price', 0.0)) * float(t.get('shares', 1.0)) * 100.0 for t in active_trades)
     total_floating_pnl = sum(float(t.get('net_pnl', 0.0)) for t in active_trades)
     total_closed_pnl = sum(float(t.get('net_pnl', 0.0)) for t in db_closed)
@@ -551,10 +675,8 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
 
     return active_trades, db_closed, total_floating_pnl, total_closed_pnl, selected_date, starting_balance, settled_free, deployed_capital, unsettled
 
-
 @app.get("/api/proximity")
 async def get_proximity():
-    # Single source of truth: Read level proximity directly from dashboard_data.json
     dash_file = os.path.join(os.path.dirname(__file__), 'dashboard_data.json')
     if os.path.exists(dash_file):
         try:
@@ -565,7 +687,6 @@ async def get_proximity():
         except Exception as e:
             print(f"Error loading proximity from dashboard_data.json: {e}")
 
-    # Fallback to trading_levels.json
     proximity_data = {}
     if os.path.exists('trading_levels.json'):
         import time
@@ -592,7 +713,6 @@ async def get_proximity():
                 sup = info.get("support_zone", info.get("support", [0, 0]))
                 res = info.get("resistance_zone", info.get("resistance", [0, 0]))
                  
-                # Direct Range Evaluation
                 in_sup = (sup[0] <= spot <= sup[1]) if isinstance(sup, list) and len(sup) == 2 and sup[0] > 0 else False
                 in_res = (res[0] <= spot <= res[1]) if isinstance(res, list) and len(res) == 2 and res[0] > 0 else False
                  
@@ -613,11 +733,56 @@ async def get_proximity():
 
     return proximity_data
 
+@app.post("/api/inject/{ticker}")
+async def inject_trade_from_ui(ticker: str):
+    """Triggers smart_cso_injector.py asynchronously for the specified ticker."""
+    ticker_clean = ticker.strip().upper()
+    try:
+        cmd = [sys.executable, "src/smart_cso_injector.py", "--ticker", ticker_clean]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        
+        if result.returncode == 0:
+            return {"status": "success", "ticker": ticker_clean, "output": result.stdout}
+        else:
+            return {"status": "error", "ticker": ticker_clean, "error": result.stderr}
+            
+    except subprocess.TimeoutExpired:
+        return {"status": "pending", "ticker": ticker_clean, "message": "Execution process initiated."}
+    except Exception as e:
+        return {"status": "error", "detail": str(e)}
+
+@app.get("/api/inject_stream/{ticker}")
+async def inject_trade_stream(ticker: str):
+    """Streams live execution telemetry tick-by-tick from smart_cso_injector.py."""
+    def generate_telemetry():
+        cmd = [sys.executable, "-u", "src/smart_cso_injector.py", "--ticker", ticker.upper()]
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        
+        for line in iter(process.stdout.readline, ''):
+            yield f"data: {line}\n\n"
+        process.stdout.close()
+        process.wait()
+
+    return StreamingResponse(generate_telemetry(), media_type="text/event-stream")
+
+@app.get("/api/position_stream/{ticker}")
+async def position_stream(ticker: str):
+    """Streams live watch loop telemetry for an active position tick-by-tick."""
+    def generate_active_telemetry():
+        cmd = [sys.executable, "-u", "src/smart_cso_injector.py", "--ticker", ticker.upper()]
+        process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+        
+        for line in iter(process.stdout.readline, ''):
+            yield f"data: {line}\n\n"
+        process.stdout.close()
+        process.wait()
+
+    return StreamingResponse(generate_active_telemetry(), media_type="text/event-stream")
+
 @app.get("/", response_class=HTMLResponse)
 async def index_view(request: Request, selected_date: str = Query(default=None)):
     trades, closed, total_pnl, total_closed_pnl, current_date, starting_balance, settled_free, deployed_capital, unsettled = fetch_portfolio_state(page=1, selected_date=selected_date)
 
-    # Load live spot prices from level manifest
     live_spots = {}
     levels_data = {}
     if os.path.exists('trading_levels.json'):
@@ -633,14 +798,12 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
     total_deployed_basis = 0.0
     total_floating_pnl_val = 0.0
 
-    # Master Active Trades Key Normalizer for Jinja
     for t in trades:
         tkr = str(t.get('ticker', '')).upper()
         opt_cost = float(t.get('entry_price') or t.get('basis') or t.get('cost') or 0.80)
         shares_cnt = float(t.get('shares', 1.0))
         spot_entry = float(t.get('spot_price') or 100.0)
          
-        # Robust Live Spot & OCC Strike Resolution
         occ = str(t.get('occ_symbol', ''))
         strike = float(occ[-8:]) / 1000.0 if (len(occ) >= 15 and occ[-8:].isdigit()) else 0.0
         current_spot = float(live_spots.get(tkr) or live_spots.get(tkr.lower()) or t.get('current_spot') or t.get('stock_price') or 0.0)
@@ -671,7 +834,6 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
 
         t['hit_probability'] = t.get('hit_probability') or "68%"
          
-        # Safe & Crash-Proof CSO Resolution
         raw_pnl_str = str(t.get('net_pnl', 0) or 0).replace('$', '').replace('+', '').strip()
         try:
             val_pnl = float(raw_pnl_str)
@@ -697,7 +859,6 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         t['potential_tp_return'] = f"+${reward_per_contract:.1f} ({opt_tp_pct}%)"
         t['potential_sl_risk'] = f"-${risk_per_contract:.1f} ({sl_pct}%)"
 
-        # Local PnL calculation logic (CLEANED OF FAKE SPOT-DIFF ESTIMATION)
         opt_mark = float(t.get('option_mark') or t.get('current_price') or 0.0)
         raw_pnl = float(t.get('net_pnl', 0.0))
 
@@ -733,7 +894,6 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         'realized_pnl': str_realized
     }
 
-    # --- ENFORCE RICH TELEMETRY KEYS FOR CLOSED POSITIONS ---
     formatted_closed = []
     for item in closed:
         if isinstance(item, dict):
@@ -815,9 +975,6 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
     )
     return HTMLResponse(content=rendered_html)
 
-
-from fastapi.responses import RedirectResponse
-
 @app.post("/api/update_tp_target/{ticker}/{target_pct}")
 async def update_tp_target(ticker: str, target_pct: float):
     try:
@@ -841,15 +998,13 @@ async def close_single_position(ticker: str):
 
 @app.post("/close-all")
 async def close_all_positions():
-    import boto3
-    dynamodb = boto3.resource('dynamodb', region_name='us-east-1')
+    dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
     trades_table = dynamodb.Table('HarmonizedTrades')
     res = trades_table.query(KeyConditionExpression=boto3.dynamodb.conditions.Key('tenant_id').eq('COMPANY_A'))
     for item in res.get('Items', []):
         if item.get('exit_status') == 'ACTIVE':
             close_position_in_db(item.get('ticker'))
     return RedirectResponse(url="/", status_code=303)
-
 
 @app.get("/dashboard_data.json")
 async def get_dashboard_data_json():
@@ -918,7 +1073,6 @@ async def get_dashboard_data_json():
             "status": "success"
         }
     except Exception as e:
-        import traceback
         return {"active_positions": [], "closed_positions": [], "error": str(e), "trace": traceback.format_exc()}
 
 if __name__ == '__main__':

@@ -1,4 +1,5 @@
 import os
+import sys
 import sqlite3
 import boto3
 from dotenv import load_dotenv
@@ -43,7 +44,12 @@ def safe_purge_ticker(target_ticker):
         print(f"[✓] Successfully cleared {target_ticker} from local SQLite telemetry DB.")
 
 if __name__ == '__main__':
-    tickers_to_purge = ["AAPL", "NVDA"]
+    # Parse command line tickers or fall back to default if none passed
+    if len(sys.argv) > 1:
+        tickers_to_purge = [t.upper() for t in sys.argv[1:]]
+    else:
+        tickers_to_purge = ["AAPL", "NVDA"]
+
     for tkr in tickers_to_purge:
         safe_purge_ticker(tkr)
 
@@ -55,5 +61,5 @@ if __name__ == '__main__':
         print(f"[!] Warning updating dashboard data: {e}")
 
     print("==========================================================")
-    print("[✓] SAFE PURGE COMPLETE FOR AAPL & NVDA. UNRELATED ASSETS UNTOUCHED.")
+    print(f"[✓] SAFE PURGE COMPLETE FOR: {', '.join(tickers_to_purge)}")
     print("==========================================================")

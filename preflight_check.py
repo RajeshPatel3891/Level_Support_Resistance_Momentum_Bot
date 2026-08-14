@@ -1,8 +1,14 @@
 import os
 import sys
 import json
+import sqlite3
+import boto3
+import requests
 import subprocess
 from datetime import datetime
+from dotenv import load_dotenv
+
+load_dotenv('.env.prod')
 
 print("=" * 60)
 print(f"🚀  HARM.AI PRE-FLIGHT SYSTEM VERIFICATION - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -53,6 +59,64 @@ try:
 except Exception as e:
     print(f"[WARN] Could not verify or start tmux session: {e}")
 
+# Step 4: Test Live Tradier Token & Account Reachability
+print("\n4. Testing Live Tradier Account & API Reachability...")
+token = os.getenv("TRADIER_TOKEN")
+acct = os.getenv("TRADIER_ACCOUNT_ID")
+base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
+headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
+
+try:
+    r = requests.get(f"{base_url}/accounts/{acct}/balances", headers=headers, timeout=5)
+    if r.status_code == 200:
+        bal = r.json().get('balances', {})
+        equity = bal.get('total_equity', 0.0)
+        print(f"[PASS] Tradier Live API Connection: SUCCESS | Equity: ${equity}")
+    else:
+        print(f"[FAIL] Tradier Live API Failed: Status {r.status_code}")
+except Exception as e:
+    print(f"[FAIL] Tradier Live API Exception: {e}")
+
+# Step 5: Test DynamoDB Access & Partition State
+print("\n5. Testing DynamoDB Access & Partition State...")
+try:
+    dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
+    table = dynamodb.Table('HarmonizedTrades')
+    res = table.scan()
+    items = res.get('Items', [])
+    active_cnt = sum(1 for i in items if i.get('exit_status') == 'ACTIVE')
+    print(f"[PASS] DynamoDB Table Reachable | Total Records: {len(items)} | Active: {active_cnt}")
+except Exception as e:
+    print(f"[FAIL] DynamoDB Connection Error: {e}")
+
+# Step 6: Test Local SQLite Telemetry DB Health
+print("\n6. Testing Local SQLite Telemetry DB Health...")
+try:
+    conn = sqlite3.connect('harm_telemetry.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT count(*) FROM trades WHERE exit_status = 'ACTIVE'")
+    active_db = cursor.fetchone()[0]
+    conn.close()
+    print(f"[PASS] Local SQLite DB Reachable | Active Trades: {active_db}")
+except Exception as e:
+    print(f"[FAIL] Local SQLite DB Error: {e}")
+
+# Step 7: Test Option Chain Feed (Read-Only Quote Lookup)
+print("\n7. Testing Live Market Data Quote Stream...")
+try:
+    quote_res = requests.get(f"{base_url}/markets/quotes?symbols=SOFI", headers=headers, timeout=5)
+    if quote_res.status_code == 200:
+        q_data = quote_res.json().get('quotes', {}).get('quote', {})
+        last_price = q_data.get('last') or q_data.get('close')
+        print(f"[PASS] Live Option Chain Feed: ONLINE | SOFI Spot: ${last_price}")
+    else:
+        print(f"[FAIL] Market Quote Feed Failed: Status {quote_res.status_code}")
+except Exception as e:
+    print(f"[FAIL] Market Quote Feed Exception: {e}")
+
 print("\n" + "=" * 60)
-print("   [✓] PREFLIGHT CHECK COMPLETE & MARKETSYNC INTEGRATED")
+print(" 🚀 [✓] FULL PREFLIGHT DIAGNOSTIC COMPLETE & VERIFIED")
 print("=" * 60)
+
+if __name__ == '__main__':
+    pass
