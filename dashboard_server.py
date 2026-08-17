@@ -6,19 +6,33 @@ import requests
 import tempfile
 import traceback
 import subprocess
+import uvicorn
 import pandas as pd
 from datetime import datetime, date, timedelta
 from fastapi import FastAPI, Request, Query
-from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse, RedirectResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse, RedirectResponse, JSONResponse
 from jinja2 import Template
 from dotenv import load_dotenv
 import boto3
 from boto3.dynamodb.conditions import Attr
 
-load_dotenv()
+# Dynamically resolve environment tag injected by deploy_fargate.sh
+EXEC_ENV = os.getenv("EXECUTION_ENV", "SANDBOX").upper()
+
+if EXEC_ENV in ["PROD", "PRODUCTION", "LIVE"]:
+    if os.path.exists(".env.prod"):
+        load_dotenv(".env.prod", override=True)
+    else:
+        load_dotenv(override=True)
+else:
+    if os.path.exists(".env.sandbox"):
+        load_dotenv(".env.sandbox", override=True)
+    else:
+        load_dotenv(override=True)
 
 # Environment Isolation Settings
-CURRENT_ENV = os.getenv("EXECUTION_ENV", "PRODUCTION").upper()
+CURRENT_ENV = os.getenv("EXECUTION_ENV", EXEC_ENV).upper()
 TARGET_IS_LIVE = 1 if CURRENT_ENV in ["PROD", "PRODUCTION", "LIVE"] else 0
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'harm_telemetry.db')
 
@@ -32,6 +46,15 @@ from src.RiskEngine import (
     resolve_direction_targets,
     evaluate_cso_informed_exit
 )
+
+def get_dynamic_proximity_threshold(price: float) -> float:
+    """Returns dynamic arming threshold based on asset price tier."""
+    if price >= 100.0:
+        return 0.0025  # 0.25% ($SPY, $NVDA, $QQQ)
+    elif price >= 30.0:
+        return 0.0035  # 0.35% ($BAC, $UBER)
+    else:
+        return 0.0060  # 0.60% ($SNAP, $F, $SOFI)
 
 def resolve_trade_direction(item):
     """Safely resolves trade direction (CALL/PUT) with OCC symbol parsing fallback."""
@@ -58,7 +81,6 @@ def fetch_closed_dynamo_positions(selected_date=None):
         dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
         table = dynamodb.Table('HarmonizedTrades')
         
-        # Build filter: exit_status != ACTIVE AND (execution_env == CURRENT_ENV OR is_live == TARGET_IS_LIVE)
         filter_expr = Attr('exit_status').ne('ACTIVE') & (
             Attr('execution_env').eq(CURRENT_ENV) | Attr('is_live').eq(TARGET_IS_LIVE)
         )
@@ -97,7 +119,6 @@ def fetch_all_active_dynamo_positions():
         dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
         table = dynamodb.Table('HarmonizedTrades')
         
-        # Build filter: exit_status == ACTIVE AND (execution_env == CURRENT_ENV OR is_live == TARGET_IS_LIVE)
         filter_expr = Attr('exit_status').eq('ACTIVE') & (
             Attr('execution_env').eq(CURRENT_ENV) | Attr('is_live').eq(TARGET_IS_LIVE)
         )
@@ -138,62 +159,6 @@ def fetch_all_active_dynamo_positions():
         return []
 
 
-def get_active_positions_from_dynamo():
-    try:
-        dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
-        table = dynamodb.Table('HarmonizedTrades')
-        filter_expr = Attr('exit_status').eq('ACTIVE') & (
-            Attr('execution_env').eq(CURRENT_ENV) | Attr('is_live').eq(TARGET_IS_LIVE)
-        )
-        res = table.scan(FilterExpression=filter_expr)
-        raw_items = res.get('Items', [])
-        
-        parsed_items = []
-        for item in raw_items:
-            try:
-                qty = float(item.get('shares', 1.0))
-                if qty <= 0:
-                    continue  # Skip short/credit legs
-                  
-                parsed_items.append({
-                    'trade_id': str(item.get('trade_id')),
-                    'ticker': str(item.get('ticker')),
-                    'timestamp': str(item.get('timestamp', '')),
-                    'strategy': str(item.get('strategy', 'BREAKOUT')),
-                    'direction': resolve_trade_direction(item),
-                    'spot_price': float(item.get('spot_price', 0.0)),
-                    'entry_price': float(item.get('entry_price', 0.0)),
-                    'shares': qty,
-                    'stop_loss': float(item.get('stop_loss', 0.0)),
-                    'take_profit': float(item.get('take_profit', 0.0)),
-                    'net_pnl': float(item.get('net_pnl', 0.0)),
-                    'exit_status': 'ACTIVE',
-                    'is_live': int(item.get('is_live', TARGET_IS_LIVE)),
-                    'occ_symbol': str(item.get('occ_symbol', item.get('ticker'))),
-                    'cso_notes': item.get('cso_notes') or item.get('cso_reason'),
-                    'cso_recommendation': item.get('cso_recommendation') or item.get('cso_status')
-                })
-            except Exception:
-                continue
-                  
-        return parsed_items
-    except Exception as e:
-        print(f"[-] Dashboard DynamoDB Read Error: {e}")
-        return []
-
-def get_dynamo_active_trades():
-    try:
-        dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
-        table = dynamodb.Table('HarmonizedTrades')
-        filter_expr = Attr('exit_status').eq('ACTIVE') & (
-            Attr('execution_env').eq(CURRENT_ENV) | Attr('is_live').eq(TARGET_IS_LIVE)
-        )
-        res = table.scan(FilterExpression=filter_expr)
-        return res.get('Items', [])
-    except Exception as e:
-        print(f"[-] Dashboard DynamoDB Read Error: {e}")
-        return []
-
 def atomic_json_dump(data, filepath):
     dir_name = os.path.dirname(os.path.abspath(filepath)) or '.'
     with tempfile.NamedTemporaryFile('w', dir=dir_name, delete=False, encoding='utf-8') as tf:
@@ -201,7 +166,15 @@ def atomic_json_dump(data, filepath):
         temp_name = tf.name
     os.replace(temp_name, filepath)
 
-app = FastAPI(title="HARM.AI Mobile Matrix Gateway")
+app = FastAPI(title="HARM.AI Live Dashboard Gateway")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 INDEX_HTML_TEMPLATE = r"""
 <!DOCTYPE html>
@@ -276,7 +249,7 @@ INDEX_HTML_TEMPLATE = r"""
     <div class="flex items-center justify-between mb-3">
         <h2 class="text-xs font-bold text-gray-400 uppercase tracking-wider">ACTIVE POSITIONS, GEX TARGETS & RISK MATRIX</h2>
     </div>
-     
+      
     <div class="space-y-3 mb-6">
         {% for trade in trades %}
         <div class="bg-gray-900/60 p-3 rounded-xl border {% if trade.near_target %}border-emerald-500 shadow-lg shadow-emerald-950/50{% else %}border-gray-800{% endif %} flex flex-col gap-2">
@@ -295,7 +268,7 @@ INDEX_HTML_TEMPLATE = r"""
                             CSO: {{ trade.cso_recommendation }}
                         </span>
                     </div>
-                     
+                      
                     <div class="text-xs text-gray-400">
                         Live: <b class="text-gray-200">{{ trade.price }}</b> | Cost: <b class="text-gray-200">{{ trade.basis }}</b> | Stop: <b class="text-amber-400">{{ trade.stop_display }}</b>
                     </div>
@@ -385,7 +358,7 @@ INDEX_HTML_TEMPLATE = r"""
                 const data = await res.json();
                 const container = document.getElementById('proximity-container');
                 if (!container) return;
-                 
+                  
                 let html = '';
                 for (const [ticker, info] of Object.entries(data)) {
                     const statusBg = info.armed ? 'rgba(0, 230, 118, 0.15)' : 'rgba(255, 255, 255, 0.05)';
@@ -398,7 +371,7 @@ INDEX_HTML_TEMPLATE = r"""
                             ⚡ INJECT
                         </button>
                     ` : '';
-                     
+                      
                     html += `
                         <div style="background: #111827; border: 1px solid #1f293d; border-radius: 8px; padding: 12px;">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
@@ -542,14 +515,14 @@ async function adjustTP(ticker, step) {
     if (!ticker) return;
     let el = document.getElementById('tp-val-' + ticker);
     if (!el) return;
-     
+      
     let match = el.innerText.match(/([+-]?\d+(\.\d+)?)/);
     let current = match ? parseFloat(match[1]) : 50.0;
-     
+      
     let nextVal = Math.max(-100.0, current + step);
     let sign = nextVal > 0 ? '+' : '';
     el.innerText = sign + nextVal.toFixed(1) + '%';
-     
+      
     try {
         let res = await fetch(`/api/update_tp_target/${ticker}/${nextVal}`, { method: 'POST' });
         let data = await res.json();
@@ -621,7 +594,7 @@ def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A'
     occ_symbol = trade['option_symbol'] or trade['occ_symbol']
     entry_cost = float(trade['entry_price'] or 0.0)
     shares = int(trade['shares'] or 1)
-     
+      
     exit_price = entry_cost * 1.05
     if occ_symbol and len(occ_symbol) > 10:
         try:
@@ -661,14 +634,14 @@ def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A'
 def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
     if not selected_date:
         selected_date = datetime.now().strftime('%Y-%m-%d')
-         
+          
     active_trades = fetch_all_active_dynamo_positions()
     db_closed = fetch_closed_dynamo_positions(selected_date)
-     
+      
     deployed_capital = sum(float(t.get('entry_price', 0.0)) * float(t.get('shares', 1.0)) * 100.0 for t in active_trades)
     total_floating_pnl = sum(float(t.get('net_pnl', 0.0)) for t in active_trades)
     total_closed_pnl = sum(float(t.get('net_pnl', 0.0)) for t in db_closed)
-     
+      
     starting_balance, settled_free, unsettled = fetch_tradier_balances()
     if settled_free == 5565.24 and starting_balance == 6535.24:
         settled_free = starting_balance - deployed_capital
@@ -677,16 +650,6 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
 
 @app.get("/api/proximity")
 async def get_proximity():
-    dash_file = os.path.join(os.path.dirname(__file__), 'dashboard_data.json')
-    if os.path.exists(dash_file):
-        try:
-            with open(dash_file, 'r') as df:
-                dj = json.load(df)
-                if 'proximity_matrix' in dj and dj['proximity_matrix']:
-                    return dj['proximity_matrix']
-        except Exception as e:
-            print(f"Error loading proximity from dashboard_data.json: {e}")
-
     proximity_data = {}
     if os.path.exists('trading_levels.json'):
         import time
@@ -701,23 +664,24 @@ async def get_proximity():
                 except (json.JSONDecodeError, OSError):
                     time.sleep(0.05)
             for ticker, info in levels_file.items():
-                spot = float(info.get('last_price') or info.get('spot', 0.0))
+                spot = float(info.get('spot_price') or info.get('last_price') or info.get('spot', 0.0))
                 vwap = float(info.get('vwap', spot))
-                call_t = float(info.get('spot_target_call', 0.0))
-                put_t = float(info.get('spot_target_put', 0.0))
+                call_t = float(info.get('spot_target_call') or info.get('call_target') or 0.0)
+                put_t = float(info.get('spot_target_put') or info.get('put_target') or 0.0)
                 gex_target = call_t if call_t > 0 else put_t
                 target = f"${gex_target:.2f}" if gex_target > 0 else "N/A"
                 gap_val = abs(spot - gex_target) if gex_target > 0 else 0.0
                 gap_dollars = f"${gap_val:.2f}"
-                gap_pct = f"{(gap_val / spot * 100.0):.2f}%" if spot > 0 and gex_target > 0 else "0.00%"
+                gap_pct_float = (gap_val / spot) if spot > 0 and gex_target > 0 else 1.0
+                
+                threshold = float(info.get('proximity_threshold') or get_dynamic_proximity_threshold(spot))
                 sup = info.get("support_zone", info.get("support", [0, 0]))
                 res = info.get("resistance_zone", info.get("resistance", [0, 0]))
-                 
+                  
                 in_sup = (sup[0] <= spot <= sup[1]) if isinstance(sup, list) and len(sup) == 2 and sup[0] > 0 else False
                 in_res = (res[0] <= spot <= res[1]) if isinstance(res, list) and len(res) == 2 and res[0] > 0 else False
-                 
-                current_gap_pct = (gap_val / spot * 100.0) if spot > 0 and gex_target > 0 else 999.0
-                is_armed = bool(info.get('execution_armed')) or in_sup or in_res or (current_gap_pct <= 1.0)
+                  
+                is_armed = bool(info.get('execution_armed')) or in_sup or in_res or (gap_pct_float <= threshold)
 
                 proximity_data[ticker] = {
                     "armed": is_armed,
@@ -726,10 +690,11 @@ async def get_proximity():
                     'vwap': vwap,
                     'target': target,
                     'gap_dollars': gap_dollars,
-                    'gap_pct': gap_pct
+                    'gap_pct': f"{(gap_pct_float * 100.0):.2f}%",
+                    'proximity_threshold_pct': f"{(threshold * 100.0):.2f}%"
                 }
         except Exception as e:
-            print(f"Error building proximity fallback: {e}")
+            print(f"Error building proximity response: {e}")
 
     return proximity_data
 
@@ -803,7 +768,7 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         opt_cost = float(t.get('entry_price') or t.get('basis') or t.get('cost') or 0.80)
         shares_cnt = float(t.get('shares', 1.0))
         spot_entry = float(t.get('spot_price') or 100.0)
-         
+          
         occ = str(t.get('occ_symbol', ''))
         strike = float(occ[-8:]) / 1000.0 if (len(occ) >= 15 and occ[-8:].isdigit()) else 0.0
         current_spot = float(live_spots.get(tkr) or live_spots.get(tkr.lower()) or t.get('current_spot') or t.get('stock_price') or 0.0)
@@ -816,7 +781,7 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         t['direction'] = direction
         t['basis'] = f"{opt_cost:.2f}"
         t['cost'] = f"{opt_cost:.2f}"
-        t['price'] = f"{current_spot:.2f}"
+        t['price'] = f"{float(t.get('option_mark') or current_spot):.2f}"
         t['shares'] = shares_cnt
 
         opt_sl = float(t.get('stop_loss') or (opt_cost * 0.80))
@@ -833,7 +798,7 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         t['rr_border'] = "border-emerald-800" if rr >= 1.5 else "border-gray-700"
 
         t['hit_probability'] = t.get('hit_probability') or "68%"
-         
+          
         raw_pnl_str = str(t.get('net_pnl', 0) or 0).replace('$', '').replace('+', '').strip()
         try:
             val_pnl = float(raw_pnl_str)
@@ -860,9 +825,12 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         t['potential_sl_risk'] = f"-${risk_per_contract:.1f} ({sl_pct}%)"
 
         opt_mark = float(t.get('option_mark') or t.get('current_price') or 0.0)
+        unrealized = float(t.get('unrealized_pnl') or 0.0)
         raw_pnl = float(t.get('net_pnl', 0.0))
 
-        if opt_mark > 0 and opt_mark != opt_cost:
+        if unrealized != 0.0:
+            dollar_pnl_val = round(unrealized, 2)
+        elif opt_mark > 0 and opt_mark != opt_cost:
             dollar_pnl_val = round((opt_mark - opt_cost) * 100.0 * shares_cnt, 2)
         elif raw_pnl != 0.0:
             dollar_pnl_val = raw_pnl
@@ -1010,7 +978,7 @@ async def close_all_positions():
 async def get_dashboard_data_json():
     try:
         trades, closed, total_pnl, total_closed_pnl, current_date, starting_balance, settled_free, deployed_capital, unsettled = fetch_portfolio_state()
-         
+        
         live_spots = {}
         if os.path.exists('trading_levels.json'):
             try:
@@ -1076,5 +1044,4 @@ async def get_dashboard_data_json():
         return {"active_positions": [], "closed_positions": [], "error": str(e), "trace": traceback.format_exc()}
 
 if __name__ == '__main__':
-    import uvicorn
-    uvicorn.run(app, host='0.0.0.0', port=8000)
+    uvicorn.run(app, host='0.0.0.0', port=8080)

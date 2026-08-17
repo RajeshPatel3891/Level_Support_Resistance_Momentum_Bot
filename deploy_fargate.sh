@@ -36,6 +36,9 @@ conn.close()
 echo "[*] Step 2: Running premarket prep & schema verification..."
 python3 premarket_prep.py 2>/dev/null || echo "[!] Premarket prep completed."
 
+echo "[*] Step 2.5: Verifying proximity pipeline sync across modules..."
+python3 -m unittest tests/test_proximity_sync.py || { echo "[❌ FATAL] Pipeline desync detected! Aborting build."; exit 1; }
+
 echo "[*] Step 3: Building Docker container image..."
 docker build --no-cache -t $IMAGE_NAME:latest .
 

@@ -1,14 +1,4 @@
-# Version control & environments
-.git
-.gitignore
-__pycache__/
-*.pyc
-*.pyo
-venv/
-
-# Local storage, backups, logs, and data JSON files
-backups/
-logs/
 *.db
-*.db-journal
-*.log
+*.PRE_FLIGHT_BAK
+.env.prod
+.env.sandbox
