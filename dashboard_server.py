@@ -314,6 +314,7 @@ INDEX_HTML_TEMPLATE = r"""
                 <div class="space-y-1">
                     <div class="flex items-center space-x-2">
                         <span class="font-black text-sm">{{ trade.ticker }}</span>
+                        <span class="text-[10px] bg-amber-950 text-amber-300 border border-amber-800 px-1.5 py-0.5 rounded font-bold">{{ trade.shares | int }}x</span>
                         <span class="text-[10px] {% if trade.direction == 'PUT' %}bg-rose-950 text-rose-300 border border-rose-800{% else %}bg-emerald-950 text-emerald-300 border border-emerald-800{% endif %} px-1.5 py-0.5 rounded font-bold uppercase">{{ trade.direction or 'CALL' }}</span>
                         <span class="text-[9px] bg-purple-950 text-purple-300 border border-purple-800 px-1.5 py-0.5 rounded font-bold">
                             PROB: {{ trade.hit_probability }}
@@ -612,10 +613,16 @@ def get_live_quote(symbol):
         print(f"Tradier fetch error: {e}")
     return {}
 
-def fetch_tradier_balances():
-    token = os.getenv("TRADIER_TOKEN") or os.getenv("TRADIER_SANDBOX_TOKEN")
-    acct = os.getenv("TRADIER_ACCOUNT_ID")
-    base_url = os.getenv("TRADIER_BASE_URL", "https://sandbox.tradier.com/v1")
+def fetch_tradier_balances(env=None):
+    env_name = (env or CURRENT_ENV).upper()
+    if env_name in ["PROD", "PRODUCTION", "LIVE"]:
+        token = os.getenv("TRADIER_TOKEN")
+        acct = os.getenv("TRADIER_ACCOUNT_ID")
+        base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
+    else:
+        token = os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN")
+        acct = os.getenv("TRADIER_ACCOUNT_ID")
+        base_url = os.getenv("TRADIER_BASE_URL", "https://sandbox.tradier.com/v1")
     if token and acct:
         headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
         try:
@@ -878,8 +885,8 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
 
         t['gex_target_str'] = f"${opt_tp:.2f} Opt TP"
         t['gex_dist'] = f"+{opt_tp_pct}%"
-        t['potential_tp_return'] = f"+${reward_per_contract:.1f} ({opt_tp_pct}%)"
-        t['potential_sl_risk'] = f"-${risk_per_contract:.1f} ({sl_pct}%)"
+        t['potential_tp_return'] = f"+${reward_per_contract:.2f} ({opt_tp_pct:.1f}%)"
+        t['potential_sl_risk'] = f"-${risk_per_contract:.2f} ({sl_pct:.1f}%)"
 
         opt_mark = float(t.get('option_mark') or t.get('current_price') or 0.0)
         unrealized = float(t.get('unrealized_pnl') or 0.0)
