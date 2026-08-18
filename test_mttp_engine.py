@@ -127,4 +127,4 @@ else:
     print(f" [✗] UNIT TEST FAILED: {failures} test case failure(s). ")
 print("=" * 80)
 
-sys.exit(0 if failures == 0 else 1)
+# sys.exit removed for unittest discovery

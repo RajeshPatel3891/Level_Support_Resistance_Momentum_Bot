@@ -101,7 +101,7 @@ def init_cloud_state_and_hydrate():
             ticker TEXT PRIMARY KEY, timestamp TEXT, strategy TEXT, direction TEXT,
             spot_price REAL, entry_price REAL, shares REAL, stop_loss REAL,
             take_profit REAL, net_pnl REAL, exit_status TEXT, is_live INTEGER,
-            occ_symbol TEXT, execution_env TEXT
+            occ_symbol TEXT, execution_env TEXT, unrealized_pnl REAL, option_mark REAL, gsg_status TEXT
         )
     """)
     conn.commit()
@@ -432,7 +432,7 @@ INDEX_HTML_TEMPLATE = r"""
                       
                     html += `
                         <div style="background: #111827; border: 1px solid #1f293d; border-radius: 8px; padding: 12px;">
-                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <div style="display: flex; justify-between; align-items: center; margin-bottom: 8px;">
                                 <span style="font-weight: 800; font-size: 16px; color: #ffffff;">${ticker}</span>
                                 <div>
                                     <span style="background: ${statusBg}; color: ${statusColor}; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 4px;">${statusText}</span>
@@ -491,42 +491,6 @@ INDEX_HTML_TEMPLATE = r"""
                 }
                 setTimeout(() => window.location.reload(), 2000);
             };
-        }
-
-        async function triggerUiInject(ticker) {
-            const btn = document.getElementById(`btn-inject-${ticker}`);
-            if (btn) {
-                btn.disabled = true;
-                btn.innerText = "⏳ EXECUTING...";
-                btn.className = "bg-amber-600 text-white font-bold text-[10px] px-2 py-1 rounded cursor-not-allowed ml-2";
-            }
-
-            try {
-                const res = await fetch(`/api/inject/${ticker}`, { method: 'POST' });
-                const data = await res.json();
-                
-                if (data.status === "success") {
-                    if (btn) {
-                        btn.innerText = "✓ FILLED";
-                        btn.className = "bg-blue-600 text-white font-bold text-[10px] px-2 py-1 rounded ml-2";
-                    }
-                    setTimeout(() => window.location.reload(), 1500);
-                } else {
-                    alert(`Execution Alert for ${ticker}: ${data.error || data.detail || 'Failed'}`);
-                    if (btn) {
-                        btn.disabled = false;
-                        btn.innerText = "⚡ INJECT";
-                        btn.className = "bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] px-2 py-1 rounded transition-colors ml-2";
-                    }
-                }
-            } catch (err) {
-                console.error("Injection failed:", err);
-                if (btn) {
-                    btn.disabled = false;
-                    btn.innerText = "⚡ INJECT";
-                    btn.className = "bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] px-2 py-1 rounded transition-colors ml-2";
-                }
-            }
         }
 
         fetchProximity();
@@ -596,7 +560,8 @@ async function adjustTP(ticker, step) {
 """
 
 def get_db_connection():
-    conn = sqlite3.connect("harm_telemetry.db")
+    db_path = "/app/harm_telemetry.db" if os.path.exists("/app/harm_telemetry.db") else DB_PATH
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -638,7 +603,7 @@ def fetch_tradier_balances(env=None):
     return 6535.24, 5565.24, 0.0
 
 def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A'):
-    db_path = os.path.join(os.path.dirname(__file__), 'harm_telemetry.db')
+    db_path = "/app/harm_telemetry.db" if os.path.exists("/app/harm_telemetry.db") else DB_PATH
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -651,11 +616,11 @@ def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A'
         conn.close()
         return False
 
-    trade_id = trade['id']
+    trade_id = trade['id'] if 'id' in trade.keys() else trade['ticker']
     spot = float(trade['spot_price'] or 0.0)
     cost = float(trade['entry_price'] or 0.0)
 
-    occ_symbol = trade['option_symbol'] or trade['occ_symbol']
+    occ_symbol = trade['occ_symbol'] if 'occ_symbol' in trade.keys() else (trade['option_symbol'] if 'option_symbol' in trade.keys() else '')
     entry_cost = float(trade['entry_price'] or 0.0)
     shares = int(trade['shares'] or 1)
       
@@ -681,19 +646,98 @@ def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A'
     cursor.execute('''
         UPDATE trades 
         SET exit_status = 'FORCE_CLOSE', exit_price = ?, net_pnl = ? 
-        WHERE id = ?
-    ''', (exit_price, realized_pnl, trade_id))
+        WHERE ticker = ? AND exit_status = 'ACTIVE'
+    ''', (exit_price, realized_pnl, ticker_to_close))
 
     conn.commit()
     conn.close()
 
     try:
-        subprocess.run(["./venv/bin/python3", "src/generate_dashboard_data.py"], check=True)
+        subprocess.run(["python3", "src/generate_dashboard_data.py"], check=True)
     except Exception as e:
         print(f"[!] Warning re-compiling dashboard after close: {e}")
 
     print(f"[✓ CLOSED POSITION] {ticker_to_close} marked as FORCE_CLOSE in SQLite.")
     return True
+
+def enrich_active_positions_with_live_quotes(trades):
+    """Enriches active trades array with live Tradier option mark prices and PnL."""
+    token = os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN")
+    base_url = os.getenv("TRADIER_BASE_URL", "https://sandbox.tradier.com/v1" if CURRENT_ENV not in ["PROD", "PRODUCTION", "LIVE"] else "https://api.tradier.com/v1")
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+    total_deployed_basis = 0.0
+    total_floating_pnl_val = 0.0
+
+    for t in trades:
+        tkr = str(t.get('ticker', '')).upper()
+        opt_cost = float(t.get('entry_price') or t.get('basis') or t.get('cost') or 0.80)
+        shares_cnt = float(t.get('shares', 1.0))
+        direction = resolve_trade_direction(t)
+
+        occ = str(t.get('occ_symbol', ''))
+        
+        t['direction'] = direction
+        t['cost'] = f"{opt_cost:.2f}"
+        t['basis'] = f"{opt_cost:.2f}"
+
+        opt_mark = opt_cost
+        if occ and token:
+            try:
+                q = requests.get(f"{base_url}/markets/quotes", params={"symbols": occ}, headers=headers, timeout=2).json()
+                quote = q.get("quotes", {}).get("quote", {})
+                if isinstance(quote, list) and len(quote) > 0:
+                    quote = quote[0]
+                bid = float(quote.get("bid") or 0.0)
+                ask = float(quote.get("ask") or 0.0)
+                opt_mark = round((bid + ask) / 2.0, 2) if (bid and ask) else float(quote.get("last") or opt_cost)
+            except Exception as e:
+                print(f"[!] Warning fetching live mark for {occ}: {e}")
+                opt_mark = float(t.get('option_mark') or opt_cost)
+
+        t['option_mark'] = opt_mark
+        t['price'] = f"{opt_mark:.2f}"
+        t['shares'] = shares_cnt
+
+        opt_sl = float(t.get('stop_loss') or (opt_cost * 0.80))
+        opt_tp = float(t.get('take_profit') or (opt_cost * 1.50))
+        t['stop_display'] = f"${opt_sl:.2f}"
+
+        risk_per_contract = max(0.01, opt_cost - opt_sl) * 100.0 * shares_cnt
+        reward_per_contract = max(0.01, opt_tp - opt_cost) * 100.0 * shares_cnt
+
+        rr = round(reward_per_contract / max(0.01, risk_per_contract), 1)
+        t['rr_ratio'] = f"{rr}:1"
+        t['rr_bg'] = "bg-emerald-950" if rr >= 1.5 else "bg-gray-800"
+        t['rr_text'] = "text-emerald-400" if rr >= 1.5 else "text-gray-300"
+        t['rr_border'] = "border-emerald-800" if rr >= 1.5 else "border-gray-700"
+        t['hit_probability'] = t.get('hit_probability') or "68%"
+
+        dollar_pnl_val = round((opt_mark - opt_cost) * 100.0 * shares_cnt, 2)
+        pct_pnl_val = round((dollar_pnl_val / (opt_cost * shares_cnt * 100.0)) * 100.0, 1) if opt_cost > 0 else 0.0
+
+        t['net_pnl'] = dollar_pnl_val
+        pnl_prefix = '+' if dollar_pnl_val >= 0 else ''
+        t['dollar_pnl'] = f"{pnl_prefix}${dollar_pnl_val:.2f}"
+        t['pnl_pct'] = f"{pnl_prefix}{pct_pnl_val:.1f}%"
+        t['pnl_class'] = 'text-emerald-400' if dollar_pnl_val >= 0 else 'text-red-400'
+
+        opt_tp_pct = round(((opt_tp - opt_cost)/opt_cost)*100, 1) if opt_cost > 0 else 0.0
+        sl_pct = round(((opt_cost - opt_sl)/opt_cost)*100, 1) if opt_cost > 0 else 0.0
+        t['gex_target_str'] = f"${opt_tp:.2f} Opt TP"
+        t['gex_dist'] = f"+{opt_tp_pct}%"
+        t['potential_tp_return'] = f"+${reward_per_contract:.2f} ({opt_tp_pct:.1f}%)"
+        t['potential_sl_risk'] = f"-${risk_per_contract:.2f} ({sl_pct:.1f}%)"
+
+        cso = t.get('cso_notes') or t.get('cso_reason') or t.get('cso_recommendation') or t.get('cso_status') or ('TIGHTEN' if dollar_pnl_val > 0 else 'HOLD')
+        t['cso_recommendation'] = cso
+        t['cso_badge_bg'] = "bg-amber-950" if any(k in str(cso).upper() for k in ["TIGHTEN", "LOCK", "RUNNER"]) else "bg-blue-950"
+        t['cso_badge_text'] = "text-amber-400" if any(k in str(cso).upper() for k in ["TIGHTEN", "LOCK", "RUNNER"]) else "text-blue-400"
+
+        total_deployed_basis += (opt_cost * shares_cnt * 100.0)
+        total_floating_pnl_val += dollar_pnl_val
+
+    return trades, total_deployed_basis, total_floating_pnl_val
 
 def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
     if not selected_date:
@@ -701,16 +745,15 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
           
     active_trades = fetch_all_active_dynamo_positions()
     db_closed = fetch_closed_dynamo_positions(selected_date)
-      
-    deployed_capital = sum(float(t.get('entry_price', 0.0)) * float(t.get('shares', 1.0)) * 100.0 for t in active_trades)
-    total_floating_pnl = sum(float(t.get('net_pnl', 0.0)) for t in active_trades)
+    
+    enriched_trades, total_deployed_basis, total_floating_pnl_val = enrich_active_positions_with_live_quotes(active_trades)
     total_closed_pnl = sum(float(t.get('net_pnl', 0.0)) for t in db_closed)
       
     starting_balance, settled_free, unsettled = fetch_tradier_balances()
     if settled_free == 5565.24 and starting_balance == 6535.24:
-        settled_free = starting_balance - deployed_capital
+        settled_free = starting_balance - total_deployed_basis
 
-    return active_trades, db_closed, total_floating_pnl, total_closed_pnl, selected_date, starting_balance, settled_free, deployed_capital, unsettled
+    return enriched_trades, db_closed, total_floating_pnl_val, total_closed_pnl, selected_date, starting_balance, settled_free, total_deployed_basis, unsettled
 
 @app.get("/api/proximity")
 async def get_proximity():
@@ -764,17 +807,14 @@ async def get_proximity():
 
 @app.post("/api/inject/{ticker}")
 async def inject_trade_from_ui(ticker: str):
-    """Triggers smart_cso_injector.py asynchronously for the specified ticker."""
     ticker_clean = ticker.strip().upper()
     try:
         cmd = [sys.executable, "src/smart_cso_injector.py", "--ticker", ticker_clean]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
-        
         if result.returncode == 0:
             return {"status": "success", "ticker": ticker_clean, "output": result.stdout}
         else:
             return {"status": "error", "ticker": ticker_clean, "error": result.stderr}
-            
     except subprocess.TimeoutExpired:
         return {"status": "pending", "ticker": ticker_clean, "message": "Execution process initiated."}
     except Exception as e:
@@ -782,11 +822,9 @@ async def inject_trade_from_ui(ticker: str):
 
 @app.get("/api/inject_stream/{ticker}")
 async def inject_trade_stream(ticker: str):
-    """Streams live execution telemetry tick-by-tick from smart_cso_injector.py."""
     def generate_telemetry():
         cmd = [sys.executable, "-u", "src/smart_cso_injector.py", "--ticker", ticker.upper()]
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-        
         for line in iter(process.stdout.readline, ''):
             yield f"data: {line}\n\n"
         process.stdout.close()
@@ -796,11 +834,9 @@ async def inject_trade_stream(ticker: str):
 
 @app.get("/api/position_stream/{ticker}")
 async def position_stream(ticker: str):
-    """Streams live watch loop telemetry for an active position tick-by-tick."""
     def generate_active_telemetry():
         cmd = [sys.executable, "-u", "src/smart_cso_injector.py", "--ticker", ticker.upper()]
         process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-        
         for line in iter(process.stdout.readline, ''):
             yield f"data: {line}\n\n"
         process.stdout.close()
@@ -812,107 +848,20 @@ async def position_stream(ticker: str):
 async def index_view(request: Request, selected_date: str = Query(default=None)):
     trades, closed, total_pnl, total_closed_pnl, current_date, starting_balance, settled_free, deployed_capital, unsettled = fetch_portfolio_state(page=1, selected_date=selected_date)
 
-    live_spots = {}
     levels_data = {}
     if os.path.exists('trading_levels.json'):
         try:
             with open('trading_levels.json', 'r') as lf:
                 levels_data = json.load(lf)
-                for tick, data in levels_data.items():
-                    if isinstance(data, dict) and 'spot' in data:
-                        live_spots[tick] = float(data['spot'])
         except Exception:
             pass
 
-    total_deployed_basis = 0.0
-    total_floating_pnl_val = 0.0
-
-    for t in trades:
-        tkr = str(t.get('ticker', '')).upper()
-        opt_cost = float(t.get('entry_price') or t.get('basis') or t.get('cost') or 0.80)
-        shares_cnt = float(t.get('shares', 1.0))
-        spot_entry = float(t.get('spot_price') or 100.0)
-          
-        occ = str(t.get('occ_symbol', ''))
-        strike = float(occ[-8:]) / 1000.0 if (len(occ) >= 15 and occ[-8:].isdigit()) else 0.0
-        current_spot = float(live_spots.get(tkr) or live_spots.get(tkr.lower()) or t.get('current_spot') or t.get('stock_price') or 0.0)
-        if current_spot == 0.0:
-            current_spot = strike if strike > 0 else spot_entry
-        direction = resolve_trade_direction(t)
-
-        total_deployed_basis += (opt_cost * shares_cnt * 100.0)
-
-        t['direction'] = direction
-        t['basis'] = f"{opt_cost:.2f}"
-        t['cost'] = f"{opt_cost:.2f}"
-        t['price'] = f"{float(t.get('option_mark') or current_spot):.2f}"
-        t['shares'] = shares_cnt
-
-        opt_sl = float(t.get('stop_loss') or (opt_cost * 0.80))
-        opt_tp = float(t.get('take_profit') or (opt_cost * 1.50))
-        t['stop_display'] = f"${opt_sl:.2f}"
-
-        risk_per_contract = max(0.01, opt_cost - opt_sl) * 100.0 * shares_cnt
-        reward_per_contract = max(0.01, opt_tp - opt_cost) * 100.0 * shares_cnt
-
-        rr = round(reward_per_contract / max(0.01, risk_per_contract), 1)
-        t['rr_ratio'] = f"{rr}:1"
-        t['rr_bg'] = "bg-emerald-950" if rr >= 1.5 else "bg-gray-800"
-        t['rr_text'] = "text-emerald-400" if rr >= 1.5 else "text-gray-300"
-        t['rr_border'] = "border-emerald-800" if rr >= 1.5 else "border-gray-700"
-
-        t['hit_probability'] = t.get('hit_probability') or "68%"
-          
-        raw_pnl_str = str(t.get('net_pnl', 0) or 0).replace('$', '').replace('+', '').strip()
-        try:
-            val_pnl = float(raw_pnl_str)
-        except (ValueError, TypeError):
-            val_pnl = 0.0
-
-        cso = (
-            t.get('cso_notes') 
-            or t.get('cso_reason') 
-            or t.get('cso_recommendation') 
-            or t.get('cso_status') 
-            or ('TIGHTEN' if val_pnl > 0 else 'HOLD')
-        )
-        t['cso_recommendation'] = cso
-        t['cso_badge_bg'] = "bg-amber-950" if any(k in str(cso).upper() for k in ["TIGHTEN", "LOCK", "RUNNER"]) else "bg-blue-950"
-        t['cso_badge_text'] = "text-amber-400" if any(k in str(cso).upper() for k in ["TIGHTEN", "LOCK", "RUNNER"]) else "text-blue-400"
-
-        opt_tp_pct = round(((opt_tp - opt_cost)/opt_cost)*100, 1) if opt_cost > 0 else 0.0
-        sl_pct = round(((opt_cost - opt_sl)/opt_cost)*100, 1) if opt_cost > 0 else 0.0
-
-        t['gex_target_str'] = f"${opt_tp:.2f} Opt TP"
-        t['gex_dist'] = f"+{opt_tp_pct}%"
-        t['potential_tp_return'] = f"+${reward_per_contract:.2f} ({opt_tp_pct:.1f}%)"
-        t['potential_sl_risk'] = f"-${risk_per_contract:.2f} ({sl_pct:.1f}%)"
-
-        opt_mark = float(t.get('option_mark') or t.get('current_price') or 0.0)
-        unrealized = float(t.get('unrealized_pnl') or 0.0)
-        raw_pnl = float(t.get('net_pnl', 0.0))
-
-        if unrealized != 0.0:
-            dollar_pnl_val = round(unrealized, 2)
-        elif opt_mark > 0 and opt_mark != opt_cost:
-            dollar_pnl_val = round((opt_mark - opt_cost) * 100.0 * shares_cnt, 2)
-        elif raw_pnl != 0.0:
-            dollar_pnl_val = raw_pnl
-        else:
-            dollar_pnl_val = 0.0
-
-        total_floating_pnl_val += dollar_pnl_val
-        pct_pnl_val = round((dollar_pnl_val / (opt_cost * shares_cnt * 100.0)) * 100.0, 1) if opt_cost > 0 else 0.0
-        pnl_prefix = '+' if dollar_pnl_val >= 0 else ''
-        t['dollar_pnl'] = f"{pnl_prefix}${dollar_pnl_val:.2f}"
-        t['pnl_pct'] = f"{pnl_prefix}{pct_pnl_val:.1f}%"
-        t['pnl_class'] = 'text-emerald-400' if dollar_pnl_val >= 0 else 'text-red-400'
-
     str_starting = f"${starting_balance:,.2f}"
     str_settled = f"${settled_free:,.2f}"
-    str_deployed = f"${total_deployed_basis:,.2f}"
+    str_deployed = f"${deployed_capital:,.2f}"
     str_unsettled = f"${unsettled:,.2f}"
-    str_floating = f"${total_floating_pnl_val:+,.2f}"
+    pnl_prefix_total = '+' if total_pnl >= 0 else ''
+    str_floating = f"{pnl_prefix_total}${total_pnl:,.2f}"
     str_realized = f"${total_closed_pnl:+.2f}"
 
     ledger = {
@@ -928,89 +877,51 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
 
     formatted_closed = []
     for item in closed:
-        if isinstance(item, dict):
-            d = item
-        elif hasattr(item, '_asdict'):
-            d = item._asdict()
-        else:
-            d = dict(item) if hasattr(item, 'keys') else {}
+        d = item if isinstance(item, dict) else (item._asdict() if hasattr(item, '_asdict') else dict(item))
+        entry = float(d.get('entry_price', 0) or 0.0)
+        exit_px = float(d.get('exit_price', 0) or 0.0)
+        shares = int(float(d.get('shares', 1) or 1))
+        pnl_val = float(d.get('net_pnl', 0.0) or 0.0)
 
-        try:
-            entry = float(d.get('entry_price', 0) or d.get('spot_price', 0) or 0)
-        except (ValueError, TypeError):
-            entry = 0.0
-
-        try:
-            exit_px = float(d.get('exit_price', 0) or 0)
-        except (ValueError, TypeError):
-            exit_px = 0.0
-
-        try:
-            shares = int(float(d.get('shares', d.get('contracts', 1)) or 1))
-        except (ValueError, TypeError):
-            shares = 1
-
-        pnl_val = d.get('net_pnl')
-        if pnl_val is None or pnl_val == "":
-            pnl_val = round((exit_px - entry) * shares * 100, 2) if exit_px > 0 else 0.0
-        else:
-            try:
-                pnl_val = float(pnl_val)
-            except (ValueError, TypeError):
-                pnl_val = 0.0
-
-        sl_val = d.get('stop_loss')
-        if not sl_val or sl_val == 0.0:
-            sl_val = f"${entry * 0.8:.2f}" if entry else "N/A"
-        elif isinstance(sl_val, (int, float)):
-            sl_val = f"${sl_val:.2f}"
-
-        tp_val = d.get('take_profit') or d.get('target')
-        if not tp_val or tp_val == 0.0:
-            tp_val = f"${entry * 1.5:.2f}" if entry else "N/A"
-        elif isinstance(tp_val, (int, float)):
-            tp_val = f"${tp_val:.2f}"
-
-        cso_val = d.get('cso_notes') or d.get('cso_reason') or d.get('exit_status') or 'STOP_LOSS_20PCT'
-        status_val = d.get('exit_status') or d.get('status') or 'CLOSED'
+        sl_val = d.get('stop_loss') or (entry * 0.8)
+        tp_val = d.get('take_profit') or (entry * 1.5)
 
         formatted_closed.append({
             'ticker': d.get('ticker', 'N/A'),
             'direction': resolve_trade_direction(d),
             'strategy': d.get('strategy', 'SMART_CSO_LIVE'),
-            'entry_price': f"${entry:.2f}" if isinstance(entry, float) else str(entry),
-            'exit_price': f"${exit_px:.2f}" if isinstance(exit_px, float) else str(exit_px),
-            'stop_loss': str(sl_val),
-            'take_profit': str(tp_val),
-            'cso_notes': str(cso_val),
-            'cso_reason': str(cso_val),
-            'status': str(status_val),
+            'entry_price': f"${entry:.2f}",
+            'exit_price': f"${exit_px:.2f}",
+            'stop_loss': f"${float(sl_val):.2f}" if isinstance(sl_val, (int, float)) else str(sl_val),
+            'take_profit': f"${float(tp_val):.2f}" if isinstance(tp_val, (int, float)) else str(tp_val),
+            'cso_notes': str(d.get('cso_notes') or d.get('exit_status') or 'CLOSED'),
+            'status': str(d.get('exit_status') or 'CLOSED'),
             'contracts': str(shares),
             'dollar_pnl': f"${pnl_val:+.2f}",
             'pnl_class': 'text-red-400' if pnl_val < 0 else 'text-emerald-400',
             'timestamp': d.get('exit_timestamp') or d.get('timestamp') or ''
         })
-    closed = formatted_closed
 
     template = Template(INDEX_HTML_TEMPLATE)
     rendered_html = template.render(
         proximity_matrix=levels_data,
         level_proximity=levels_data,
         trades=trades,
-        closed_trades=closed,
+        closed_trades=formatted_closed,
         selected_date=current_date,
         ledger=ledger,
         total_pnl=str_floating,
-        pnl_class="text-green-400" if total_floating_pnl_val >= 0 else "text-red-400",
+        pnl_class="text-emerald-400" if total_pnl >= 0 else "text-red-400",
         total_closed_pnl=str_realized,
-        closed_pnl_class="text-green-400" if total_closed_pnl >= 0 else "text-red-400"
+        closed_pnl_class="text-emerald-400" if total_closed_pnl >= 0 else "text-red-400"
     )
     return HTMLResponse(content=rendered_html)
 
 @app.post("/api/update_tp_target/{ticker}/{target_pct}")
 async def update_tp_target(ticker: str, target_pct: float):
     try:
-        conn = sqlite3.connect(DB_PATH)
+        db_path = "/app/harm_telemetry.db" if os.path.exists("/app/harm_telemetry.db") else DB_PATH
+        conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE trades 
@@ -1025,82 +936,41 @@ async def update_tp_target(ticker: str, target_pct: float):
 
 @app.post("/close-position/{ticker}")
 async def close_single_position(ticker: str):
-    close_position_in_db(ticker)
+    try:
+        try:
+            from live_gsg_guard import execute_tradier_close, get_active_base_url
+            active_url = get_active_base_url() if callable(get_active_base_url) else os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
+        except Exception:
+            pass
+        
+        close_position_in_db(ticker)
+    except Exception as e:
+        print(f"[!] Error executing close for {ticker}: {e}")
     return RedirectResponse(url="/", status_code=303)
 
 @app.post("/close-all")
 async def close_all_positions():
-    dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
-    trades_table = dynamodb.Table('HarmonizedTrades')
-    res = trades_table.query(KeyConditionExpression=boto3.dynamodb.conditions.Key('tenant_id').eq('COMPANY_A'))
-    for item in res.get('Items', []):
-        if item.get('exit_status') == 'ACTIVE':
-            close_position_in_db(item.get('ticker'))
+    try:
+        trades, *_ = fetch_portfolio_state()
+        for item in trades:
+            ticker = item.get('ticker')
+            if ticker:
+                close_position_in_db(ticker)
+    except Exception as e:
+        print(f"[!] Error executing close all: {e}")
     return RedirectResponse(url="/", status_code=303)
 
 @app.get("/dashboard_data.json")
 async def get_dashboard_data_json():
     try:
         trades, closed, total_pnl, total_closed_pnl, current_date, starting_balance, settled_free, deployed_capital, unsettled = fetch_portfolio_state()
-        
-        live_spots = {}
-        if os.path.exists('trading_levels.json'):
-            try:
-                with open('trading_levels.json', 'r') as lf:
-                    levels_data = json.load(lf)
-                    for tick, data in levels_data.items():
-                        if isinstance(data, dict) and 'spot' in data:
-                            live_spots[tick] = float(data['spot'])
-            except Exception:
-                pass
-
-        total_deployed_basis = 0.0
-        total_floating_pnl_val = 0.0
-
-        for t in trades:
-            tkr = str(t.get('ticker', '')).upper()
-            opt_cost = float(t.get('entry_price') or t.get('basis') or t.get('cost') or 0.80)
-            shares_cnt = float(t.get('shares', 1.0))
-            spot_entry = float(t.get('spot_price') or 100.0)
-            direction = resolve_trade_direction(t)
-
-            occ = str(t.get('occ_symbol', ''))
-            strike = float(occ[-8:]) / 1000.0 if (len(occ) >= 15 and occ[-8:].isdigit()) else 0.0
-            current_spot = float(live_spots.get(tkr) or live_spots.get(tkr.lower()) or t.get('current_spot') or t.get('stock_price') or 0.0)
-            if current_spot == 0.0:
-                current_spot = strike if strike > 0 else spot_entry
-
-            display_spot = current_spot if current_spot > 15.0 else (strike if strike > 0 else opt_cost)
-            t['direction'] = direction
-            t['price'] = f"{display_spot:.2f}"
-            t['cost'] = f"{opt_cost:.2f}"
-            t['basis'] = f"{opt_cost:.2f}"
-
-            opt_mark = float(t.get('option_mark') or t.get('current_price') or 0.0)
-            raw_pnl = float(t.get('net_pnl', 0.0))
-
-            if opt_mark > 0 and opt_mark != opt_cost:
-                dollar_pnl_val = round((opt_mark - opt_cost) * 100.0 * shares_cnt, 2)
-            elif raw_pnl != 0.0:
-                dollar_pnl_val = raw_pnl
-            else:
-                dollar_pnl_val = 0.0
-
-            total_deployed_basis += (opt_cost * shares_cnt * 100.0)
-            total_floating_pnl_val += dollar_pnl_val
-
-            pct_pnl_val = round((dollar_pnl_val / (opt_cost * shares_cnt * 100.0)) * 100.0, 1) if opt_cost > 0 else 0.0
-            pnl_prefix = '+' if dollar_pnl_val >= 0 else ''
-            t['dollar_pnl'] = f"{pnl_prefix}${dollar_pnl_val:.2f}"
-            t['pnl_pct'] = f"{pnl_prefix}{pct_pnl_val:.1f}%"
-
-        pnl_prefix_total = '+' if total_floating_pnl_val >= 0 else ''
-        floating_pnl_str = f"{pnl_prefix_total}${total_floating_pnl_val:.2f}"
+        pnl_prefix_total = '+' if total_pnl >= 0 else ''
+        floating_pnl_str = f"{pnl_prefix_total}${total_pnl:.2f}"
 
         return {
             "active_positions": trades,
             "closed_positions": closed,
-            "deployed_capital": total_deployed_basis,
+            "deployed_capital": deployed_capital,
             "floating_pnl": floating_pnl_str,
             "status": "success"
         }

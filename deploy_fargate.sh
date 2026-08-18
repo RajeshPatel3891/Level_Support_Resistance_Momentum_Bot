@@ -1,8 +1,10 @@
 #!/bin/bash
 set -e
 
+TARGET_ENV="$(echo "${1:-SANDBOX}" | tr '[:lower:]' '[:upper:]')"
+
 echo "=================================================="
-echo " HARM.AI // FARGATE PRODUCTION DEPLOYMENT PIPELINE"
+echo "🚀 HARM.AI // FARGATE DEPLOYMENT PIPELINE // TARGET: $TARGET_ENV"
 echo "=================================================="
 
 # Configuration Variables
@@ -10,6 +12,20 @@ AWS_REGION="us-east-1"
 CLUSTER_NAME="harmonized-cluster"
 TASK_DEF_FAMILY="harmonized-trading-task"
 IMAGE_NAME="harm-trading-bot"
+
+# Select correct environment file
+if [ "$TARGET_ENV" == "PRODUCTION" ] || [ "$TARGET_ENV" == "PROD" ]; then
+    ENV_FILE=".env.prod"
+    ENV_VALUE="PRODUCTION"
+else
+    ENV_FILE=".env.sandbox"
+    ENV_VALUE="SANDBOX"
+fi
+
+if [ ! -f "$ENV_FILE" ]; then
+    echo "[❌ FATAL] Environment file $ENV_FILE not found! Aborting."
+    exit 1
+fi
 
 echo "[*] Step 1: Cleaning local database duplicates..."
 python3 -c "
@@ -36,8 +52,8 @@ conn.close()
 echo "[*] Step 2: Running premarket prep & schema verification..."
 python3 premarket_prep.py 2>/dev/null || echo "[!] Premarket prep completed."
 
-echo "[*] Step 2.5: Verifying proximity pipeline sync across modules..."
-python3 -m unittest tests/test_proximity_sync.py || { echo "[❌ FATAL] Pipeline desync detected! Aborting build."; exit 1; }
+echo "[*] Step 2.5: Running unit tests..."
+python3 -m unittest discover -s . -p "test_*.py" -v || { echo "[❌ FATAL] Unit tests failed! Aborting build."; exit 1; }
 
 echo "[*] Step 3: Building Docker container image..."
 docker build --no-cache -t $IMAGE_NAME:latest .
@@ -52,16 +68,45 @@ echo "[*] Step 5: Tagging and pushing image to ECR..."
 docker tag $IMAGE_NAME:latest ${ECR_URI}:latest
 docker push ${ECR_URI}:latest
 
-echo "[*] Step 6: Recalibrating Standalone Fargate Task..."
-RUNNING_TASK=$(aws ecs list-tasks --cluster $CLUSTER_NAME --region $AWS_REGION --query "taskArns[0]" --output text)
-
-if [ "$RUNNING_TASK" != "None" ] && [ -n "$RUNNING_TASK" ]; then
-    echo "[*] Stopping existing task: $RUNNING_TASK"
-    aws ecs stop-task --cluster $CLUSTER_NAME --task $RUNNING_TASK --region $AWS_REGION >/dev/null
-    sleep 5
+echo "[*] Step 6: Recalibrating $TARGET_ENV Fargate Task..."
+if [ -f "./stop_fargate_env.sh" ]; then
+    ./stop_fargate_env.sh "$TARGET_ENV"
+else
+    RUNNING_TASK=$(aws ecs list-tasks --cluster $CLUSTER_NAME --region $AWS_REGION --query "taskArns[0]" --output text)
+    if [ "$RUNNING_TASK" != "None" ] && [ -n "$RUNNING_TASK" ]; then
+        echo "[*] Stopping existing task: $RUNNING_TASK"
+        aws ecs stop-task --cluster $CLUSTER_NAME --task $RUNNING_TASK --region $AWS_REGION >/dev/null
+        sleep 5
+    fi
 fi
 
-echo "[*] Step 7: Launching updated standalone Fargate task..."
+echo "[*] Step 7: Parsing $ENV_FILE into ECS Container Environment Overrides..."
+# Build JSON array from env file (ignoring comments and empty lines)
+ENV_JSON=$(python3 -c "
+import json
+
+env_vars = []
+with open('$ENV_FILE', 'r') as f:
+    for line in f:
+        line = line.strip()
+        if line and not line.startswith('#') and '=' in line:
+            key, val = line.split('=', 1)
+            env_vars.append({'name': key.strip(), 'value': val.strip()})
+
+# Enforce EXECUTION_ENV match
+env_vars = [item for item in env_vars if item['name'] != 'EXECUTION_ENV']
+env_vars.append({'name': 'EXECUTION_ENV', 'value': '$ENV_VALUE'})
+
+overrides = {
+    'containerOverrides': [{
+        'name': 'harmonized-trading-container',
+        'environment': env_vars
+    }]
+}
+print(json.dumps(overrides))
+")
+
+echo "[*] Step 8: Launching updated $TARGET_ENV Fargate task with full broker credentials..."
 SUBNET_ID=$(aws ec2 describe-subnets --region $AWS_REGION --query "Subnets[0].SubnetId" --output text)
 SG_ID=$(aws ec2 describe-security-groups --region $AWS_REGION --query "SecurityGroups[0].GroupId" --output text)
 
@@ -70,6 +115,7 @@ aws ecs run-task --enable-execute-command \
   --task-definition $TASK_DEF_FAMILY \
   --launch-type FARGATE \
   --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SG_ID],assignPublicIp=ENABLED}" \
+  --overrides "$ENV_JSON" \
   --region $AWS_REGION >/dev/null
 
-echo "[✓] Deployment successfully completed! New standalone Fargate task is online."
+echo "[✓] Deployment successfully completed! $ENV_VALUE Fargate task is online with full credential injection."

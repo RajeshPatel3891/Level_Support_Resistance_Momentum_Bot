@@ -6,8 +6,10 @@ Scans trading_levels.json, evaluates proximity/safety and support/resistance
 boundaries, resolves directional bias (Call vs Put), performs smart option chain
 liquidity & spread searches via Tradier API, enforces strict execution receipts, 
 and synchronizes with both SQLite and AWS DynamoDB with live GSG/MTTP bindings.
-Now features continuous real-time terminal exit telemetry streaming and dynamic
-execution environment tagging (PRODUCTION vs SANDBOX).
+Now features continuous real-time terminal exit telemetry streaming, dynamic
+execution environment tagging (PRODUCTION vs SANDBOX), beta tier calibrations,
+a two-stage Mid-to-Ask order execution waterfall, ghost-fill guards, and legacy
+unit test stubs.
 """
 
 import os
@@ -38,6 +40,72 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 def log_msg(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [SMART_CSO] {msg}")
+
+# ===============================================================================
+# HARM.AI // BETA CALIBRATION & EXECUTION WATERFALL
+# ===============================================================================
+
+BETA_PROFILES = {
+    "HIGH": {"zone": 0.0040, "turn_ticks": 3, "trail_mult": 1.5},
+    "MID":  {"zone": 0.0030, "turn_ticks": 3, "trail_mult": 1.0},
+    "LOW":  {"zone": 0.0020, "turn_ticks": 2, "trail_mult": 0.75}
+}
+
+TICKER_BETA_MAP = {
+    "SPY": "HIGH", "QQQ": "HIGH", "IWM": "HIGH", "NVDA": "HIGH", "TSLA": "HIGH",
+    "AAPL": "HIGH", "AMZN": "HIGH", "GOOGL": "HIGH", "AMD": "HIGH", "META": "HIGH",
+    "NFLX": "HIGH", "MARA": "HIGH",
+    "PLTR": "MID", "RIVN": "MID", "SOFI": "MID", "HOOD": "MID", "UBER": "MID", "SNAP": "MID",
+    "INTC": "LOW", "AAL": "LOW", "F": "LOW", "BAC": "LOW", "CCL": "LOW", "NKE": "LOW"
+}
+
+def get_ticker_calibration(ticker: str):
+    beta_tier = TICKER_BETA_MAP.get(ticker.upper(), "MID")
+    profile = BETA_PROFILES[beta_tier]
+    return {
+        "beta_tier": beta_tier,
+        "proximity_threshold": profile["zone"],
+        "required_turn_ticks": profile["turn_ticks"],
+        "trailing_stop_multiplier": profile["trail_mult"]
+    }
+
+def execute_smart_order(tradier_client, account_id, symbol, option_symbol, bid, ask, quantity=1):
+    """
+    Stage 1: Attempt Limit order fill at MID price.
+    Stage 2: Fallback to ASK if unfilled after 3s and spread <= 1.0%.
+    """
+    import time
+    bid_f = float(bid or 0.0)
+    ask_f = float(ask or 0.0)
+    if ask_f <= 0 or bid_f <= 0:
+        print(f"[!] Invalid quote for {option_symbol}. Aborting.")
+        return None
+
+    mid_price = round((bid_f + ask_f) / 2.0, 2)
+    spread_pct = (ask_f - bid_f) / ask_f if ask_f > 0 else 0.0
+
+    print(f"[*] [STAGE 1] Submitting Limit Order at MID: ${mid_price:.2f} (Bid: ${bid_f:.2f} / Ask: ${ask_f:.2f})")
+    order_id = tradier_client.place_option_order(
+        account_id, symbol, option_symbol, side='buy_to_open', 
+        quantity=quantity, order_type='limit', price=mid_price
+    )
+    
+    time.sleep(3)  # Wait 3s for Mid-fill
+    
+    status = tradier_client.get_order_status(account_id, order_id)
+    if status == 'filled':
+        print(f"[✓] [MID FILL SUCCESS] Filled {option_symbol} at ${mid_price:.2f}!")
+        return {'order_id': order_id, 'fill_price': mid_price, 'type': 'MID_FILL'}
+
+    if spread_pct <= 0.01:
+        print(f"[*] [STAGE 2] Mid unfilled. Spread is tight ({spread_pct*100.0:.2f}% <= 1.0%). Escalating to ASK (${ask_f:.2f})...")
+        tradier_client.modify_order(account_id, order_id, price=ask_f)
+        time.sleep(1)
+        return {'order_id': order_id, 'fill_price': ask_f, 'type': 'ASK_FALLBACK'}
+    else:
+        print(f"[⛔ SPREAD GUARD] Canceling order {order_id}. Mid unfilled & spread ({spread_pct*100.0:.2f}%) > 1.0%.")
+        tradier_client.cancel_order(account_id, order_id)
+        return None
 
 def check_active_position_exists(ticker, tenant_id='COMPANY_A'):
     """
@@ -170,6 +238,7 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
     - Phase 1: Submits low-ball limit order at/near BID.
     - Phase 2: Holds for 3.5s while evaluating underlying price velocity & book depth.
     - Phase 3: Steps up limit price if momentum is high, or cancels/aborts if stagnant/adverse.
+    Enforces Ghost Fill Protection (verifies exec_quantity > 0).
     """
     if not TRADIER_TOKEN or not TRADIER_ACCOUNT_ID:
         log_msg("[!] Tradier Token or Account ID missing.")
@@ -223,8 +292,6 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
 
         # --- PHASE 2: EVALUATION WINDOW (3.5s) ---
         start_wait = time.time()
-        is_filled = False
-        fill_price = 0.0
 
         while (time.time() - start_wait) < 3.5:
             time.sleep(1.0)
@@ -236,12 +303,14 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
             if status_res.status_code == 200:
                 detailed = status_res.json().get("order", {})
                 status = detailed.get("status", "")
-                if status in ["filled", "open", "pending"]:
-                    if status == "filled":
-                        fill_price = float(detailed.get("avg_fill_price") or low_ball_px)
-                        is_filled = True
-                        log_msg(f"[🎯 LOW-BALL FILLED!] Target filled at BID (${fill_price:.2f})! Zero spread slippage.")
-                        return True, fill_price, order_id
+                if status == "filled":
+                    exec_qty = detailed.get("exec_quantity")
+                    if exec_qty is not None and float(exec_qty) == 0:
+                        log_msg(f"[⛔ GHOST FILL DETECTED] Order {order_id} marked filled but exec_quantity=0.")
+                        return False, 0.0, ""
+                    fill_price = float(detailed.get("avg_fill_price") or low_ball_px)
+                    log_msg(f"[🎯 LOW-BALL FILLED!] Target filled at BID (${fill_price:.2f})! Zero spread slippage.")
+                    return True, fill_price, order_id
 
         # --- PHASE 3: MOMENTUM EVALUATION & STEP-UP / ABORT ---
         log_msg(f"[⏱️ EVALUATION TIMEOUT] Low-ball bid (${limit_price_str}) unfilled after 3.5s. Checking momentum...")
@@ -268,7 +337,11 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
                     chk = requests.get(f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders/{new_order_id}", headers=headers)
                     if chk.status_code == 200:
                         det = chk.json().get("order", {})
-                        if det.get("status") in ["filled", "open", "pending"]:
+                        if det.get("status") == "filled":
+                            exec_qty = det.get("exec_quantity")
+                            if exec_qty is not None and float(exec_qty) == 0:
+                                log_msg(f"[⛔ GHOST FILL DETECTED] Step order {new_order_id} marked filled but exec_quantity=0.")
+                                return False, 0.0, ""
                             f_px = float(det.get("avg_fill_price") or stepped_mid)
                             return True, f_px, new_order_id
 
@@ -471,7 +544,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
         log_msg(f"[⚠️ FALLBACK] No liquid contract found. Generating synthetic OCC symbol...")
         occ_symbol, ask_price = fetch_occ_symbol(ticker, direction, spot)
 
-    success, fill_px, order_id = execute_strict_tradier_order(occ_symbol, ticker, direction, quantity=5)
+    success, fill_px, order_id = execute_strict_tradier_order(occ_symbol, ticker, direction, quantity=1)
 
     if not success or fill_px <= 0 or not order_id:
         log_msg(f"[⛔ REGISTRATION ABORTED] Tradier execution receipt verification failed for {ticker} {occ_symbol}. Zero records written to DB, guards not engaged.")
@@ -480,13 +553,54 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
     fill_price = fill_px
     stop_loss = round(fill_price * 0.80, 2)
     take_profit = round(fill_price * 1.50, 2)
-    shares = 5
+    shares = 1
 
     log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, direction, occ_symbol, order_id)
     log_msg(f"[✓ SUCCESS] Strict Tradier Receipt confirmed and live watch loops engaged for {ticker} {direction}!")
     
     # Engagement of continuous live terminal exit telemetry
     monitor_live_exit_telemetry(ticker)
+
+# ===============================================================================
+# LEGACY COMPATIBILITY STUBS FOR UNIT TEST HARNESSES
+# ===============================================================================
+
+def execute_adaptive_micro_scalp_order(occ_symbol, underlying, side, quantity=1):
+    """Legacy alias wrapping execute_strict_tradier_order for unit test backward compatibility."""
+    return execute_strict_tradier_order(occ_symbol, underlying, side, quantity=quantity)
+
+def check_predictive_armed_trigger(ticker, spot_or_info, info=None):
+    """
+    Legacy alias evaluating dynamic arming state for tick playback harnesses.
+    Supports both check_predictive_armed_trigger(ticker, info) and (ticker, spot, info).
+    Returns (triggered: bool, reason: str).
+    """
+    if isinstance(spot_or_info, dict):
+        info_dict = spot_or_info
+        spot = float(info_dict.get("spot") or info_dict.get("spot_price") or info_dict.get("last_price") or 0.0)
+    else:
+        spot = float(spot_or_info or 0.0)
+        info_dict = info if isinstance(info, dict) else {}
+
+    calibration = get_ticker_calibration(ticker)
+    threshold = calibration["proximity_threshold"]
+    
+    target = float(
+        info_dict.get("armed_target") or 
+        info_dict.get("target") or 
+        info_dict.get("spot_target_call") or 
+        info_dict.get("call_target") or 
+        info_dict.get("spot_target_put") or 
+        info_dict.get("put_target") or 0.0
+    )
+    
+    if target <= 0 or spot <= 0:
+        return False, "INVALID_TARGET_OR_SPOT"
+        
+    gap_pct = abs(spot - target) / target
+    if gap_pct <= threshold:
+        return True, "PREDICTIVE_ARMED_TRIGGER_FIRED"
+    return False, "OUTSIDE_ARMED_ZONE"
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Strict Receipt Smart CSO Live Trader & Injector")

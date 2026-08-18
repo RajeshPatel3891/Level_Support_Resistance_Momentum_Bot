@@ -1,36 +1,47 @@
 #!/bin/bash
+CLUSTER="harmonized-cluster"
+REGION="us-east-1"
 
 echo "================================================="
 echo "🚀 HARM.AI CLUSTER TASK & DASHBOARD DISCOVERY"
 echo "================================================="
 
-TASKS=$(aws ecs list-tasks --cluster harmonized-cluster --region us-east-1 --query 'taskArns[]' --output text 2>/dev/null)
+TASKS=$(aws ecs list-tasks --cluster $CLUSTER --region $REGION --query 'taskArns[]' --output text 2>/dev/null)
 
-if [ -n "$TASKS" ] && [ "$TASKS" != "None" ]; then
-    for task in $TASKS; do
-        # Extract Task Metadata
-        eni=$(aws ecs describe-tasks --cluster harmonized-cluster --tasks "$task" --region us-east-1 --query 'tasks[0].attachments[0].details[?name==`networkInterfaceId`].value' --output text 2>/dev/null) 
-        group=$(aws ecs describe-tasks --cluster harmonized-cluster --tasks "$task" --region us-east-1 --query 'tasks[0].group' --output text 2>/dev/null)
-        status=$(aws ecs describe-tasks --cluster harmonized-cluster --tasks "$task" --region us-east-1 --query 'tasks[0].lastStatus' --output text 2>/dev/null)
-
-        # Environment Classifier
-        ENV_LABEL="SANDBOX"
-        if [[ "$group" == *"prod"* ]]; then
-            ENV_LABEL="PROD"
-        fi
-
-        if [ -n "$eni" ] && [ "$eni" != "None" ]; then
-            ip=$(aws ec2 describe-network-interfaces --network-interface-ids "$eni" --region us-east-1 --query 'NetworkInterfaces[0].Association.PublicIp' --output text 2>/dev/null)
-            if [ -n "$ip" ] && [ "$ip" != "None" ]; then
-                echo "[✓] [${ENV_LABEL}] Status: ${status} | Task ID: ${task##*/} | Dashboard: http://${ip}:8080/"
-            else
-                echo "[⏳] [${ENV_LABEL}] Status: ${status} | Network Interface attaching (IP pending)..."
-            fi
-        else
-            echo "[⏳] [${ENV_LABEL}] Status: ${status} | Provisioning container..."
-        fi
-    done
-else
-    echo "[-] No active tasks found in 'harmonized-cluster'."
+if [ -z "$TASKS" ] || [ "$TASKS" == "None" ]; then
+  echo "[-] No active tasks found in '$CLUSTER'."
+  echo "================================================="
+  exit 0
 fi
+
+for TASK_ARN in $TASKS; do
+  TASK_ID="${TASK_ARN##*/}"
+  
+  DESC=$(aws ecs describe-tasks --cluster $CLUSTER --tasks "$TASK_ARN" --region $REGION 2>/dev/null)
+  STATUS=$(echo "$DESC" | jq -r '.tasks[0].lastStatus // "UNKNOWN"')
+  
+  # Search both base task def and launch overrides for PRODUCTION flag
+  IF_PROD=$(echo "$DESC" | jq -r '(.tasks[0].containers[0].environment[]?, .tasks[0].overrides.containerOverrides[0].environment[]?) | select(.name=="EXECUTION_ENV") | .value' 2>/dev/null | grep -i "PRODUCTION")
+  GROUP=$(echo "$DESC" | jq -r '.tasks[0].group // ""')
+
+  if [ -n "$IF_PROD" ] || [[ "$GROUP" == *"prod"* ]]; then
+    MODE="PRODUCTION"
+  else
+    MODE="SANDBOX"
+  fi
+  
+  ENI_ID=$(echo "$DESC" | jq -r '.tasks[0].attachments[0].details[]? | select(.name=="networkInterfaceId") | .value')
+  
+  if [ -n "$ENI_ID" ] && [ "$ENI_ID" != "null" ] && [ "$ENI_ID" != "None" ]; then
+    PUBLIC_IP=$(aws ec2 describe-network-interfaces --network-interface-ids "$ENI_ID" --region $REGION --query "NetworkInterfaces[0].Association.PublicIp" --output text 2>/dev/null)
+    
+    if [ -n "$PUBLIC_IP" ] && [ "$PUBLIC_IP" != "null" ] && [ "$PUBLIC_IP" != "None" ]; then
+      echo "[✓] [$MODE] Status: $STATUS | Task ID: $TASK_ID | Dashboard: http://$PUBLIC_IP:8080/"
+    else
+      echo "[⏳] [$MODE] Status: $STATUS | Task ID: $TASK_ID | Network Interface attaching (IP pending)..."
+    fi
+  else
+    echo "[⏳] [$MODE] Status: $STATUS | Task ID: $TASK_ID | Provisioning container..."
+  fi
+done
 echo "================================================="
