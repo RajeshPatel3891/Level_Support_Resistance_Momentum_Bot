@@ -9,6 +9,12 @@ if PARENT_DIR not in sys.path:
 
 from src.GexReader import get_latest_gex_context
 
+# --- ENVIRONMENT RISK CONFIGURATION ---
+try:
+    OPTION_STOP_LOSS_PCT = float(os.getenv("OPTION_STOP_LOSS_PCT", "0.12"))
+except (ValueError, TypeError):
+    OPTION_STOP_LOSS_PCT = 0.12
+
 def calculate_gex_hit_probability(spot: float, target: float, gex_label: str = 'POSITIVE', default_daily_vol_pct: float = 0.015) -> float:
     """Calculates win probability using standard deviation Gaussian decay."""
     if spot <= 0 or target <= 0:
@@ -26,7 +32,10 @@ def calculate_risk_return_dollars(spot: float, target: float, stop_loss: float, 
     """Calculates potential TP return and SL risk in dollar amounts."""
     multiplier = delta * 100.0 * shares
     tp_diff = target - spot
-    sl_diff = spot - stop_loss if stop_loss > 0 else spot * 0.02
+    
+    # Fallback to configured stop loss percentage if stop loss is undefined
+    sl_pct_fallback = float(os.getenv("OPTION_STOP_LOSS_PCT", "0.12"))
+    sl_diff = spot - stop_loss if stop_loss > 0 else spot * sl_pct_fallback
 
     potential_tp_dollar = round(tp_diff * multiplier, 2)
     potential_sl_dollar = round(-abs(sl_diff * multiplier), 2)
@@ -34,11 +43,14 @@ def calculate_risk_return_dollars(spot: float, target: float, stop_loss: float, 
     return potential_tp_dollar, potential_sl_dollar
 
 def resolve_direction_targets(ticker: str, last_price: float, direction: str = 'CALL', stored_stop: float = 0.0):
-    """Resolves direction-aware GEX target walls and stop losses."""
+    """Resolves direction-aware GEX target walls and stop losses using environment OPTION_STOP_LOSS_PCT."""
     gex_ctx = get_latest_gex_context(ticker)
     gex_target = None
     gex_label = "NEUTRAL"
     stop_loss_val = float(stored_stop) if stored_stop else 0.0
+    
+    # Dynamic stop loss multiplier derived from environment (default: 0.12 / 12%)
+    sl_pct = float(os.getenv("OPTION_STOP_LOSS_PCT", "0.12"))
 
     if gex_ctx:
         call_wall = gex_ctx.get('call_wall')
@@ -49,11 +61,11 @@ def resolve_direction_targets(ticker: str, last_price: float, direction: str = '
         if str(direction).upper() == 'CALL':
             gex_target = call_wall if (call_wall and call_wall > last_price) else (gamma_flip if (gamma_flip and gamma_flip > last_price) else round(last_price * 1.015, 2))
             if stop_loss_val <= 0 or stop_loss_val >= last_price:
-                stop_loss_val = put_wall if (put_wall and put_wall < last_price) else round(last_price * 0.985, 2)
+                stop_loss_val = put_wall if (put_wall and put_wall < last_price) else round(last_price * (1.0 - sl_pct), 2)
         else:
-            gex_target = put_wall if (put_wall and put_wall < last_price) else (gamma_flip if (gamma_flip and gamma_flip < last_price) else round(last_price * 0.985, 2))
+            gex_target = put_wall if (put_wall and put_wall < last_price) else (gamma_flip if (gamma_flip and gamma_flip < last_price) else round(last_price * (1.0 - sl_pct), 2))
             if stop_loss_val <= 0 or stop_loss_val <= last_price:
-                stop_loss_val = call_wall if (call_wall and call_wall > last_price) else round(last_price * 1.015, 2)
+                stop_loss_val = call_wall if (call_wall and call_wall > last_price) else round(last_price * (1.0 + sl_pct), 2)
 
     return gex_target, stop_loss_val, gex_label
 

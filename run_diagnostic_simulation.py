@@ -5,21 +5,27 @@ import sqlite3
 import csv
 import argparse
 import subprocess
+import boto3
 from datetime import datetime, timedelta
 
-# Path configuration - 100% markdown-safe pathing (no double underscores)
+# Path configuration - 100% markdown-safe pathing
 CURRENT_DIR = os.getcwd()
 DB_FILE = os.path.join(CURRENT_DIR, 'harm_telemetry.db')
 DATA_JSON = os.path.join(CURRENT_DIR, 'dashboard_data.json')
 LEVELS_FILE = os.path.join(CURRENT_DIR, 'trading_levels.json')
 
-TICKERS = ["SPY", "QQQ", "NVDA", "IWM", "AMZN", "AAPL", "MSFT", "TSLA"]
+# Complete 24-Ticker Matrix Integration
+TICKERS = [
+    "SPY", "QQQ", "IWM", "NVDA", "TSLA", "AAPL", "AMZN", "GOOGL", "AMD", 
+    "META", "NFLX", "PLTR", "SOFI", "F", "AAL", "INTC", "RIVN", "HOOD", 
+    "BAC", "SNAP", "MARA", "CCL", "UBER", "NKE"
+]
 
 def log_msg(prefix: str, msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [{prefix}] {msg}")
 
 # ==========================================================================
-# RISK MANAGEMENT LOGIC (From Canvas)
+# RISK MANAGEMENT LOGIC
 # ==========================================================================
 def validate_trade(contracts, stop_loss_distance, max_total_risk, max_rpc):
     """
@@ -180,9 +186,6 @@ class HarmonizedAnalyticsEngine:
         cursor = conn.cursor()
         
         # --- THE CORE INSULATION FIX ---
-        # Instead of dropping the entire database table, we initialize it safely if it does
-        # not exist, and delete ONLY previous backtesting runs (is_live = 0).
-        # This keeps your actual real-time production trades completely preserved!
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -203,9 +206,10 @@ class HarmonizedAnalyticsEngine:
                 is_live INTEGER DEFAULT 1
             )
         """)
-# cursor.execute("# DESTRUCTIVE SQL NEUTRALIZED: DELETE FROM trades WHERE is_live = 0")
         conn.commit()
         conn.close()
+
+        s3 = boto3.client('s3', region_name='us-east-1')
 
         for session_date in date_list:
             log_msg("BATCH", f"Processing Session: {session_date}...")
@@ -216,15 +220,15 @@ class HarmonizedAnalyticsEngine:
                     tickers_to_fetch.append(ticker)
             
             if tickers_to_fetch:
-                log_msg("FETCH", f"Downloading raw ticks from Alpaca for: {tickers_to_fetch}...")
-                fetch_cmd = [
-                    "python3", "src/FetchHistoricalData.py",
-                    "--tickers", ",".join(tickers_to_fetch),
-                    "--date", session_date,
-                    "--mode", "tick",
-                    "--limit", "100000"
-                ]
-                subprocess.run(fetch_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                log_msg("FETCH", f"Downloading raw ticks from S3 for: {tickers_to_fetch}...")
+                for ticker in tickers_to_fetch:
+                    s3_key = f"ticks/{session_date}/{ticker}.json"
+                    local_file = f"{ticker}_{session_date}.json"
+                    try:
+                        s3.download_file("harmonized-ai-telemetry-bucket", s3_key, local_file)
+                        log_msg("FETCH", f"[✓] Downloaded {ticker} ticks for {session_date} from S3.")
+                    except Exception as e:
+                        log_msg("FETCH", f"[!] S3 fetch failed for {ticker}: {e}")
                 
             log_msg("BACKTEST", f"Running offline simulation matrix for {session_date}...")
             
@@ -246,7 +250,7 @@ class HarmonizedAnalyticsEngine:
             
             self.ingest_session_audit_logs(session_date)
 
-        log_msg("BATCH", f"Batch compilation complete. Syncing live web dashboard JSON...")
+        log_msg("BATCH", "Batch compilation complete. Syncing live web dashboard JSON...")
         self.regenerate_dashboard_json()
 
     def ingest_session_audit_logs(self, session_date):
@@ -299,17 +303,13 @@ class HarmonizedAnalyticsEngine:
                         ratio = (price - entry_p) / entry_p if entry_p > 0 else 0.0
                         
                         # --- HARM.AI RISK FILTER INTEGRATION ---
-                        # Evaluate Option RPC (Risk Per Contract)
                         if "SIDEKICK" in active_trade["notes"].upper():
                             option_rpc = 20.0  # Strict $0.20 option stop target
                         else:
-                            # Standard 50-delta assumption on a $1.50 stock stop loss = $75.00 RPC
                             option_rpc = 1.50 * 0.50 * 100.0  
                             
-                        # Dynamically size contracts to respect the maximum total risk
                         contracts = max(1, int(self.max_total_risk / option_rpc)) if option_rpc > 0 else 1
                         
-                        # Execute the exact RiskFilterLogic from the Canvas document
                         is_valid, skip_reason = validate_trade(contracts, option_rpc, self.max_total_risk, self.max_rpc)
                         
                         if not is_valid:
@@ -318,14 +318,12 @@ class HarmonizedAnalyticsEngine:
                             total_skipped += 1
                             continue
                         
-                        # Calculate exact options premium return
                         net_pnl = round((contracts * 100.0) * ratio * 10.0, 2)
                         
                         active_trade["net_pnl"] = net_pnl
                         ticker_trades.append(active_trade)
                         active_trade = None
 
-            # Insert completed records into DB (written as is_live=0 backtests)
             for trade in ticker_trades:
                 ticker = trade["ticker"]
                 ts = trade["timestamp"]

@@ -20,6 +20,18 @@ echo "[2/10] 🛠️ Executing Pre-Boot Database Migrations..."
 python3 rebuild_db.py || true
 python3 preboot_db_fix.py || true
 
+echo "[2.1/10] 📡 Ingesting & Syncing Guardrail Levels from S3..."
+python3 src/sync_guardrail_levels.py || true
+
+echo "[2.2/10] 🧪 Executing Pre-Flight Level Pipeline Verification..."
+if python3 tests/test_level_pipeline.py; then
+    echo "[✓] S3 Level Pipeline verified!"
+else
+    echo "⛔ [CRITICAL LEVEL PIPELINE FAILURE] S3 Levels missing or invalid!"
+    pkill -P $$ 2>/dev/null
+    exit 1
+fi
+
 echo "[2.5/10] 🧪 Executing Master Pre-Flight Unit Test Suite..."
 if python3 test_master_suite.py; then
     echo "[✓] All pre-flight tests passed! Proceeding with boot..."

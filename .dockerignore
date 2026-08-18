@@ -1,4 +1,4 @@
 *.db
 *.PRE_FLIGHT_BAK
-.env.prod
-.env.sandbox
+dashboard_server.py.PRE_FLIGHT_BAK
+harm_telemetry.db.PRE_FLIGHT_BAK

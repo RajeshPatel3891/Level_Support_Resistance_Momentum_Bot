@@ -65,7 +65,7 @@ echo "[*] Step 7: Launching updated standalone Fargate task..."
 SUBNET_ID=$(aws ec2 describe-subnets --region $AWS_REGION --query "Subnets[0].SubnetId" --output text)
 SG_ID=$(aws ec2 describe-security-groups --region $AWS_REGION --query "SecurityGroups[0].GroupId" --output text)
 
-aws ecs run-task \
+aws ecs run-task --enable-execute-command \
   --cluster $CLUSTER_NAME \
   --task-definition $TASK_DEF_FAMILY \
   --launch-type FARGATE \

@@ -271,7 +271,8 @@ def evaluate_gex_exits():
                 except Exception:
                     pass
 
-            current_price, active_base_url = get_live_quote(occ_symbol)
+            current_price_raw, active_base_url = get_live_quote(occ_symbol)
+            current_price = float(current_price_raw or 0.0)
             spot, gex_target, gex_gap_pct = get_gex_target_info(ticker)
 
             if current_price == 0.0:
