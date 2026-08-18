@@ -74,6 +74,65 @@ def resolve_trade_direction(item):
             
     return 'CALL'
 
+def init_cloud_state_and_hydrate():
+    """Auto-provisions DynamoDB if missing and hydates local state on Fargate boot."""
+    aws_region = os.getenv("AWS_REGION", "us-east-1")
+    dynamo_table_name = os.getenv("DYNAMO_TABLE_NAME", "HarmonizedTrades")
+    dynamodb = boto3.resource('dynamodb', region_name=aws_region)
+    
+    try:
+        table = dynamodb.Table(dynamo_table_name)
+        table.load()
+    except Exception:
+        print(f"[!] Table {dynamo_table_name} missing. Auto-creating in DynamoDB...")
+        table = dynamodb.create_table(
+            TableName=dynamo_table_name,
+            KeySchema=[{'AttributeName': 'ticker', 'KeyType': 'HASH'}],
+            AttributeDefinitions=[{'AttributeName': 'ticker', 'AttributeType': 'S'}],
+            BillingMode='PAY_PER_REQUEST'
+        )
+        table.wait_until_exists()
+
+    db_path = "/app/harm_telemetry.db" if os.path.exists("/app/harm_telemetry.db") else DB_PATH
+    conn = sqlite3.connect(db_path)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS trades (
+            ticker TEXT PRIMARY KEY, timestamp TEXT, strategy TEXT, direction TEXT,
+            spot_price REAL, entry_price REAL, shares REAL, stop_loss REAL,
+            take_profit REAL, net_pnl REAL, exit_status TEXT, is_live INTEGER,
+            occ_symbol TEXT, execution_env TEXT
+        )
+    """)
+    conn.commit()
+
+    try:
+        response = table.scan(
+            FilterExpression="exit_status = :status AND shares > :zero",
+            ExpressionAttributeValues={":status": "ACTIVE", ":zero": 0}
+        )
+        items = response.get('Items', [])
+        print(f"[🚀 HYDRATION] Loaded {len(items)} active open positions from DynamoDB.")
+        for item in items:
+            c.execute("""
+                INSERT OR REPLACE INTO trades 
+                (ticker, timestamp, strategy, direction, spot_price, entry_price, shares, stop_loss, take_profit, net_pnl, exit_status, is_live, occ_symbol, execution_env)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                item.get('ticker'), item.get('timestamp'), item.get('strategy'), item.get('direction'),
+                float(item.get('spot_price', 0)), float(item.get('entry_price', 0)), float(item.get('shares', 0)),
+                float(item.get('stop_loss', 0)), float(item.get('take_profit', 0)), float(item.get('net_pnl', 0)),
+                item.get('exit_status', 'ACTIVE'), int(item.get('is_live', 1)), item.get('occ_symbol', ''),
+                item.get('execution_env', 'SANDBOX')
+            ))
+        conn.commit()
+    except Exception as e:
+        print(f"[!] Hydration warning: {e}")
+    finally:
+        conn.close()
+
+# Execute boot-time cloud state auto-provisioning and hydration
+init_cloud_state_and_hydrate()
 
 def fetch_closed_dynamo_positions(selected_date=None):
     """Fetch closed positions from DynamoDB matching the current host environment."""
@@ -111,7 +170,6 @@ def fetch_closed_dynamo_positions(selected_date=None):
     except Exception as e:
         print(f"Error fetching closed trades: {e}")
         return []
-
 
 def fetch_all_active_dynamo_positions():
     """Fetch active positions from DynamoDB matching the current host environment."""
@@ -157,7 +215,6 @@ def fetch_all_active_dynamo_positions():
     except Exception as e:
         print(f"[-] Dashboard DynamoDB Fetch Error: {e}")
         return []
-
 
 def atomic_json_dump(data, filepath):
     dir_name = os.path.dirname(os.path.abspath(filepath)) or '.'
