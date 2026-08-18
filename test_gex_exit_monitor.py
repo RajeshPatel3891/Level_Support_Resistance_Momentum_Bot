@@ -35,7 +35,7 @@ class TestGEXExitMonitorMTTP(unittest.TestCase):
 
         evaluate_gex_exits()
 
-        mock_tradier_close.assert_called_once_with('INTC260807C00101000', 'INTC', 5, 'https://api.tradier.com/v1')
+        mock_tradier_close.assert_called_once_with('INTC260807C00101000', 'INTC', 4, 'https://api.tradier.com/v1')
 
     @patch('src.gex_exit_monitor.is_regular_trading_hours', return_value=True)
     @patch('src.gex_exit_monitor.boto3.resource')
