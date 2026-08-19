@@ -36,7 +36,6 @@ class TestSmartCSODaemon(unittest.TestCase):
     @patch("smart_cso_injector.smart_cso_scout_and_execute")
     def test_daemon_loop_fault_tolerance(self, mock_scout):
         """Asserts daemon continues evaluating remaining tickers even if one throws an unhandled API exception."""
-        # Setup mock behavior: SOFI throws an exception, F succeeds, AAL succeeds
         def scout_side_effect(ticker):
             if ticker == "SOFI":
                 raise ValueError("Simulated Tradier Gateway Timeout")
@@ -47,7 +46,6 @@ class TestSmartCSODaemon(unittest.TestCase):
         test_tickers = ["SOFI", "F", "AAL"]
         results = {}
 
-        # Run a single scan pass mimicking the daemon loop body
         for ticker in test_tickers:
             try:
                 res = smart_cso_daemon.smart_cso_injector.smart_cso_scout_and_execute(ticker)
@@ -55,7 +53,6 @@ class TestSmartCSODaemon(unittest.TestCase):
             except Exception as e:
                 results[ticker] = f"CAUGHT_EXCEPTION: {e}"
 
-        # Assert SOFI caught exception but didn't crash execution for F and AAL
         self.assertIn("Simulated Tradier Gateway Timeout", results["SOFI"])
         self.assertEqual(results["F"], "EXECUTED_F")
         self.assertEqual(results["AAL"], "EXECUTED_AAL")

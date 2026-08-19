@@ -72,16 +72,17 @@ echo "[*] Step 6: Recalibrating $TARGET_ENV Fargate Task..."
 if [ -f "./stop_fargate_env.sh" ]; then
     ./stop_fargate_env.sh "$TARGET_ENV"
 else
-    RUNNING_TASK=$(aws ecs list-tasks --cluster $CLUSTER_NAME --region $AWS_REGION --query "taskArns[0]" --output text)
-    if [ "$RUNNING_TASK" != "None" ] && [ -n "$RUNNING_TASK" ]; then
-        echo "[*] Stopping existing task: $RUNNING_TASK"
-        aws ecs stop-task --cluster $CLUSTER_NAME --task $RUNNING_TASK --region $AWS_REGION >/dev/null
+    RUNNING_TASKS=$(aws ecs list-tasks --cluster $CLUSTER_NAME --region $AWS_REGION --desired-status RUNNING --query "taskArns[]" --output text)
+    if [ "$RUNNING_TASKS" != "None" ] && [ -n "$RUNNING_TASKS" ]; then
+        for TASK in $RUNNING_TASKS; do
+            echo "[*] Stopping existing task: $TASK"
+            aws ecs stop-task --cluster $CLUSTER_NAME --task $TASK --reason "Replaced by Fargate deploy pipeline ($TARGET_ENV)" --region $AWS_REGION >/dev/null
+        done
         sleep 5
     fi
 fi
 
-echo "[*] Step 7: Parsing $ENV_FILE into ECS Container Environment Overrides..."
-# Build JSON array from env file (ignoring comments and empty lines)
+echo "[*] Step 7: Parsing $ENV_FILE into ECS Container Environment Overrides & Setting Daemon Command..."
 ENV_JSON=$(python3 -c "
 import json
 
@@ -100,13 +101,14 @@ env_vars.append({'name': 'EXECUTION_ENV', 'value': '$ENV_VALUE'})
 overrides = {
     'containerOverrides': [{
         'name': 'harmonized-trading-container',
+        'command': ['python3', '-u', 'src/smart_cso_daemon.py'],
         'environment': env_vars
     }]
 }
 print(json.dumps(overrides))
 ")
 
-echo "[*] Step 8: Launching updated $TARGET_ENV Fargate task with full broker credentials..."
+echo "[*] Step 8: Launching updated $TARGET_ENV Fargate task with continuous daemon execution..."
 SUBNET_ID=$(aws ec2 describe-subnets --region $AWS_REGION --query "Subnets[0].SubnetId" --output text)
 SG_ID=$(aws ec2 describe-security-groups --region $AWS_REGION --query "SecurityGroups[0].GroupId" --output text)
 
@@ -118,4 +120,4 @@ aws ecs run-task --enable-execute-command \
   --overrides "$ENV_JSON" \
   --region $AWS_REGION >/dev/null
 
-echo "[✓] Deployment successfully completed! $ENV_VALUE Fargate task is online with full credential injection."
+echo "[✓] Deployment successfully completed! $ENV_VALUE Fargate task is online running continuous smart_cso_daemon."

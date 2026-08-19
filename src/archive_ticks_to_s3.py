@@ -1,84 +1,72 @@
 #!/usr/bin/env python3
-"""
-HARM.AI // EOD TICK & TELEMETRY S3 ARCHIVAL ENGINE
-===============================================================================
-1. Exports today's trades and telemetry ticks from harm_telemetry.db.
-2. Compresses the dataset into a GZIP archive (ticks_YYYY-MM-DD.db.gz).
-3. Uploads the compressed snapshot to AWS S3: s3://<BUCKET>/ticks/YYYY-MM-DD/
-4. Vacuums local SQLite storage to prevent database bloat.
-"""
-
 import os
 import sys
 import gzip
 import shutil
-import sqlite3
+import datetime
 import boto3
-from datetime import datetime
-from dotenv import load_dotenv
+from botocore.exceptions import ClientError
 
-# Load Prod Env
-if os.path.exists(".env.prod"):
-    load_dotenv(".env.prod", override=True)
-else:
-    load_dotenv(override=True)
+DB_FILE = "harm_telemetry.db"
+S3_BUCKET = "harmonized-ai-telemetry-bucket"
+AWS_REGION = "us-east-1"
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'harm_telemetry.db')
-S3_BUCKET = os.getenv("S3_TELEMETRY_BUCKET", "harmonized-ai-telemetry-bucket")
-AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
+def archive_telemetry_to_s3():
+    if not os.path.exists(DB_FILE):
+        print(f"[❌ ERROR] Database file '{DB_FILE}' not found on host!")
+        sys.exit(1)
 
-def log_msg(msg: str):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] [S3_ARCHIVER] {msg}")
+    today_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    gz_filename = f"harm_telemetry_{today_str}.db.gz"
+    s3_key = f"ticks/{today_str}/{gz_filename}"
 
-def archive_and_upload():
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    log_msg(f"Starting EOD Archival Process for Date: {today_str}...")
+    print("=" * 65)
+    print("📦 HARM.AI // TELEMETRY DATABASE S3 ARCHIVAL PIPELINE")
+    print(f"   Source DB   : {DB_FILE}")
+    print(f"   Compressed  : {gz_filename}")
+    print(f"   Target S3   : s3://{S3_BUCKET}/{s3_key}")
+    print("=" * 65)
 
-    if not os.path.exists(DB_PATH):
-        log_msg(f"[!] Target SQLite database {DB_PATH} not found. Aborting.")
-        return False
-
-    # 1. Create compressed local backup
-    archive_filename = f"harm_telemetry_{today_str}.db.gz"
-    archive_path = os.path.join(os.path.dirname(DB_PATH), archive_filename)
-
-    log_msg(f"Compressing {DB_PATH} -> {archive_path}...")
+    # Step 1: Compress the SQLite database file
+    print("[*] Step 1: Compressing database snapshot...")
     try:
-        with open(DB_PATH, 'rb') as f_in:
-            with gzip.open(archive_path, 'wb') as f_out:
+        with open(DB_FILE, 'rb') as f_in:
+            with gzip.open(gz_filename, 'wb') as f_out:
                 shutil.copyfileobj(f_in, f_out)
-        log_msg(f"[✓] Local compression complete ({os.path.getsize(archive_path) / 1024:.1f} KB).")
+        compressed_size_mb = os.path.getsize(gz_filename) / (1024 * 1024)
+        print(f"[✓] Compression complete. Compressed archive size: {compressed_size_mb:.2f} MB")
     except Exception as e:
-        log_msg(f"[-] Compression error: {e}")
-        return False
+        print(f"[❌ FATAL] Database compression failed: {e}")
+        sys.exit(1)
 
-    # 2. Upload to AWS S3
-    s3_key = f"ticks/{today_str}/{archive_filename}"
-    log_msg(f"Uploading to s3://{S3_BUCKET}/{s3_key}...")
-
+    # Step 2: Upload compressed database to S3
+    print("[*] Step 2: Uploading archive to S3...")
+    s3_client = boto3.client('s3', region_name=AWS_REGION)
     try:
-        s3 = boto3.client('s3', region_name=AWS_REGION)
-        s3.upload_file(archive_path, S3_BUCKET, s3_key)
-        log_msg(f"[✓ SUCCESS] Archived to S3 bucket '{S3_BUCKET}'!")
-    except Exception as e:
-        log_msg(f"[!] S3 Upload Warning (Bucket might need creation or IAM policy): {e}")
-        log_msg(f"[*] Local backup preserved at: {archive_path}")
+        s3_client.upload_file(gz_filename, S3_BUCKET, s3_key)
+        print(f"[✓] Upload successful: s3://{S3_BUCKET}/{s3_key}")
+    except ClientError as e:
+        print(f"[❌ FATAL] S3 upload failed: {e}")
+        if os.path.exists(gz_filename):
+            os.remove(gz_filename)
+        sys.exit(1)
 
-    # 3. Clean up local backup file after upload
-    if os.path.exists(archive_path):
-        os.remove(archive_path)
-
-    # 4. Vacuum local SQLite database to recover space
+    # Step 3: Verify S3 object existence
+    print("[*] Step 3: Verifying S3 object integrity...")
     try:
-        log_msg("Vacuuming local SQLite database to reclaim disk space...")
-        conn = sqlite3.connect(DB_PATH)
-        conn.execute("VACUUM;")
-        conn.close()
-        log_msg("[✓] SQLite database optimized and ready for next session.")
-    except Exception as e:
-        log_msg(f"[-] SQLite VACUUM error: {e}")
+        head = s3_client.head_object(Bucket=S3_BUCKET, Key=s3_key)
+        uploaded_size_mb = head['ContentLength'] / (1024 * 1024)
+        print(f"[✓] Verified on S3! Object size: {uploaded_size_mb:.2f} MB")
+    except ClientError as e:
+        print(f"[❌ FATAL] Verification failed. Object not found on S3: {e}")
+        sys.exit(1)
 
-    return True
+    # Step 4: Clean up temporary .gz archive locally (preserving original harm_telemetry.db)
+    if os.path.exists(gz_filename):
+        os.remove(gz_filename)
+        print(f"[✓] Cleaned up temporary local file '{gz_filename}'. Original '{DB_FILE}' preserved.")
+
+    print("\n[🎉] TELEMETRY ARCHIVE COMPLETE. S3 DATA SAFELY SECURED.")
 
 if __name__ == "__main__":
-    archive_and_upload()
+    archive_telemetry_to_s3()

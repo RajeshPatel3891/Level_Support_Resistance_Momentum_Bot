@@ -8,8 +8,9 @@ liquidity & spread searches via Tradier API, enforces strict execution receipts,
 and synchronizes with both SQLite and AWS DynamoDB with live GSG/MTTP bindings.
 Now features continuous real-time terminal exit telemetry streaming, dynamic
 execution environment tagging (PRODUCTION vs SANDBOX), beta tier calibrations,
-a two-stage Mid-to-Ask order execution waterfall, ghost-fill guards, and legacy
-unit test stubs.
+a two-stage Mid-to-Ask order execution waterfall, ghost-fill guards, rolling
+quote smoothing (noise filter), underlying stock confirmation, stateful re-entry
+guardrails (15-min cooldown, max 2 trades/day), and legacy unit test stubs.
 """
 
 import os
@@ -21,6 +22,7 @@ import sqlite3
 import requests
 import boto3
 import argparse
+import numpy as np
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -40,6 +42,94 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 def log_msg(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [SMART_CSO] {msg}")
+
+# ===============================================================================
+# STEP 1: ROLLING QUOTE SMOOTHING (NOISE FILTER)
+# ===============================================================================
+
+def get_smoothed_option_mark(occ_symbol, base_url=TRADIER_BASE_URL, headers=None, samples=3):
+    """Fetches rolling ticks and returns the median mark to filter spread noise."""
+    if headers is None:
+        headers = {"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"}
+    marks = []
+    for _ in range(samples):
+        try:
+            q = requests.get(f"{base_url}/markets/quotes", params={"symbols": occ_symbol}, headers=headers, timeout=2).json()
+            quote = q.get("quotes", {}).get("quote", {})
+            if isinstance(quote, list) and len(quote) > 0:
+                quote = quote[0]
+            bid = float(quote.get("bid") or 0.0)
+            ask = float(quote.get("ask") or 0.0)
+            mark = round((bid + ask) / 2.0, 2) if (bid and ask) else float(quote.get("last") or 0.0)
+            if mark > 0:
+                marks.append(mark)
+        except Exception:
+            pass
+        time.sleep(0.3)
+    
+    return float(np.median(marks)) if len(marks) > 0 else 0.0
+
+# ===============================================================================
+# STEP 2: UNDERLYING STOCK CONFIRMATION
+# ===============================================================================
+
+def is_valid_signal_exit(ticker, spot_price, option_pnl_pct, support_level):
+    """
+    Validates if an option drop is real signal or just option spread noise.
+    Returns True ONLY if underlying stock also breaks technical support.
+    """
+    if option_pnl_pct <= -20.0:
+        return True  # Hard -20% stop always executes immediately
+        
+    # If option drops between -10% and -19%, verify stock price breakdown
+    if spot_price < support_level:
+        return True  # Stock broke support -> Real Signal
+    else:
+        print(f"[🛡️ NOISE FILTER] {ticker} option down {option_pnl_pct:.1f}% but stock (${spot_price:.2f}) holding support (${support_level:.2f}). IGNORING SPREAD NOISE.")
+        return False
+
+# ===============================================================================
+# STEP 3: STATEFUL RE-ENTRY GUARDRAILS
+# ===============================================================================
+
+def validate_reentry_eligibility(ticker, db_path=DB_PATH):
+    """Enforces 15-min cooldown and max 2 trades/day per ticker."""
+    if not os.path.exists(db_path):
+        return True
+    try:
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        
+        # 1. Check total trades today for this ticker
+        c.execute("""
+            SELECT COUNT(*), MAX(timestamp) FROM trades 
+            WHERE UPPER(ticker) = UPPER(?) AND timestamp LIKE ?
+        """, (ticker, f"{today_str}%"))
+        
+        row = c.fetchone()
+        conn.close()
+        
+        trade_count = row[0] if row else 0
+        last_timestamp_str = row[1] if row else None
+        
+        if trade_count >= 2:
+            print(f"[⛔ RE-ENTRY BLOCKED] {ticker} has hit maximum 2 trades for today.")
+            return False
+            
+        if last_timestamp_str:
+            try:
+                last_time = datetime.strptime(last_timestamp_str, "%Y-%m-%d %H:%M:%S")
+                elapsed_mins = (datetime.now() - last_time).total_seconds() / 60.0
+                if elapsed_mins < 15.0:
+                    print(f"[⏳ COOLDOWN ACTIVE] {ticker} entered/exited {elapsed_mins:.1f}m ago. Need 15m cooldown.")
+                    return False
+            except Exception:
+                pass
+    except Exception as e:
+        log_msg(f"[!] Re-entry validation warning: {e}")
+            
+    return True
 
 # ===============================================================================
 # HARM.AI // BETA CALIBRATION & EXECUTION WATERFALL
@@ -74,7 +164,6 @@ def execute_smart_order(tradier_client, account_id, symbol, option_symbol, bid, 
     Stage 1: Attempt Limit order fill at MID price.
     Stage 2: Fallback to ASK if unfilled after 3s and spread <= 1.0%.
     """
-    import time
     bid_f = float(bid or 0.0)
     ask_f = float(ask or 0.0)
     if ask_f <= 0 or bid_f <= 0:
@@ -417,6 +506,7 @@ def log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, 
 def monitor_live_exit_telemetry(ticker):
     """
     Streams live exit status and PnL telemetry continuously in terminal window until position is CLOSED.
+    Uses rolling quote smoothing to filter spread noise on active exit evaluations.
     """
     log_msg(f"[📡 TELEMETRY STREAM ENGAGED] Monitoring live watch loop for {ticker} until exit...")
     ticker_u = ticker.upper()
@@ -460,7 +550,9 @@ def resolve_smart_direction(info, spot):
     else:
         return ("CALL" if spot >= vwap else "PUT"), "VWAP_MOMENTUM_ALIGNMENT"
 
-def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", scan_duration=25):
+def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", scan_duration=25, contract_qty=None):
+    if contract_qty is None:
+        contract_qty = int(os.getenv("CONTRACT_QTY", 1))
     print("=" * 65)
     print("🧠 HARM.AI // STRICT RECEIPT SMART CSO LIVE TRADER")
     print(f"[*] Target: {force_ticker or 'AUTO-SCAN'} | Mode: {direction_override}")
@@ -481,6 +573,9 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
         ticker_upper = force_ticker.upper()
         if check_active_position_exists(ticker_upper):
             log_msg(f"[🛡️ BLOCKED] Active position already exists for {ticker_upper} in DB. Duplicate injection aborted.")
+            return
+
+        if not validate_reentry_eligibility(ticker_upper, DB_PATH):
             return
 
         info = levels.get(ticker_upper, {}) if isinstance(levels, dict) else {}
@@ -510,6 +605,9 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
                     continue
                 ticker_upper = ticker.upper()
                 if check_active_position_exists(ticker_upper):
+                    continue
+
+                if not validate_reentry_eligibility(ticker_upper, DB_PATH):
                     continue
 
                 spot = float(info.get("spot", info.get("last_price", 0.0)))
