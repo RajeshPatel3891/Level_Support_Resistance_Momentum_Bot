@@ -390,21 +390,25 @@ def evaluate_gex_exits():
             # ------------------------------------------------------------------
             exit_reason = None
 
-            # 1. Trailing Stop Floor
+            # 1. Trailing Stop Floor Triggered
             if current_price <= dynamic_stop and current_price > 0:
                 exit_reason = f"DYNAMIC_TRAIL_STOP_TRIGGERED_(${dynamic_stop:.2f})"
 
-            # 2. CSO Early Momentum Cut (-8% to -19.9% soft band)
+            # 2. Hard Target Cap (+50% Single Contract)
+            elif pnl_pct >= 50.0 and total_shares == 1:
+                exit_reason = "TAKE_PROFIT_50PCT"
+
+            # 3. CSO Early Momentum Cut (-8% to -19.9% soft band)
             elif -20.0 < pnl_pct <= -8.0 and spot > 0:
-                support_lvl = float(get_gex_target_info(ticker)[0] or 0.0)  # Fetch support level
+                support_lvl = float(get_gex_target_info(ticker)[0] or 0.0)
                 if support_lvl > 0 and spot < support_lvl:
                     exit_reason = f"CSO_EARLY_MOMENTUM_CUT_({pnl_pct:.1f}%)"
 
-            # 3. Hard Safety Floor (-20%)
+            # 4. Hard Safety Floor (-20%)
             elif pnl_pct <= -20.0:
                 exit_reason = "STOP_LOSS_20PCT"
 
-            # 4. Time Expiration
+            # 5. Time Expiration
             elif elapsed_minutes >= MTTP_MAX_MINUTES and is_regular_trading_hours():
                 exit_reason = f"MTTP_TIME_EXPIRED_{MTTP_MAX_MINUTES}M"
 
