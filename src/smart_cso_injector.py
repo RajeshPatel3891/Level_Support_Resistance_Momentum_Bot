@@ -10,7 +10,8 @@ Now features continuous real-time terminal exit telemetry streaming, dynamic
 execution environment tagging (PRODUCTION vs SANDBOX), beta tier calibrations,
 a two-stage Mid-to-Ask order execution waterfall, ghost-fill guards, rolling
 quote smoothing (noise filter), underlying stock confirmation, stateful re-entry
-guardrails (15-min cooldown, max 2 trades/day), and legacy unit test stubs.
+guardrails (15-min cooldown, max 2 trades/day), valid OCC symbol generator with
+3+ day min DTE guardrail and standard strike rounding, and legacy unit test stubs.
 """
 
 import os
@@ -23,7 +24,8 @@ import requests
 import boto3
 import argparse
 import numpy as np
-from datetime import datetime
+import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -315,16 +317,34 @@ def search_smart_option_chain(ticker, direction="CALL", spot_price=0.0):
         log_msg(f"[!] Chain search error for {ticker}: {e}")
     return None
 
+def generate_valid_occ_symbol(ticker: str, option_type: str, spot_price: float, min_dte: int = 3) -> str:
+    """
+    Generates a valid Tradier OCC option symbol enforcing:
+    1. Valid standard strike rounding ($0.50 or $1.00 intervals).
+    2. Minimum DTE guardrail (>= 3 days out, target Friday expiration).
+    """
+    now = datetime.now()
+    
+    # Calculate target Friday expiration with min_dte buffer
+    target_date = now + timedelta(days=min_dte)
+    days_until_friday = (4 - target_date.weekday()) % 7
+    friday_expiration = target_date + timedelta(days=days_until_friday)
+    exp_str = friday_expiration.strftime("%y%m%d")  # e.g., '260821'
+    
+    # Round spot price to nearest $0.50 strike interval
+    strike_rounded = round(spot_price * 2) / 2  # e.g., 18.11 -> 18.00
+    strike_fmt = f"{int(strike_rounded * 1000):08d}"  # 18.00 -> '00018000'
+    
+    opt_char = "C" if option_type.upper() in ["CALL", "C"] else "P"
+    occ_symbol = f"{ticker.upper()}{exp_str}{opt_char}{strike_fmt}"
+    return occ_symbol
+
 def fetch_occ_symbol(underlying, option_type, spot_price):
     best_opt = search_smart_option_chain(underlying, option_type, spot_price)
     if best_opt and best_opt.get("symbol"):
         return best_opt.get("symbol"), float(best_opt.get("ask") or 1.00)
         
-    now = datetime.now()
-    date_str = now.strftime("%y%m%d")
-    type_code = "C" if option_type.upper() == "CALL" else "P"
-    strike_fmt = f"{int(round(spot_price * 1000)):08d}"
-    occ = f"{underlying}{date_str}{type_code}{strike_fmt}"
+    occ = generate_valid_occ_symbol(underlying, option_type, spot_price, min_dte=3)
     return occ, 1.00
 
 def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_wait_seconds=10):
@@ -662,7 +682,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
         log_msg(f"[⚠️ FALLBACK] No liquid contract found. Generating synthetic OCC symbol...")
         occ_symbol, ask_price = fetch_occ_symbol(ticker, direction, spot)
 
-    success, fill_px, order_id = execute_strict_tradier_order(occ_symbol, ticker, direction, quantity=1)
+    success, fill_px, order_id = execute_strict_tradier_order(occ_symbol, ticker, direction, quantity=contract_qty)
 
     if not success or fill_px <= 0 or not order_id:
         log_msg(f"[⛔ REGISTRATION ABORTED] Tradier execution receipt verification failed for {ticker} {occ_symbol}. Zero records written to DB, guards not engaged.")
@@ -671,7 +691,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
     fill_price = fill_px
     stop_loss = round(fill_price * 0.80, 2)
     take_profit = round(fill_price * 1.50, 2)
-    shares = 1
+    shares = contract_qty
 
     log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, direction, occ_symbol, order_id)
     log_msg(f"[✓ SUCCESS] Strict Tradier Receipt confirmed and live watch loops engaged for {ticker} {direction}!")
