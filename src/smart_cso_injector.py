@@ -444,7 +444,7 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
 
         if new_bid >= bid and new_ask > 0:
             midpoint = (new_bid + new_ask) / 2.0
-            stepped_mid = round(round(midpoint / 0.05) * 0.05, 2)
+            stepped_mid = round(midpoint, 2)  # ✅ 1-cent precision (allows $0.24 midpoint)
             
             log_msg(f"[🚀 MOMENTUM CONFIRMED] Stepping up limit price from ${limit_price_str} -> ${stepped_mid:.2f} to secure fill...")
 
@@ -459,11 +459,13 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
                     err_data = step_json['errors']
                     err_msg = err_data.get('error', str(err_data)) if isinstance(err_data, dict) else str(err_data)
                     log_msg(f"[🚨 TRADIER REJECTION]: {err_msg}")
-                    print(f"[🚨 TRADIER REJECTION] {err_msg}")
                     return False, 0.0, ""
+                
                 new_order_id = str(step_res.json().get("order", {}).get("id"))
-                for _ in range(3):
-                    time.sleep(1.2)
+                
+                # ✅ Extended evaluation window: 10 retries @ 1.0s = 10.0s fill window
+                for _ in range(10):
+                    time.sleep(1.0)
                     chk = requests.get(f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders/{new_order_id}", headers=headers)
                     if chk.status_code == 200:
                         det = chk.json().get("order", {})
