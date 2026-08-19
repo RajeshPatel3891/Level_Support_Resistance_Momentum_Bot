@@ -251,6 +251,12 @@ def get_live_quote(symbol):
         res = requests.get(f"{TRADIER_BASE_URL}/markets/quotes", params={"symbols": symbol}, headers=headers, timeout=4)
         if res.status_code == 200:
             quotes = res.json().get("quotes", {}).get("quote", {})
+            # Intercept Tradier HTTP 200 error payloads
+            if isinstance(quotes, dict) and 'errors' in quotes and quotes['errors']:
+                err_body = quotes['errors']
+                err_msg = err_body.get('error', str(err_body)) if isinstance(err_body, dict) else str(err_body)
+                print(f'[🚨 TRADIER REJECTION] {err_msg}')
+                return None
             return quotes[0] if isinstance(quotes, list) and quotes else (quotes if isinstance(quotes, dict) else {})
     except Exception as e:
         log_msg(f"[-] Quote Fetch Error ({symbol}): {e}")
@@ -375,7 +381,14 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
             log_msg(f"[⛔ TRADIER REJECT ({response.status_code})]: {response.text}")
             return False, 0.0, ""
 
-        order_data = response.json().get("order", {})
+        res_json = response.json()
+        if isinstance(res_json, dict) and 'errors' in res_json and res_json['errors']:
+            err_data = res_json['errors']
+            err_msg = err_data.get('error', str(err_data)) if isinstance(err_data, dict) else str(err_data)
+            log_msg(f"[🚨 TRADIER REJECTION]: {err_msg}")
+            print(f"[🚨 TRADIER REJECTION] {err_msg}")
+            return False, 0.0, ""
+        order_data = res_json.get("order", {})
         order_id = str(order_data.get("id"))
         log_msg(f"[✓] Low-Ball order placed. Order ID: {order_id}. Evaluating fill probability over 3.5s...")
 
@@ -420,6 +433,13 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
             step_res = requests.post(f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders", data=payload, headers=headers, timeout=5)
             
             if step_res.status_code == 200:
+                step_json = step_res.json()
+                if isinstance(step_json, dict) and 'errors' in step_json and step_json['errors']:
+                    err_data = step_json['errors']
+                    err_msg = err_data.get('error', str(err_data)) if isinstance(err_data, dict) else str(err_data)
+                    log_msg(f"[🚨 TRADIER REJECTION]: {err_msg}")
+                    print(f"[🚨 TRADIER REJECTION] {err_msg}")
+                    return False, 0.0, ""
                 new_order_id = str(step_res.json().get("order", {}).get("id"))
                 for _ in range(3):
                     time.sleep(1.2)
