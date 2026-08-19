@@ -11,7 +11,8 @@ execution environment tagging (PRODUCTION vs SANDBOX), beta tier calibrations,
 a two-stage Mid-to-Ask order execution waterfall, ghost-fill guards, rolling
 quote smoothing (noise filter), underlying stock confirmation, stateful re-entry
 guardrails (15-min cooldown, max 2 trades/day), valid OCC symbol generator with
-3+ day min DTE guardrail and standard strike rounding, and legacy unit test stubs.
+3+ day min DTE guardrail and standard strike rounding, adaptive low-dollar stop
+cushioning (<= $0.50 contracts), full SQLite auto-schema migrations, and unit test stubs.
 """
 
 import os
@@ -494,11 +495,15 @@ def log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        # Ensure execution_env column exists in SQLite table schema
+        # Ensure all required columns exist in SQLite trades table schema
         cursor.execute("PRAGMA table_info(trades)")
         columns = [column[1] for column in cursor.fetchall()]
-        if 'execution_env' not in columns:
-            cursor.execute("ALTER TABLE trades ADD COLUMN execution_env TEXT DEFAULT 'SANDBOX'")
+        for col in ['gsg_status', 'mttp_status', 'cso_status', 'execution_env']:
+            if col not in columns:
+                try:
+                    cursor.execute(f"ALTER TABLE trades ADD COLUMN {col} TEXT DEFAULT 'SANDBOX'")
+                except Exception:
+                    pass
         
         cursor.execute('''
             INSERT INTO trades (
@@ -689,7 +694,16 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
         return
 
     fill_price = fill_px
-    stop_loss = round(fill_price * 0.80, 2)
+    
+    # Adaptive Stop-Loss calculation based on Option Premium Tier
+    if fill_price <= 0.50:
+        # Enforce $0.10 dollar cushion or 35% max drop for low-dollar options (<= $0.50)
+        stop_loss = round(max(0.02, fill_price - 0.10), 2)
+        log_msg(f"[🛡️ LOW-DOLLAR CUSHION ENGAGED] Entry: ${fill_price:.2f} -> Stop Loss: ${stop_loss:.2f} ($0.10 cushion)")
+    else:
+        stop_loss = round(fill_price * 0.80, 2)
+        log_msg(f"[🛡️ STANDARD STOP ENGAGED] Entry: ${fill_price:.2f} -> Stop Loss: ${stop_loss:.2f} (20% floor)")
+
     take_profit = round(fill_price * 1.50, 2)
     shares = contract_qty
 

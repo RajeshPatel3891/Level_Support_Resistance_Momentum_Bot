@@ -256,6 +256,7 @@ def evaluate_gex_exits():
             ts_str = item.get('timestamp')
             trade_dir = item.get('direction', 'CALL')
             stored_peak = float(item.get('peak_price', entry_price) or entry_price)
+            stored_stop_loss = float(item.get('stop_loss', 0.0) or 0.0)
             is_runner = bool(item.get('is_runner', False))
             accumulated_pnl = float(item.get('partial_pnl', 0.0) or 0.0)
 
@@ -323,7 +324,13 @@ def evaluate_gex_exits():
             elif peak_pnl_pct >= 12.0:
                 dynamic_stop = round(entry_price * 1.03, 2)
             else:
-                dynamic_stop = round(entry_price * 0.80, 2)
+                if entry_price <= 0.50:
+                    calculated_stop = round(max(0.02, entry_price - 0.10), 2)
+                else:
+                    calculated_stop = round(entry_price * 0.80, 2)
+
+                # Prevent downward ratcheting of existing stop loss
+                dynamic_stop = max(stored_stop_loss, calculated_stop)
 
             # Persist Peak Price, Dynamic Stop Loss & Min PnL to DynamoDB
             table.update_item(
@@ -379,16 +386,25 @@ def evaluate_gex_exits():
                 continue
 
             # ------------------------------------------------------------------
-            # FEATURE 5: Dynamic Trailing & Hard Risk Exits
+            # FEATURE 5: Dynamic Trailing & Hard Risk Exits (CSO Informed)
             # ------------------------------------------------------------------
             exit_reason = None
 
+            # 1. Trailing Stop Floor
             if current_price <= dynamic_stop and current_price > 0:
                 exit_reason = f"DYNAMIC_TRAIL_STOP_TRIGGERED_(${dynamic_stop:.2f})"
-            elif pnl_pct >= 50.0 and total_shares == 1:
-                exit_reason = "MTTP_TARGET_CAP_50PCT"
+
+            # 2. CSO Early Momentum Cut (-8% to -19.9% soft band)
+            elif -20.0 < pnl_pct <= -8.0 and spot > 0:
+                support_lvl = float(get_gex_target_info(ticker)[0] or 0.0)  # Fetch support level
+                if support_lvl > 0 and spot < support_lvl:
+                    exit_reason = f"CSO_EARLY_MOMENTUM_CUT_({pnl_pct:.1f}%)"
+
+            # 3. Hard Safety Floor (-20%)
             elif pnl_pct <= -20.0:
                 exit_reason = "STOP_LOSS_20PCT"
+
+            # 4. Time Expiration
             elif elapsed_minutes >= MTTP_MAX_MINUTES and is_regular_trading_hours():
                 exit_reason = f"MTTP_TIME_EXPIRED_{MTTP_MAX_MINUTES}M"
 
