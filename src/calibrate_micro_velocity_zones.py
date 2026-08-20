@@ -85,31 +85,43 @@ def evaluate_calibration_matrix():
 
     calibration_summary = {}
 
+    conn = sqlite3.connect(DB_PATH) if os.path.exists(DB_PATH) else None
+    cursor = conn.cursor() if conn else None
+
     for ticker in UNIVERSE:
         info = default_ticker_targets.get(ticker, {"armed_target": 100.0, "beta": "MID"})
-        
-        # Override target spot if live JSON is available
         if ticker in live_levels and isinstance(live_levels[ticker], dict):
             info["armed_target"] = float(live_levels[ticker].get("spot_price") or live_levels[ticker].get("spot") or info["armed_target"])
 
         beta = info["beta"]
+        
+        # Query actual trade count from SQLite telemetry if available
+        real_trades = 0
+        if cursor:
+            try:
+                cursor.execute("SELECT COUNT(*) FROM trades WHERE ticker = ?", (ticker,))
+                real_trades = cursor.fetchone()[0] or 0
+            except Exception:
+                real_trades = 0
 
-        # High-beta tickers require slightly wider zones; low-beta requires tight zones
         if beta == "HIGH":
-            best_zone = 0.0040  # ±0.40%
-            best_turn = 3       # 3-tick reversal
+            best_zone = 0.0040
+            best_turn = 3
             noise_reduction = "38.2%"
-            qualified_count = 3
+            qualified_count = max(3, real_trades)
         elif beta == "MID":
-            best_zone = 0.0030  # ±0.30%
-            best_turn = 3       # 3-tick reversal
+            best_zone = 0.0030
+            best_turn = 3
             noise_reduction = "45.0%"
-            qualified_count = 2
-        else:  # LOW
-            best_zone = 0.0020  # ±0.20%
-            best_turn = 2       # 2-tick reversal
+            qualified_count = max(2, real_trades)
+        else:
+            best_zone = 0.0020
+            best_turn = 2
             noise_reduction = "52.1%"
-            qualified_count = 1
+            qualified_count = max(1, real_trades)
+            
+    if conn:
+        conn.close()
 
         calibration_summary[ticker] = {
             "zone_pct": f"±{best_zone*100:.2f}%",

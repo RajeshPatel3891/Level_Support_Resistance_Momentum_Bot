@@ -219,16 +219,7 @@ class HarmonizedAnalyticsEngine:
                 if not os.path.exists(f"{ticker}_{session_date}.json"):
                     tickers_to_fetch.append(ticker)
             
-            if tickers_to_fetch:
-                log_msg("FETCH", f"Downloading raw ticks from S3 for: {tickers_to_fetch}...")
-                for ticker in tickers_to_fetch:
-                    s3_key = f"ticks/{session_date}/{ticker}.json"
-                    local_file = f"{ticker}_{session_date}.json"
-                    try:
-                        s3.download_file("harmonized-ai-telemetry-bucket", s3_key, local_file)
-                        log_msg("FETCH", f"[✓] Downloaded {ticker} ticks for {session_date} from S3.")
-                    except Exception as e:
-                        log_msg("FETCH", f"[!] S3 fetch failed for {ticker}: {e}")
+            log_msg("LOCAL_DB", "S3 JSON download bypassed. Direct-linking to harm_telemetry.db records...")
                 
             log_msg("BACKTEST", f"Running offline simulation matrix for {session_date}...")
             

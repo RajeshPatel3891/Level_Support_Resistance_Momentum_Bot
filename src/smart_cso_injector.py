@@ -139,7 +139,7 @@ def validate_reentry_eligibility(ticker, db_path=DB_PATH):
 # ===============================================================================
 
 BETA_PROFILES = {
-    "HIGH": {"zone": 0.0040, "turn_ticks": 3, "trail_mult": 1.5},
+    "HIGH": {"zone": 0.0075, "turn_ticks": 3, "trail_mult": 1.5},  # Widen band to arm SPY/QQQ/NVDA
     "MID":  {"zone": 0.0030, "turn_ticks": 3, "trail_mult": 1.0},
     "LOW":  {"zone": 0.0020, "turn_ticks": 2, "trail_mult": 0.75}
 }

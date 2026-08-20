@@ -254,7 +254,7 @@ def evaluate_gex_exits():
             entry_price = float(item.get('entry_price', 0.0))
             total_shares = int(float(item.get('shares', 1.0)))
             ts_str = item.get('timestamp')
-            trade_dir = item.get('direction', 'CALL')
+            trade_dir = item.get('direction', 'CALL').upper()
             stored_peak = float(item.get('peak_price', entry_price) or entry_price)
             stored_stop_loss = float(item.get('stop_loss', 0.0) or 0.0)
             is_runner = bool(item.get('is_runner', False))
@@ -347,18 +347,9 @@ def evaluate_gex_exits():
             print(f"[⚙️ MASTER EXIT] {ticker} | {total_shares}x | Entry: ${entry_price:.2f} | Live: ${current_price:.2f} ({pnl_pct:+.1f}%) | Peak: ${peak_price:.2f} (+{peak_pnl_pct:.1f}%) | Active Stop: ${dynamic_stop:.2f} | Min Seen: ${min_seen:+.2f}")
 
             # ------------------------------------------------------------------
-            # FEATURE 3: Red-to-Green Recovery Exit (Bail out if trade dipped)
+            # FEATURE 3: Red-to-Green Recovery Exit (Bypassed -> CSO Trailing Engine)
             # ------------------------------------------------------------------
-            if min_seen < 0.0 and dollar_pnl >= 1.00:
-                print(f"🛡️ [GSG RECOVERY EXIT] {ticker} dipped red (${min_seen:.2f}) & recovered to green (+${dollar_pnl:.2f}). CLOSING!")
-                if execute_tradier_close(occ_symbol, ticker, total_shares, active_base_url):
-                    table.update_item(
-                        Key={'tenant_id': tenant_id, 'trade_id': t_id},
-                        UpdateExpression="SET exit_status = :st, exit_price = :px, net_pnl = :pnl, cso_reason = :st, shares = :sh",
-                        ExpressionAttributeValues={':st': 'GSG_RECOVERY_CLOSE', ':px': str(current_price), ':pnl': str(dollar_pnl), ':sh': '0'}
-                    )
-                    sync_local_sqlite_exit(t_id, ticker, "GSG_RECOVERY_CLOSE", current_price, now_str, dollar_pnl, remaining_shares=0)
-                continue
+            # Handed full exit authority to CSO Dynamic Trailing Stop Engine
 
             # ------------------------------------------------------------------
             # FEATURE 4: Multi-Contract Tranche Scaling (+50% / GEX Target)
@@ -398,11 +389,20 @@ def evaluate_gex_exits():
             elif pnl_pct >= 50.0 and total_shares == 1:
                 exit_reason = "TAKE_PROFIT_50PCT"
 
-            # 3. CSO Early Momentum Cut (-8% to -19.9% soft band)
+            # 3. CSO Momentum vs. Noise Evaluation (-8.0% to -19.9% soft band)
             elif -20.0 < pnl_pct <= -8.0 and spot > 0:
-                support_lvl = float(get_gex_target_info(ticker)[0] or 0.0)
-                if support_lvl > 0 and spot < support_lvl:
-                    exit_reason = f"CSO_EARLY_MOMENTUM_CUT_({pnl_pct:.1f}%)"
+                support_lvl = float(get_gex_target_info(ticker)[1] or 0.0)
+                
+                if support_lvl > 0:
+                    support_breached = (spot < support_lvl) if trade_dir == "CALL" else (spot > support_lvl)
+                    if support_breached:
+                        print(f"[🚨 CSO MOMENTUM CUT] {ticker} option down {pnl_pct:.1f}% & stock (${spot:.2f}) breached support (${support_lvl:.2f}). Executing early exit!")
+                        exit_reason = f"CSO_EARLY_MOMENTUM_CUT_({pnl_pct:.1f}%)"
+                    else:
+                        print(f"[🛡️ CSO NOISE FILTER] {ticker} option mark down {pnl_pct:.1f}% but stock (${spot:.2f}) holds structure (${support_lvl:.2f}). IGNORING SPREAD NOISE.")
+                elif pnl_pct <= -12.0:
+                    print(f"[⚠️ CSO FALLBACK CUT] {ticker} missing GEX level data & down {pnl_pct:.1f}%. Capping loss at -12% fallback floor!")
+                    exit_reason = f"CSO_MISSING_LEVEL_FALLBACK_CUT_({pnl_pct:.1f}%)"
 
             # 4. Hard Safety Floor (-20%)
             elif pnl_pct <= -20.0:

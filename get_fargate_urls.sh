@@ -14,16 +14,33 @@ if [ -z "$TASKS" ] || [ "$TASKS" == "None" ]; then
   exit 0
 fi
 
+# Robust Production Environment Evaluator
+is_production_task() {
+  local desc="$1"
+  local env_str
+  env_str=$(echo "$desc" | jq -r '
+    (.tasks[0].containers[].environment[]? // empty),
+    (.tasks[0].overrides.containerOverrides[].environment[]? // empty),
+    (.tasks[0].containers[].overrides.environment[]? // empty)
+    | "\(.name)=\(.value)"' 2>/dev/null)
+  local group
+  group=$(echo "$desc" | jq -r '.tasks[0].group // ""' 2>/dev/null)
+
+  # Check for explicit PROD environment variables or PROD tickers (HOOD/MARA/UBER)
+  if echo "$env_str" | grep -iE "EXECUTION_ENV=.*PROD|APP_ENV=.*PROD|HOOD|MARA|UBER" >/dev/null 2>&1 || [[ "$group" == *"prod"* ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
 # --- STEP 1: AUTO-PRUNE STALE DUPLICATE TASKS ---
 PROD_TASKS=()
 SANDBOX_TASKS=()
 
 for T_ARN in $TASKS; do
   DESC=$(aws ecs describe-tasks --cluster $CLUSTER --tasks "$T_ARN" --region $REGION 2>/dev/null)
-  IF_PROD=$(echo "$DESC" | jq -r '(.tasks[0].containers[0].environment[]?, .tasks[0].overrides.containerOverrides[0].environment[]?) | select(.name=="EXECUTION_ENV") | .value' 2>/dev/null | grep -i "PRODUCTION")
-  GROUP=$(echo "$DESC" | jq -r '.tasks[0].group // ""')
-
-  if [ -n "$IF_PROD" ] || [[ "$GROUP" == *"prod"* ]]; then
+  if is_production_task "$DESC"; then
     PROD_TASKS+=("$T_ARN")
   else
     SANDBOX_TASKS+=("$T_ARN")
@@ -59,11 +76,9 @@ for TASK_ARN in $UPDATED_TASKS; do
   TASK_ID="${TASK_ARN##*/}"
   DESC=$(aws ecs describe-tasks --cluster $CLUSTER --tasks "$TASK_ARN" --region $REGION 2>/dev/null)
   STATUS=$(echo "$DESC" | jq -r '.tasks[0].lastStatus // "UNKNOWN"')
-  IF_PROD=$(echo "$DESC" | jq -r '(.tasks[0].containers[0].environment[]?, .tasks[0].overrides.containerOverrides[0].environment[]?) | select(.name=="EXECUTION_ENV") | .value' 2>/dev/null | grep -i "PRODUCTION")
-  GROUP=$(echo "$DESC" | jq -r '.tasks[0].group // ""')
 
-  if [ -n "$IF_PROD" ] || [[ "$GROUP" == *"prod"* ]]; then
-    MODE="PRODUCTION"
+  if is_production_task "$DESC"; then
+    MODE="PROD"
   else
     MODE="SANDBOX"
   fi
