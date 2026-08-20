@@ -50,11 +50,11 @@ from src.RiskEngine import (
 def get_dynamic_proximity_threshold(price: float) -> float:
     """Returns dynamic arming threshold based on asset price tier."""
     if price >= 100.0:
-        return 0.0025  # 0.25% ($SPY, $NVDA, $QQQ)
+        return 0.0075  # 0.75% ($SPY, $NVDA, $QQQ)
     elif price >= 30.0:
-        return 0.0035  # 0.35% ($BAC, $UBER)
+        return 0.0085  # 0.85% ($BAC, $UBER)
     else:
-        return 0.0060  # 0.60% ($SNAP, $F, $SOFI)
+        return 0.0120  # 1.20% ($SNAP, $F, $SOFI)
 
 def resolve_trade_direction(item):
     """Safely resolves trade direction (CALL/PUT) with OCC symbol parsing fallback."""

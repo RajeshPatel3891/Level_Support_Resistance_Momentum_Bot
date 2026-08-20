@@ -73,18 +73,18 @@ STATIC_BASELINE_LEVELS = {
   'SNAP':  {'spot': 12.00,  'call_target': 12.06,  'put_target': 11.94},
   'MARA':  {'spot': 18.00,  'call_target': 18.09,  'put_target': 17.91},
   'CCL':   {'spot': 16.00,  'call_target': 16.08,  'put_target': 15.92},
-  'UBER':  {'spot': 70.00,  'call_target': 70.35,  'put_target': 69.65},
+  'UBER':  {'spot': 70.00,  'call_target': 70.85,  'put_target': 69.65},
   'NKE':   {'spot': 80.00,  'call_target': 80.40,  'put_target': 79.60}
 }
 
 def get_dynamic_proximity_threshold(price: float) -> float:
     """Returns dynamic arming threshold based on asset price tier."""
     if price >= 100.0:
-        return 0.0025  # 0.25% (, , )
+        return 0.0075  # 0.75% (, , )
     elif price >= 30.0:
-        return 0.0035  # 0.35% (, )
+        return 0.0085  # 0.85% (, )
     else:
-        return 0.0060  # 0.60% (, , )
+        return 0.0120  # 1.20% (, , )
 
 def format_ticker_payload(symbol: str, spot_px: float, vwap_px: float = None, call_tgt: float = None, put_tgt: float = None, gex_label: str = "NEUTRAL") -> dict:
     vwap_px = vwap_px or spot_px

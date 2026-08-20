@@ -49,11 +49,11 @@ if "sandbox" in TRADIER_BASE_URL.lower():
 def get_dynamic_proximity_threshold(price: float) -> float:
     """Returns dynamic arming threshold based on asset price tier."""
     if price >= 100.0:
-        return 0.0025  # 0.25% (, , )
+        return 0.0075  # 0.75% (, , )
     elif price >= 30.0:
-        return 0.0035  # 0.35% (, )
+        return 0.0085  # 0.85% (, )
     else:
-        return 0.0060  # 0.60% (, , )
+        return 0.0120  # 1.20% (, , )
 
 def is_armed(price: float, target: float, threshold: float, support: list = None, resistance: list = None) -> bool:
     """Dynamically arms execution route if spot is within dynamic proximity threshold of target or zone."""
