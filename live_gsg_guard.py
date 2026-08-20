@@ -305,7 +305,7 @@ def evaluate_gex_exits():
                     table.update_item(
                         Key={'tenant_id': tenant_id, 'trade_id': t_id},
                         UpdateExpression="SET exit_status = :st, exit_price = :px, net_pnl = :pnl, cso_reason = :st, shares = :sh",
-                        ExpressionAttributeValues={':st': 'GSG_RECOVERY_CLOSE', ':px': str(current_price), ':pnl': str(dollar_pnl), ':sh': '0'}
+                        # ExpressionAttributeValues={':st': 'GSG_RECOVERY_CLOSE', ':px': str(current_price), ':pnl': str(dollar_pnl), ':sh': '0'}
                     )
                     sync_local_sqlite_exit(t_id, ticker, "GSG_RECOVERY_CLOSE", current_price, now_str, dollar_pnl, remaining_shares=0)
                 continue

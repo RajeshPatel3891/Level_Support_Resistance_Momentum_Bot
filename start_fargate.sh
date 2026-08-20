@@ -74,7 +74,7 @@ while true; do
 done &
 
 echo "[9/10] Launching Live DynamoDB GSG Guard & Persisted Recovery Protector..."
-while true; do python3 -u live_gsg_guard.py; sleep 2; done &
+# while true; do python3 -u live_gsg_guard.py; sleep 2; done &
 
 echo "[10/10] Launching Background Disk Telemetry & Retention Daemon..."
 while true; do
