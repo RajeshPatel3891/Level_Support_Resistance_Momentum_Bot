@@ -49,14 +49,14 @@ def is_regular_trading_hours():
 
 
 def get_gex_target_info(ticker):
-    """Fetch live GEX target and spot gap from root manifest."""
+    """Fetch live GEX target and spot gap from root manifest with dynamic fallback keys."""
     if os.path.exists(MANIFEST_PATH):
         try:
             with open(MANIFEST_PATH, "r") as f:
                 data = json.load(f)
             val = data.get(ticker, {})
-            spot = float(val.get("spot", val.get("last_price", 0.0)) or 0.0)
-            target = float(val.get("target", val.get("gex_target", 0.0)) or 0.0)
+            spot = float(val.get("spot", val.get("last_price", val.get("spot_price", 0.0))) or 0.0)
+            target = float(val.get("target", val.get("gex_target", val.get("call_target", val.get("put_target", 0.0)))) or 0.0)
             gap_pct = float(val.get("gap_pct", 0.0) or 0.0)
             return spot, target, gap_pct
         except Exception:
@@ -162,7 +162,7 @@ def execute_tradier_close(occ_symbol, ticker, shares, base_url, max_wait_seconds
                     # Track best midpoint for selling (higher is better)
                     if current_midpoint > best_midpoint:
                         best_midpoint = current_midpoint
-        except Exception as q_err:
+        except Exception:
             pass
             
         time.sleep(1.0)
