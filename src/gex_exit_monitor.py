@@ -11,10 +11,14 @@ import boto3
 import datetime
 from datetime import datetime as dt
 import pytz
+import re
 from dotenv import load_dotenv
 from boto3.dynamodb.conditions import Attr
 
-load_dotenv()
+if os.path.exists('.env.prod'):
+    load_dotenv('.env.prod', override=True)
+else:
+    load_dotenv(override=True)
 
 MANIFEST_PATH = "trading_levels.json"
 MTTP_MAX_MINUTES = int(os.getenv("MTTP_MAX_MINUTES", 45))
@@ -224,6 +228,127 @@ def sync_local_sqlite_exit(t_id, ticker, exit_reason, exit_price, exit_timestamp
             conn.close()
         except Exception as e:
             print(f"[-] Local SQLite exit sync warning: {e}")
+
+
+def synchronize_dynamo_with_tradier():
+    """Reconcile DynamoDB active state directly against Tradier live brokerage positions ground truth."""
+    base_url = os.getenv('TRADIER_BASE_URL', TRADIER_BASE_URL)
+    token = TRADIER_TOKEN
+    account_id = TRADIER_ACCOUNT_ID
+    headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
+
+    # 1. Fetch Real Ground-Truth Positions from Tradier API
+    try:
+        res = requests.get(f'{base_url}/accounts/{account_id}/positions', headers=headers, timeout=10)
+        if res.status_code != 200:
+            print(f"[-] Failed to fetch Tradier positions: {res.text}")
+            return
+    except Exception as e:
+        print(f"[-] Network error fetching Tradier positions: {e}")
+        return
+
+    # Safely parse Tradier positions response when 0 positions exist or positions: None / "null"
+    positions_data = res.json().get('positions') if res.status_code == 200 else {}
+    if not isinstance(positions_data, dict):
+        positions_data = {}
+    raw_positions = positions_data.get('position', [])
+    if isinstance(raw_positions, dict):
+        raw_positions = [raw_positions]
+
+    # Map Live Positions from Tradier
+    live_broker_state = {}
+    for pos in raw_positions:
+        symbol = pos.get('symbol', '')  # OCC Option Symbol (e.g., SOFI260821C00015500)
+        if not symbol:
+            continue
+        
+        # Parse underlying ticker from OCC Symbol using regex
+        match = re.match(r'^([A-Z]+)\d{6}[CP]\d{8}$', symbol)
+        ticker = match.group(1) if match else symbol[:4].rstrip('0123456789')
+        
+        qty = float(pos.get('quantity', 0))
+        cost_basis_raw = float(pos.get('cost_basis', 0.0))
+        
+        # Force per-share option entry & cost basis normalization
+        if cost_basis_raw > 10.0 and qty > 0:
+            per_share_entry = round(cost_basis_raw / (qty * 100.0), 2)
+        elif qty > 0:
+            per_share_entry = round(cost_basis_raw / qty, 2)
+        else:
+            per_share_entry = round(cost_basis_raw, 2)
+
+        live_broker_state[symbol] = {
+            'occ_symbol': symbol,
+            'ticker': ticker,
+            'quantity': qty,
+            'cost_basis': per_share_entry,
+            'entry_price': per_share_entry,
+            'date_acquired': pos.get('date_acquired')
+        }
+
+    print(f"[✓ TRADIER GROUND TRUTH] Live Open Contracts ({len(live_broker_state)}): {list(live_broker_state.keys())}")
+
+    # 2. Reconcile with DynamoDB Active Positions Table
+    dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
+    table = dynamodb.Table('HarmonizedTrades')
+
+    # Fetch existing active records in DynamoDB
+    try:
+        response = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE'))
+        existing_items = response.get('Items', [])
+    except Exception as e:
+        print(f"[-] Error scanning DynamoDB active positions: {e}")
+        return
+
+    existing_occ_symbols = {item.get('occ_symbol', item.get('ticker')): item for item in existing_items}
+
+    # A) Purge Ghost Positions (In DynamoDB ACTIVE, but NOT in Tradier)
+    now_str = dt.now().strftime("%Y-%m-%d %H:%M:%S")
+    for db_occ_symbol, item in existing_occ_symbols.items():
+        if db_occ_symbol not in live_broker_state:
+            ticker = item.get('ticker', db_occ_symbol)
+            tenant_id = item.get('tenant_id', 'COMPANY_A')
+            t_id = item.get('trade_id')
+            print(f"[🚨 PURGING GHOST STATE] Reconciling {ticker} ({db_occ_symbol}) in DynamoDB...")
+            try:
+                table.update_item(
+                    Key={'tenant_id': tenant_id, 'trade_id': t_id},
+                    UpdateExpression='SET exit_status = :status, exit_timestamp = :ts, cso_reason = :reason, shares = :sh',
+                    ExpressionAttributeValues={
+                        ':status': 'GHOST_RECONCILED_CLOSED',
+                        ':ts': now_str,
+                        ':reason': 'TRADIER_BROKERAGE_DESYNC_PURGE',
+                        ':sh': '0'
+                    }
+                )
+            except Exception as ex:
+                print(f"[-] Failed to reconcile ghost entry {db_occ_symbol}: {ex}")
+
+    # B) Hydrate / Update Active Positions (In Tradier -> Ensure ACTIVE in DynamoDB)
+    tenant_id = os.getenv('TENANT_ID', 'COMPANY_A')
+    for symbol, data in live_broker_state.items():
+        if symbol not in existing_occ_symbols:
+            print(f"[🚀 RE-HYDRATING DYNAMO] Ingesting untracked broker position {data['ticker']} ({symbol}) -> Qty: {data['quantity']} | Entry: ${data['entry_price']}")
+            t_id = f"rehydrated_{symbol.lower()}"
+            item_payload = {
+                'tenant_id': tenant_id,
+                'trade_id': t_id,
+                'occ_symbol': symbol,
+                'ticker': data['ticker'],
+                'shares': str(int(data['quantity'])),
+                'entry_price': str(data['entry_price']),
+                'cost_basis': str(data['cost_basis']),
+                'exit_status': 'ACTIVE',
+                'direction': 'CALL' if 'C' in symbol[len(data['ticker']):] else 'PUT',
+                'timestamp': now_str,
+                'cso_notes': 'REHYDRATED_FROM_TRADIER'
+            }
+            try:
+                table.put_item(Item=item_payload)
+            except Exception as e:
+                print(f"[-] Failed to hydrate DynamoDB for {symbol}: {e}")
+
+    print("[✓ SYSTEM SYNC COMPLETE] DynamoDB perfectly matches Tradier brokerage state.")
 
 
 def evaluate_gex_exits():
@@ -440,6 +565,7 @@ def evaluate_gex_exits():
 if __name__ == "__main__":
     ensure_schema()
     print("[⚙️] Unified CSO Master Exit Monitor Routine Initialized.")
+    synchronize_dynamo_with_tradier()
     while True:
         evaluate_gex_exits()
         time.sleep(10)

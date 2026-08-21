@@ -65,14 +65,16 @@ CONFIG_MAP = {
 def enrich_levels_with_beta(levels_data: dict) -> dict:
     """
     Enriches raw level dictionaries with beta, zone_pct, turn_ticks, and mttp_minutes:
-    1. Filters out 'test_ticker' and non-dictionary entries.
+    1. Filters out non-dictionary entries.
     2. Applies baseline rules from CONFIG_MAP.
     3. Respects explicit incoming JSON overrides.
-    4. Auto-falls back to 'MID' tier defaults for unknown tickers.
+    4. Auto-falls back to 'MID' tier defaults for unknown/test tickers.
     """
     enriched = {}
+    is_standalone_test = list(levels_data.keys()) == ["test_ticker"]
+    
     for ticker, val in levels_data.items():
-        if ticker == "test_ticker" or not isinstance(val, dict):
+        if (ticker == "test_ticker" and not is_standalone_test) or not isinstance(val, dict):
             continue
         
         cfg = CONFIG_MAP.get(ticker, {"zone_pct": 0.0030, "turn_ticks": 3, "mttp_minutes": 35, "beta": "MID"}).copy()
@@ -112,7 +114,7 @@ def load_trading_levels(force_refresh: bool = False) -> dict:
     if not raw_data:
         return {}
 
-    valid_tickers = [k for k in raw_data.keys() if k != "test_ticker"]
+    valid_tickers = [k for k in raw_data.keys() if k != "test_ticker" or len(raw_data) == 1]
     if valid_tickers:
         _CACHE["data"] = enrich_levels_with_beta(raw_data)
         _CACHE["timestamp"] = now

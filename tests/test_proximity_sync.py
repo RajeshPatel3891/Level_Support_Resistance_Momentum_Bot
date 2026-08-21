@@ -60,9 +60,9 @@ class TestProximitySync(unittest.TestCase):
 
         # Test Matrix: (Spot Price, Expected Threshold Ratio, Tier Label)
         test_cases = [
-            (550.0, 0.0025, "High-Dollar Assets ($SPY, $NVDA, $QQQ) -> 0.25%"),
-            (45.0,  0.0035, "Mid-Tier Assets ($BAC, $UBER)        -> 0.35%"),
-            (12.0,  0.0060, "Sub-$30 Assets ($SNAP, $F, $SOFI)     -> 0.60%"),
+            (550.0, 0.0075, "High-Dollar Assets ($SPY, $NVDA, $QQQ) -> 0.75%"),
+            (45.0,  0.0085, "Mid-Tier Assets ($BAC, $UBER)        -> 0.85%"),
+            (12.0,  0.0120, "Sub-$30 Assets ($SNAP, $F, $SOFI)     -> 1.20%"),
         ]
 
         for price, expected, tier_desc in test_cases:

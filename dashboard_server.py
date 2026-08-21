@@ -1,4 +1,9 @@
 import os
+from dotenv import load_dotenv
+if os.path.exists('.env.prod'):
+    load_dotenv('.env.prod', override=True)
+
+import os
 import sys
 import json
 import sqlite3
@@ -108,8 +113,8 @@ def init_cloud_state_and_hydrate():
 
     try:
         response = table.scan(
-            FilterExpression="exit_status = :status AND shares > :zero",
-            ExpressionAttributeValues={":status": "ACTIVE", ":zero": 0}
+            FilterExpression="exit_status = :status",
+            ExpressionAttributeValues={":status": "ACTIVE"}
         )
         items = response.get('Items', [])
         print(f"[🚀 HYDRATION] Loaded {len(items)} active open positions from DynamoDB.")
@@ -602,7 +607,7 @@ def fetch_tradier_balances(env=None):
             print(f"[-] Tradier Balance Read Error: {e}")
     return 6535.24, 5565.24, 0.0
 
-def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A'):
+def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A_PROD'):
     db_path = "/app/harm_telemetry.db" if os.path.exists("/app/harm_telemetry.db") else DB_PATH
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
@@ -739,7 +744,7 @@ def enrich_active_positions_with_live_quotes(trades):
 
     return trades, total_deployed_basis, total_floating_pnl_val
 
-def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A'):
+def fetch_portfolio_state(page=1, selected_date=None, tenant_id='COMPANY_A_PROD'):
     if not selected_date:
         selected_date = datetime.now().strftime('%Y-%m-%d')
           

@@ -19,7 +19,7 @@ PLAYBOOK_CONFIG = {
     "ticker": "INTC",
     "spot_target_call": 85.83,
     "spot_target_put": 84.97,
-    "low_nominal": True
+    "low_nominal_mode": True
 }
 
 def evaluate_call_entry(spot_price, vwap, proximity_score, velocity):

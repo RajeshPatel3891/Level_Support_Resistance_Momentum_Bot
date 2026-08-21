@@ -19,7 +19,7 @@ PLAYBOOK_CONFIG = {
     "ticker": "AAL",
     "spot_target_call": 14.91,
     "spot_target_put": 14.77,
-    "low_nominal": True
+    "low_nominal_mode": True
 }
 
 def evaluate_call_entry(spot_price, vwap, proximity_score, velocity):

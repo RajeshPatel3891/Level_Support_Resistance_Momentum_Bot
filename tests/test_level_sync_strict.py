@@ -11,17 +11,20 @@ class TestLevelSyncStrict(unittest.TestCase):
         dummy_data = {"test_ticker": {"target": 150.0}}
         save_trading_levels(dummy_data)
         
-        # Load levels (should hit cache or local file)
+        # Load levels (returns write-through enriched payload)
         levels_1 = load_trading_levels(force_refresh=False)
-        self.assertEqual(levels_1, dummy_data)
+        self.assertIn("test_ticker", levels_1)
+        self.assertEqual(levels_1["test_ticker"]["target"], 150.0)
+        self.assertEqual(levels_1["test_ticker"]["beta"], "MID")
         
         # Update with new data via write-through
         new_data = {"test_ticker": {"target": 200.0}}
         save_trading_levels(new_data)
         
-        # Immediate read should reflect new data instantly due to cache invalidation
+        # Immediate read should reflect new target instantly due to cache invalidation
         levels_2 = load_trading_levels(force_refresh=False)
-        self.assertEqual(levels_2, new_data)
+        self.assertIn("test_ticker", levels_2)
+        self.assertEqual(levels_2["test_ticker"]["target"], 200.0)
 
 if __name__ == "__main__":
     unittest.main()

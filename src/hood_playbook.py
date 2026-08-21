@@ -1,5 +1,4 @@
 import os
-
 import json
 
 def _get_dynamic_target(ticker, key, fallback):
@@ -16,18 +15,20 @@ def _get_dynamic_target(ticker, key, fallback):
     return float(fallback)
 
 PLAYBOOK_CONFIG = {
-    "ticker": "SOFI",
-    "spot_target_call": 16.28,
-    "spot_target_put": 16.12,
-    "low_nominal_mode": True
+    "ticker": "HOOD",
+    "spot_target_call": 95.15,
+    "spot_target_put": 94.19,
+    "min_momentum_score": 0.65,
+    "velocity_check_active": True,
+    "low_nominal_mode": False
 }
 
 def evaluate_call_entry(spot_price, vwap, proximity_score, velocity):
-    if spot_price >= _get_dynamic_target("SOFI", "spot_target_call", PLAYBOOK_CONFIG["spot_target_call"]):
-        return True, "SOFI_CALL_TRIGGER"
+    if spot_price >= _get_dynamic_target("HOOD", "spot_target_call", PLAYBOOK_CONFIG["spot_target_call"]):
+        return True, "HOOD_CALL_TRIGGER"
     return False, "OUT_OF_BOUNDS"
 
 def evaluate_put_entry(spot_price, vwap, proximity_score, velocity):
-    if spot_price <= _get_dynamic_target("SOFI", "spot_target_put", PLAYBOOK_CONFIG["spot_target_put"]):
-        return True, "SOFI_PUT_TRIGGER"
+    if spot_price <= _get_dynamic_target("HOOD", "spot_target_put", PLAYBOOK_CONFIG["spot_target_put"]):
+        return True, "HOOD_PUT_TRIGGER"
     return False, "OUT_OF_BOUNDS"

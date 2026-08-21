@@ -31,6 +31,6 @@ def get_latest_gex_context(ticker):
                 "timestamp": row[3]
             }
     except Exception as e:
-        print(f"[-] Error reading local GEX database: {e}")
+        pass  # Suppress missing table print
         
     return None

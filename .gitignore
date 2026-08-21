@@ -44,3 +44,5 @@ nohup.out
 src/*.db
 *.db-shm
 *.db-wal
+*.db.gz
+.env*
