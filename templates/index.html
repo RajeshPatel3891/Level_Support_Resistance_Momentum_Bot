@@ -34,6 +34,49 @@
                 } catch(e) {}
             }, 2000);
             </script>
-            </body>
+            
+<!-- STRATEGY CONFIG ADMIN PANEL -->
+<div class="card my-4 bg-dark text-light border-secondary" id="config-panel" style="border-radius:8px; background:#0d1117;">
+  <div class="card-header d-flex justify-content-between align-items-center" style="background:#161b22; border-bottom:1px solid #30363d;">
+    <h5 class="m-0 text-info">⚙️ Strategy Rules & Execution Guards</h5>
+    <button class="btn btn-sm btn-success px-3" onclick="saveConfig()">Save Rule Changes</button>
+  </div>
+  <div class="card-body">
+    <p class="text-muted small mb-2">Edit JSON parameters below to dynamically adjust live execution guards (e.g. DTE floors, spread caps, late-day cutoffs):</p>
+    <pre id="config-editor" contenteditable="true" style="background:#010409; color:#3fb950; padding:15px; border:1px solid #30363d; border-radius:6px; font-family:monospace; max-height:350px; overflow-y:auto; font-size:13px;"></pre>
+  </div>
+</div>
+
+<script>
+async function loadConfig() {
+  try {
+    const res = await fetch("/api/v1/config");
+    const data = await res.json();
+    document.getElementById("config-editor").innerText = JSON.stringify(data, null, 2);
+  } catch(e) { console.error("Config fetch failed:", e); }
+}
+
+async function saveConfig() {
+  try {
+    const raw = document.getElementById("config-editor").innerText;
+    const json = JSON.parse(raw);
+    const res = await fetch("/api/v1/config", {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(json)
+    });
+    const reply = await res.json();
+    if(reply.status === "SUCCESS") {
+      alert("✓ Strategy Rules updated successfully!");
+    } else {
+      alert("❌ Update failed: " + reply.message);
+    }
+  } catch(e) { alert("❌ Invalid JSON format! Check syntax before saving."); }
+}
+
+document.addEventListener("DOMContentLoaded", loadConfig);
+</script>
+
+</body>
             
 </html>

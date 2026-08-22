@@ -1,0 +1,17 @@
+{
+  "execution_guards": {
+    "min_dte_default": 3,
+    "low_price_stock_threshold": 30.0,
+    "low_price_stock_min_dte": 7,
+    "max_ask_bid_spread_pct": 0.15,
+    "late_day_entry_cutoff_et": "15:30",
+    "max_trade_dollar_cost": 125.0
+  },
+  "tactical_strategies": {
+    "green_stays_green": {
+      "enabled": true,
+      "activation_time_et": "15:15",
+      "trail_stop_pct": 0.1
+    }
+  }
+}
