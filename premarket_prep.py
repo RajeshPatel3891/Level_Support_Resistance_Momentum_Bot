@@ -32,6 +32,25 @@ def purge_zombie_stacks():
         subprocess.run(["pkill", "-9", "-f", "LiveBot.py"], stderr=subprocess.DEVNULL)
         subprocess.run(["pkill", "-9", "-f", "MasterSentry.py"], stderr=subprocess.DEVNULL)
 
+def purge_rehydrated_dynamo_duplicates():
+    print("\n" + "=" * 65)
+    print("🧹 PURGING DYNAMODB REHYDRATION DUPLICATES")
+    print("=" * 65)
+    try:
+        import boto3
+        dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
+        table = dynamodb.Table('HarmonizedTrades')
+        items = table.scan().get('Items', [])
+        count = 0
+        for item in items:
+            t_id = str(item.get('trade_id', ''))
+            if t_id.startswith('rehydrated_'):
+                table.delete_item(Key={'tenant_id': item['tenant_id'], 'trade_id': t_id})
+                count += 1
+        print(f"[✓] Purged {count} duplicate rehydrated records from DynamoDB.")
+    except Exception as e:
+        print(f"[!] Pre-flight DynamoDB purge skipped: {e}")
+
 def ensure_tmux_services_running():
     print("=" * 65)
     print("🦅 HARM.AI // STACK INITIALIZATION & HEALTH CHECK (PANES 0-7)")
@@ -87,6 +106,7 @@ def sync_playbooks_and_dashboard():
 
 if __name__ == "__main__":
     purge_zombie_stacks()
+    purge_rehydrated_dynamo_duplicates()
     ensure_tmux_services_running()
     levels = extract_guardrail_levels()
     update_trading_levels_json(levels)

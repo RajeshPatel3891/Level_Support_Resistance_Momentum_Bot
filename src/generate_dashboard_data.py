@@ -6,9 +6,34 @@ DB_PATH = "harm_telemetry.db"
 OUTPUT_PATH = "dashboard_data.json"
 
 def generate_data():
+    import os, requests, json
     if not os.path.exists(DB_PATH):
-        print("[!] Database not found.")
-        return
+        print("[!] Database not found. Routing directly to live Tradier API...")
+        base_url = os.getenv("TRADIER_BASE_URL", "https://sandbox.tradier.com/v1").rstrip("/")
+        account_id = os.getenv("TRADIER_ACCOUNT_ID", "VA83416608")
+        token = os.getenv("TRADIER_TOKEN", "")
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        
+        equity = 100000.0
+        try:
+            res = requests.get(f"{base_url}/accounts/{account_id}/balances", headers=headers, timeout=5)
+            if res.status_code == 200:
+                b = res.json().get("balances", {})
+                equity = float(b.get("total_equity") or 100000.0)
+        except Exception as e:
+            print(f"[!] Tradier balance fetch error: {e}")
+            
+        payload = {
+            "summary": {"total_value": equity, "realized_pnl": 0.0},
+            "total_value": equity,
+            "starting_cash": equity,
+            "total_equity": equity,
+            "active_positions": [],
+            "level_matrix": []
+        }
+        with open(OUTPUT_PATH, "w") as f:
+            json.dump(payload, f)
+        return payload
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row

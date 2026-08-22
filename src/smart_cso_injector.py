@@ -1,3 +1,10 @@
+import os
+
+if os.getenv('EXECUTION_ENV', '').upper() == 'SANDBOX':
+    os.environ['TRADIER_BASE_URL'] = 'https://sandbox.tradier.com/v1'
+    if os.getenv('TRADIER_SANDBOX_TOKEN'):
+        os.environ['TRADIER_TOKEN'] = os.getenv('TRADIER_SANDBOX_TOKEN')
+
 #!/usr/bin/env python3
 """
 HARM.AI // SMART CSO-DRIVEN LIVE TRADER & INJECTOR
@@ -571,7 +578,7 @@ def monitor_live_exit_telemetry(ticker):
             if items:
                 latest = max(items, key=lambda x: x.get('timestamp', ''))
                 status = latest.get('exit_status', 'ACTIVE')
-                exit_price = latest.get('exit_price', '0.00')
+                exit_price = latest.get('exit_price') or latest.get('fill_price') or '0.00'
                 net_pnl = float(latest.get('net_pnl', 0.0) or 0.0)
                 reason = latest.get('cso_reason', latest.get('cso_status', 'ACTIVE'))
                 

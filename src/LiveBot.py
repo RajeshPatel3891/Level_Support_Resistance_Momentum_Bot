@@ -340,7 +340,7 @@ def log_trade_to_database(ticker, spot_price, stop_loss=None, shares=1.0, direct
             'occ_symbol': occ_symbol or ticker
         }
         table.put_item(Item=item)
-        print(f"[✓] Logged verified LIVE OPTION trade to DynamoDB for {ticker} ({occ_symbol or ticker}) | Contracts: {shares} | Premium: \${opt_premium:.2f}")
+        print(f"[✓] Logged verified LIVE OPTION trade to DynamoDB for {ticker} ({occ_symbol or ticker}) | Contracts: {shares} | Premium: ${opt_premium:.2f}")
     except Exception as e:
         print(f"[-] DynamoDB Log Error: {e}", file=sys.stderr)
 

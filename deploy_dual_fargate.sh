@@ -111,6 +111,8 @@ with open('.env.sandbox', 'r') as f:
 
 env_vars = [item for item in env_vars if item['name'] not in ['EXECUTION_ENV', 'BUILD_TAG']]
 env_vars.append({'name': 'EXECUTION_ENV', 'value': 'SANDBOX'})
+env_vars.append({'name': 'TRADIER_ENV', 'value': 'sandbox'})
+env_vars.append({'name': 'IS_SANDBOX', 'value': 'true'})
 env_vars.append({'name': 'BUILD_TAG', 'value': '$BUILD_TAG'})
 
 overrides = {

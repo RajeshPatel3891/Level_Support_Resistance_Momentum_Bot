@@ -24,18 +24,22 @@ echo -e "\n[*] [STEP 3/6] Authorizing Baseline Ledger & Running Preflight Securi
 python3 preflight_guard.py --update-checksums > /dev/null
 python3 preflight_guard.py
 
-# 4. Hard Pre-Flight Integration Unit Test
-echo -e "\n[*] [STEP 4/6] Executing Revenue Pipeline Unit Test Chain..."
-python3 -m unittest tests/test_proximity_sync.py
-python3 -m unittest -v tests/test_full_level_pipeline_chain.py
-echo "[✓] Master unit test chain passed."
+# 4. Inline Hydration & Full Unit Test Discovery Suite
+echo -e "\n[*] [STEP 4/6] Hydrating Manifest & Running Complete Unit Test Suite..."
+python3 src/sync_guardrail_levels.py > /dev/null
+python3 -m unittest discover -s tests -p "test_*.py" -v
+python3 src/sync_guardrail_levels.py > /dev/null
+echo "[✓] Complete unit test suite passed & manifest re-synchronized."
 
-# 5. Deploy Fargate sandbox container
-echo -e "\n[*] [STEP 5/6] Deploying Fargate Sandbox Node..."
-if [ -f "./deploy_fargate.sh" ]; then
-    ./deploy_fargate.sh sandbox
+# 5. Deploy Dual Fargate Fleet (PROD + SANDBOX)
+echo -e "\n[*] [STEP 5/6] Deploying Dual Fargate Fleet Node..."
+if [ -f "./deploy_dual_fargate.sh" ]; then
+    chmod +x ./deploy_dual_fargate.sh
+    ./deploy_dual_fargate.sh
+elif [ -f "./deploy_fargate.sh" ]; then
+    ./deploy_fargate.sh
 else
-    echo "[!] deploy_fargate.sh not found, skipping container deployment."
+    echo "[!] No deployment script found, skipping container deployment."
 fi
 
 # 6. Fargate Cluster Discovery & Verification

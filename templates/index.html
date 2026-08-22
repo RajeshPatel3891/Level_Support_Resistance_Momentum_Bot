@@ -21,5 +21,19 @@
     <main class="max-w-md mx-auto p-4 space-y-4" id="matrix-container" hx-get="/api/v1/matrix" hx-trigger="every 2s" hx-swap="innerHTML">
         {% include "matrix_rows.html" %}
     </main>
-</body>
+
+            <script>
+            setInterval(async () => {
+                try {
+                    const res = await fetch("/dashboard_data.json");
+                    const data = await res.json();
+                    if (data && data.summary && data.summary.total_value) {
+                        const elem = document.querySelector(".card-value, #total-equity, .starting-cash");
+                        if (elem) elem.innerText = "$" + data.summary.total_value.toLocaleString("en-US", {minimumFractionDigits: 2});
+                    }
+                } catch(e) {}
+            }, 2000);
+            </script>
+            </body>
+            
 </html>

@@ -1,3 +1,10 @@
+import os, sys
+
+if os.getenv('EXECUTION_ENV', '').upper() == 'SANDBOX':
+    os.environ['TRADIER_BASE_URL'] = 'https://sandbox.tradier.com/v1'
+    if os.getenv('TRADIER_SANDBOX_TOKEN'):
+        os.environ['TRADIER_TOKEN'] = os.getenv('TRADIER_SANDBOX_TOKEN')
+
 # ==============================================================================
 # HARM.AI UNIFIED CHIEF STRATEGY OFFICER (CSO) MASTER EXIT MONITOR
 # ==============================================================================
@@ -122,88 +129,45 @@ def get_live_quote(occ_symbol):
     return 0.0, TRADIER_BASE_URL
 
 
-def execute_tradier_close(occ_symbol, ticker, shares, base_url, max_wait_seconds=15):
-    """Execute sell_to_close order on Tradier API using Adaptive Limit Midpoint Guard & Early Momentum Urgency Intercept."""
+def execute_tradier_close(occ_symbol, ticker, shares, base_url, max_wait_seconds=10):
+    """Execute sell_to_close order on Tradier API enforcing explicit OCC payload formatting."""
     if not TRADIER_TOKEN or not TRADIER_ACCOUNT_ID:
         print(f"[-] Tradier credentials missing. Could not close {shares}x {occ_symbol}")
         return False
-    
+
+    # Extract clean root ticker if not provided cleanly
+    match = re.match(r'^([A-Z]+)\d{6}[CP]\d{8}$', occ_symbol)
+    root_symbol = match.group(1) if match else ticker.split('260821')[0].rstrip('0123456789')
+
     headers = {"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"}
-    
-    start_time = time.time()
-    initial_midpoint = None
-    best_midpoint = None
-    tick_count = 0
-    
-    print(f"[ADAPTIVE GUARD] Monitoring order book for {occ_symbol} (Max {max_wait_seconds}s window)...")
-    
-    while (time.time() - start_time) < max_wait_seconds:
-        tick_count += 1
-        try:
-            quote_res = requests.get(f"{base_url}/markets/quotes", params={"symbols": occ_symbol}, headers=headers, timeout=3)
-            if quote_res.status_code == 200:
-                q_data = quote_res.json().get('quotes', {}).get('quote', {})
-                if isinstance(q_data, list) and q_data:
-                    q_data = q_data[0]
-                bid = float(q_data.get('bid', 0.0) or 0.0)
-                ask = float(q_data.get('ask', 0.0) or 0.0)
-                
-                if bid > 0 and ask > 0:
-                    current_midpoint = round((bid + ask) / 2.0, 2)
-                    
-                    if initial_midpoint is None:
-                        initial_midpoint = current_midpoint
-                        best_midpoint = current_midpoint
-                    
-                    # Early Urgency Intercept (Within first 3 seconds)
-                    elapsed = time.time() - start_time
-                    if elapsed <= 3.0:
-                        if current_midpoint >= initial_midpoint * 1.015:  # 1.5% favorable bump
-                            print(f"[URGENCY INTERCEPT] Favorable momentum detected at T={elapsed:.1f}s! Midpoint jumped to ${current_midpoint}. Executing immediately.")
-                            best_midpoint = current_midpoint
-                            break
-                    
-                    # Track best midpoint for selling (higher is better)
-                    if current_midpoint > best_midpoint:
-                        best_midpoint = current_midpoint
-        except Exception:
-            pass
-            
-        time.sleep(1.0)
-        
-    order_type = 'market'
-    limit_price = None
-    
-    if best_midpoint and best_midpoint > 0:
-        order_type = 'limit'
-        limit_price = str(best_midpoint)
-        print(f"[ADAPTIVE GUARD] Final Limit Order Pegged at: ${limit_price} after {tick_count} ticks.")
-    else:
-        print(f"[ADAPTIVE GUARD WARNING] Could not establish dynamic midpoint. Falling back to market order.")
 
     payload = {
         'class': 'option',
-        'symbol': ticker,
+        'symbol': root_symbol,
         'option_symbol': occ_symbol,
         'side': 'sell_to_close',
         'quantity': str(abs(int(shares))),
-        'type': order_type,
+        'type': 'market',
         'duration': 'day'
     }
-    if order_type == 'limit' and limit_price:
-        payload['price'] = limit_price
 
     try:
-        res = requests.post(f"{base_url}/accounts/{TRADIER_ACCOUNT_ID}/orders", data=payload, headers=headers, timeout=5)
+        url = f"{base_url.rstrip('/')}/accounts/{TRADIER_ACCOUNT_ID}/orders"
+        res = requests.post(url, data=payload, headers=headers, timeout=5)
+        
         if res.status_code == 200:
             body = res.json()
             order_info = body.get('order', {})
-            if order_info.get('id') or order_info.get('status') in ['ok', 'pending']:
-                print(f"[✓ TRADIER CLOSE SUCCESS ({order_type.upper()})] {shares}x {occ_symbol} | Order ID: {order_info.get('id')}" + (f" | Limit Price: ${limit_price}" if limit_price else ""))
+            order_id = order_info.get('id')
+            status = str(order_info.get('status', '')).lower()
+            
+            if order_id or status in ['ok', 'pending', 'filled', 'open']:
+                print(f"[✓ TRADIER CLOSE SUCCESS] {shares}x {occ_symbol} | Order ID: {order_id}")
                 return True
-            print(f"[-] Tradier Rejected Order: {body}")
+            print(f"[-] Tradier Rejected Order Payload: {body}")
             return False
-        print(f"[-] Tradier Close Error: Status {res.status_code}")
+            
+        print(f"[-] Tradier Close Error HTTP {res.status_code}: {res.text}")
         return False
     except Exception as e:
         print(f"[-] Tradier Close Exception for {occ_symbol}: {e}")
@@ -228,6 +192,27 @@ def sync_local_sqlite_exit(t_id, ticker, exit_reason, exit_price, exit_timestamp
             conn.close()
         except Exception as e:
             print(f"[-] Local SQLite exit sync warning: {e}")
+
+
+def get_recent_fill_price(occ_symbol, default_price=0.0):
+    if not TRADIER_TOKEN or not TRADIER_ACCOUNT_ID:
+        return default_price
+    try:
+        base_url = os.getenv("TRADIER_BASE_URL", TRADIER_BASE_URL)
+        headers = {"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"}
+        res = requests.get(f"{base_url}/accounts/{TRADIER_ACCOUNT_ID}/orders", headers=headers, timeout=5)
+        if res.status_code == 200:
+            orders = res.json().get("orders", {}).get("order", [])
+            if isinstance(orders, dict):
+                orders = [orders]
+            # Filter filled sell orders for this symbol and sort by ID descending (latest first)
+            matching = [o for o in orders if o.get("option_symbol") == occ_symbol and str(o.get("status", "")).lower() == "filled"]
+            if matching:
+                matching.sort(key=lambda x: int(x.get("id", 0)), reverse=True)
+                return float(matching[0].get("avg_fill_price", default_price) or default_price)
+    except Exception as e:
+        print(f"[!] Error fetching fill price for {occ_symbol}: {e}")
+    return default_price
 
 
 def synchronize_dynamo_with_tradier():
@@ -258,18 +243,16 @@ def synchronize_dynamo_with_tradier():
     # Map Live Positions from Tradier
     live_broker_state = {}
     for pos in raw_positions:
-        symbol = pos.get('symbol', '')  # OCC Option Symbol (e.g., SOFI260821C00015500)
+        symbol = pos.get('symbol', '')  # OCC Option Symbol
         if not symbol:
             continue
         
-        # Parse underlying ticker from OCC Symbol using regex
         match = re.match(r'^([A-Z]+)\d{6}[CP]\d{8}$', symbol)
         ticker = match.group(1) if match else symbol[:4].rstrip('0123456789')
         
         qty = float(pos.get('quantity', 0))
         cost_basis_raw = float(pos.get('cost_basis', 0.0))
         
-        # Force per-share option entry & cost basis normalization
         if cost_basis_raw > 10.0 and qty > 0:
             per_share_entry = round(cost_basis_raw / (qty * 100.0), 2)
         elif qty > 0:
@@ -292,7 +275,6 @@ def synchronize_dynamo_with_tradier():
     dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
     table = dynamodb.Table('HarmonizedTrades')
 
-    # Fetch existing active records in DynamoDB
     try:
         response = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE'))
         existing_items = response.get('Items', [])
@@ -302,34 +284,44 @@ def synchronize_dynamo_with_tradier():
 
     existing_occ_symbols = {item.get('occ_symbol', item.get('ticker')): item for item in existing_items}
 
-    # A) Purge Ghost Positions (In DynamoDB ACTIVE, but NOT in Tradier)
+    # A) Purge / Reconcile Positions (In DynamoDB ACTIVE, but NOT in Tradier)
     now_str = dt.now().strftime("%Y-%m-%d %H:%M:%S")
     for db_occ_symbol, item in existing_occ_symbols.items():
         if db_occ_symbol not in live_broker_state:
             ticker = item.get('ticker', db_occ_symbol)
             tenant_id = item.get('tenant_id', 'COMPANY_A')
             t_id = item.get('trade_id')
-            print(f"[🚨 PURGING GHOST STATE] Reconciling {ticker} ({db_occ_symbol}) in DynamoDB...")
+            entry_px = float(item.get('entry_price', 0.0))
+            shares = float(item.get('shares', 1.0))
+
+            # Strictly verify actual fill price from Tradier order history without fallback estimation
+            actual_exit_px = get_recent_fill_price(db_occ_symbol, default_price=0.0)
+            realized_pnl = round((actual_exit_px - entry_px) * shares * 100.0, 2) if actual_exit_px > 0 and entry_px > 0 else 0.0
+
+            print(f"[ℹ️ TRADIER REJECTION RECONCILED] Reconciling {ticker} ({db_occ_symbol}) in DynamoDB -> Fill Px: ${actual_exit_px:.2f} | PnL: ${realized_pnl:+.2f}")
             try:
                 table.update_item(
                     Key={'tenant_id': tenant_id, 'trade_id': t_id},
-                    UpdateExpression='SET exit_status = :status, exit_timestamp = :ts, cso_reason = :reason, shares = :sh',
+                    UpdateExpression='SET exit_status = :status, exit_price = :px, exit_timestamp = :ts, net_pnl = :pnl, cso_reason = :reason, shares = :sh',
                     ExpressionAttributeValues={
                         ':status': 'GHOST_RECONCILED_CLOSED',
+                        ':px': str(actual_exit_px),
                         ':ts': now_str,
-                        ':reason': 'TRADIER_BROKERAGE_DESYNC_PURGE',
+                        ':pnl': str(realized_pnl),
+                        ':reason': 'GHOST_RECONCILED_CLOSED',
                         ':sh': '0'
                     }
                 )
+                sync_local_sqlite_exit(t_id, ticker, "GHOST_RECONCILED_CLOSED", actual_exit_px, now_str, realized_pnl, remaining_shares=0)
             except Exception as ex:
-                print(f"[-] Failed to reconcile ghost entry {db_occ_symbol}: {ex}")
+                print(f"[-] Failed to reconcile closed entry {db_occ_symbol}: {ex}")
 
-    # B) Hydrate / Update Active Positions (In Tradier -> Ensure ACTIVE in DynamoDB)
+    # B) Hydrate / Update Active Positions
     tenant_id = os.getenv('TENANT_ID', 'COMPANY_A')
     for symbol, data in live_broker_state.items():
         if symbol not in existing_occ_symbols:
             print(f"[🚀 RE-HYDRATING DYNAMO] Ingesting untracked broker position {data['ticker']} ({symbol}) -> Qty: {data['quantity']} | Entry: ${data['entry_price']}")
-            t_id = f"rehydrated_{symbol.lower()}"
+            t_id = f"trade_{symbol.lower()}"
             item_payload = {
                 'tenant_id': tenant_id,
                 'trade_id': t_id,
@@ -408,9 +400,7 @@ def evaluate_gex_exits():
             dollar_pnl = round((current_price - entry_price) * 100.0 * total_shares, 2)
             pnl_pct = ((current_price - entry_price) / entry_price) * 100.0 if entry_price > 0 else 0.0
 
-            # ------------------------------------------------------------------
-            # FEATURE 1: Persist min_pnl_seen (Yesterday's Drawdown Tracker)
-            # ------------------------------------------------------------------
+            # Feature 1: Persist min_pnl_seen
             raw_min_seen = item.get('min_pnl_seen')
             if raw_min_seen is None:
                 min_seen = dollar_pnl
@@ -431,13 +421,10 @@ def evaluate_gex_exits():
                 else:
                     min_seen = db_min_seen
 
-            # ------------------------------------------------------------------
-            # FEATURE 2: High-Water Mark Peak PnL Tracking (Today's Engine)
-            # ------------------------------------------------------------------
+            # Feature 2: High-Water Mark Peak PnL Tracking
             peak_price = max(stored_peak, current_price)
             peak_pnl_pct = ((peak_price - entry_price) / entry_price) * 100.0 if entry_price > 0 else 0.0
 
-            # --- DYNAMIC TRAILING STOP DOLLAR CALCULATION ---
             if is_runner:
                 cushion = 12.0 if peak_pnl_pct >= 100.0 else 10.0
                 dynamic_stop_pct = max(3.0, peak_pnl_pct - cushion)
@@ -454,10 +441,8 @@ def evaluate_gex_exits():
                 else:
                     calculated_stop = round(entry_price * 0.80, 2)
 
-                # Prevent downward ratcheting of existing stop loss
                 dynamic_stop = max(stored_stop_loss, calculated_stop)
 
-            # Persist Peak Price, Dynamic Stop Loss & Min PnL to DynamoDB
             table.update_item(
                 Key={'tenant_id': tenant_id, 'trade_id': t_id},
                 UpdateExpression='SET peak_price = :pk, stop_loss = :sl, cso_notes = :cn, cso_status = :cs',
@@ -471,14 +456,7 @@ def evaluate_gex_exits():
 
             print(f"[⚙️ MASTER EXIT] {ticker} | {total_shares}x | Entry: ${entry_price:.2f} | Live: ${current_price:.2f} ({pnl_pct:+.1f}%) | Peak: ${peak_price:.2f} (+{peak_pnl_pct:.1f}%) | Active Stop: ${dynamic_stop:.2f} | Min Seen: ${min_seen:+.2f}")
 
-            # ------------------------------------------------------------------
-            # FEATURE 3: Red-to-Green Recovery Exit (Bypassed -> CSO Trailing Engine)
-            # ------------------------------------------------------------------
-            # Handed full exit authority to CSO Dynamic Trailing Stop Engine
-
-            # ------------------------------------------------------------------
-            # FEATURE 4: Multi-Contract Tranche Scaling (+50% / GEX Target)
-            # ------------------------------------------------------------------
+            # Feature 4: Multi-Contract Tranche Scaling
             if total_shares > 1 and not is_runner and (pnl_pct >= 50.0 or (gex_gap_pct != 0.0 and abs(gex_gap_pct) <= 0.5)):
                 scale_shares = total_shares - 1
                 realized_scale_pnl = round((current_price - entry_price) * scale_shares * 100.0, 2)
@@ -501,23 +479,15 @@ def evaluate_gex_exits():
                     sync_local_sqlite_exit(t_id, ticker, "PARTIAL_SCALE_OUT", current_price, now_str, realized_scale_pnl, remaining_shares=1, dynamic_stop=dynamic_stop)
                 continue
 
-            # ------------------------------------------------------------------
-            # FEATURE 5: Dynamic Trailing & Hard Risk Exits (CSO Informed)
-            # ------------------------------------------------------------------
+            # Feature 5: Dynamic Trailing & Hard Risk Exits
             exit_reason = None
 
-            # 1. Trailing Stop Floor Triggered
             if current_price <= dynamic_stop and current_price > 0:
                 exit_reason = f"DYNAMIC_TRAIL_STOP_TRIGGERED_(${dynamic_stop:.2f})"
-
-            # 2. Hard Target Cap (+50% Single Contract)
             elif pnl_pct >= 50.0 and total_shares == 1:
                 exit_reason = "TAKE_PROFIT_50PCT"
-
-            # 3. CSO Momentum vs. Noise Evaluation (-8.0% to -19.9% soft band)
             elif -20.0 < pnl_pct <= -8.0 and spot > 0:
                 support_lvl = float(get_gex_target_info(ticker)[1] or 0.0)
-                
                 if support_lvl > 0:
                     support_breached = (spot < support_lvl) if trade_dir == "CALL" else (spot > support_lvl)
                     if support_breached:
@@ -528,12 +498,8 @@ def evaluate_gex_exits():
                 elif pnl_pct <= -12.0:
                     print(f"[⚠️ CSO FALLBACK CUT] {ticker} missing GEX level data & down {pnl_pct:.1f}%. Capping loss at -12% fallback floor!")
                     exit_reason = f"CSO_MISSING_LEVEL_FALLBACK_CUT_({pnl_pct:.1f}%)"
-
-            # 4. Hard Safety Floor (-20%)
             elif pnl_pct <= -20.0:
                 exit_reason = "STOP_LOSS_20PCT"
-
-            # 5. Time Expiration
             elif elapsed_minutes >= MTTP_MAX_MINUTES and is_regular_trading_hours():
                 exit_reason = f"MTTP_TIME_EXPIRED_{MTTP_MAX_MINUTES}M"
 
