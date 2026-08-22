@@ -984,3 +984,18 @@ async def get_dashboard_data_json():
 
 if __name__ == '__main__':
     uvicorn.run(app, host='0.0.0.0', port=8080)
+
+
+@app.route("/api/v1/config", methods=["GET", "POST"])
+def manage_strategy_config():
+    from src.config_loader import load_strategy_config, CONFIG_PATH
+    import json
+    if request.method == "POST":
+        try:
+            new_cfg = request.get_json(force=True)
+            with open(CONFIG_PATH, "w") as f:
+                json.dump(new_cfg, f, indent=2)
+            return jsonify({"status": "SUCCESS", "config": new_cfg})
+        except Exception as e:
+            return jsonify({"status": "ERROR", "message": str(e)}), 400
+    return jsonify(load_strategy_config())
