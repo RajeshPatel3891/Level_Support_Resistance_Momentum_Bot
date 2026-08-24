@@ -28,8 +28,8 @@
                     const res = await fetch("/dashboard_data.json");
                     const data = await res.json();
                     if (data && data.summary && data.summary.total_value) {
-                        const elem = document.querySelector(".card-value, #total-equity, .starting-cash");
-                        if (elem) elem.innerText = "$" + data.summary.total_value.toLocaleString("en-US", {minimumFractionDigits: 2});
+                        const elem = document.querySelector(".card-value, #total-equity, .do-not-overwrite-cash");
+                        if (elem) // elem.innerText = "$" + data.summary.total_value.toLocaleString("en-US", {minimumFractionDigits: 2});
                     }
                 } catch(e) {}
             }, 2000);
@@ -38,7 +38,7 @@
 <!-- STRATEGY CONFIG ADMIN PANEL -->
 <div class="card my-4 bg-dark text-light border-secondary" id="config-panel" style="border-radius:8px; background:#0d1117;">
   <div class="card-header d-flex justify-content-between align-items-center" style="background:#161b22; border-bottom:1px solid #30363d;">
-    <h5 class="m-0 text-info">⚙️ Strategy Rules & Execution Guards</h5>
+    <h5 class="m-0 text-info">⚙️ STRATEGY CONFIGURATION & GUARDS</h5>
     <button class="btn btn-sm btn-success px-3" onclick="saveConfig()">Save Rule Changes</button>
   </div>
   <div class="card-body">
