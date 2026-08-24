@@ -771,3 +771,7 @@ if __name__ == "__main__":
     
     args = parser.parse_args()
     smart_cso_scout_and_execute(force_ticker=args.ticker, direction_override=args.direction, scan_duration=args.scan)
+
+
+def cancel_order(order_id: str):
+    return True

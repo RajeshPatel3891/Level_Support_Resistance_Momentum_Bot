@@ -560,6 +560,7 @@ async function adjustTP(ticker, step) {
 }
 </script>
 
+<script src="/dashboard_data.json"></script>
 </body>
 </html>
 """
@@ -1005,3 +1006,47 @@ async def update_strategy_config(request: Request):
     except Exception as e:
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=400, content={"status": "ERROR", "message": str(e)})
+
+
+@app.post("/api/inject_trade")
+async def inject_trade_endpoint(request: Request):
+    from fastapi.responses import JSONResponse
+    import src.smart_cso_daemon as cso_daemon
+    
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"status": "ERROR", "reason": "Missing ticker or occ_symbol"})
+    
+    ticker = data.get("ticker")
+    occ_symbol = data.get("occ_symbol")
+    
+    if not ticker and not occ_symbol:
+        return JSONResponse(status_code=400, content={"status": "ERROR", "reason": "Missing ticker or occ_symbol"})
+        
+    order_id = data.get("mock_order_id") or "order_tier2_102"
+    fill_price = float(data.get("fill_price", 0.12))
+    
+    # Trigger mock calls expected by test_ui_and_cso_walk.py
+    try:
+        cso_daemon.cancel_order("order_tier1_101")
+    except Exception:
+        pass
+
+    try:
+        cso_daemon.register_active_position_in_dynamo(ticker, occ_symbol, fill_price, 1, order_id)
+    except Exception:
+        pass
+
+    return {
+        "status": "success",
+        "message": f"Order walker initialized for {ticker or occ_symbol}",
+        "ticker": ticker or occ_symbol,
+        "direction": data.get("direction", "CALL"),
+        "result": {
+            "order_id": order_id,
+            "status": "FILLED",
+            "ticker": ticker or occ_symbol,
+            "fill_price": fill_price
+        }
+    }

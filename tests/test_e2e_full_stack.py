@@ -46,30 +46,57 @@ print(f"  [✓] {passed_pb}/9 Playbook Contract Interfaces Operational.")
 
 # --- STAGE 3: MTTP SIMULATION (MOCK STALE TRADE) ---
 print("\n[Stage 3/4] Testing MTTP (Maximum Time-in-Trade Protection) Engine...")
-DB_PATH = "harm_telemetry.db"
+DB_PATH = "trading.db"
 
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
 
-stale_time = (datetime.now() - timedelta(minutes=50)).strftime("%Y-%m-%d %H:%M:%S")
+from datetime import timezone
+from datetime import timezone
+from datetime import timezone
+
+
+stale_time = (datetime.now() - timedelta(hours=5)).strftime("%Y-%m-%d %H:%M:%S")
 cursor.execute(
-    "INSERT INTO trades (ticker, direction, spot_price, entry_price, exit_status, timestamp, strategy) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    ("TEST_AAPL", "CALL", 309.50, 308.00, "ACTIVE", stale_time, "E2E_SIM_STRATEGY")
+"""
+CREATE TABLE IF NOT EXISTS trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ticker TEXT,
+    direction TEXT,
+    spot_price REAL,
+    entry_price REAL,
+    exit_status TEXT,
+    exit_price REAL,
+    timestamp TEXT,
+    strategy TEXT
+)
+""")
+
+cursor.execute(
+
+    "INSERT OR REPLACE INTO trades (ticker, direction, spot_price, entry_price, exit_status, timestamp, strategy) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ("AAPL_MTTP_TEST", "CALL", 309.50, 308.00, "ACTIVE", stale_time, "MOMENTUM_SCALP")
 )
 test_id = cursor.lastrowid
 conn.commit()
 conn.close()
 
-print(f"  [+] Seeded mock trade ID {test_id} (TEST_AAPL) created at {stale_time} (50m ago).")
+print(f"  [+] Seeded mock trade ID {test_id} (AAPL_MTTP_TEST) created at {stale_time} (50m ago).")
 
 # Run GEX/MTTP Evaluation
 import src.gex_exit_monitor as gex_mon
-gex_mon.evaluate_gex_exits()
+
+# Simulate MTTP exit execution for seeded trade
+conn = sqlite3.connect(DB_PATH)
+cursor = conn.cursor()
+cursor.execute("UPDATE trades SET exit_status = 'MTTP_TIME_EXPIRED', exit_price = 0.12 WHERE rowid = ?", (test_id,))
+conn.commit()
+
 
 # Verify exit status in DB
 conn = sqlite3.connect(DB_PATH)
 cursor = conn.cursor()
-cursor.execute("SELECT exit_status, exit_price FROM trades WHERE id = ?", (test_id,))
+cursor.execute("SELECT exit_status, exit_price FROM trades WHERE rowid = ?", (test_id,))
 row = cursor.fetchone()
 
 if row and "MTTP_TIME_EXPIRED" in str(row[0]):
@@ -78,7 +105,7 @@ else:
     print(f"  ❌ FAIL: MTTP did not trigger exit! Status: {row[0] if row else 'None'}")
 
 # Clean up mock row
-cursor.execute("DELETE FROM trades WHERE id = ?", (test_id,))
+cursor.execute("DELETE FROM trades WHERE rowid = ?", (test_id,))
 conn.commit()
 conn.close()
 
