@@ -28,7 +28,7 @@
                     const res = await fetch("/dashboard_data.json");
                     const data = await res.json();
                     if (data && data.summary && data.summary.total_value) {
-                        const elem = document.querySelector(".card-value, #total-equity, .do-not-overwrite-cash");
+                        const elem = document.querySelector("#total-equity-target-only");
                         if (elem) // elem.innerText = "$" + data.summary.total_value.toLocaleString("en-US", {minimumFractionDigits: 2});
                     }
                 } catch(e) {}
