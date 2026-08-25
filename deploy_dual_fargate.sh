@@ -131,7 +131,7 @@ PROD_TASK_ARN=$(aws ecs run-task --enable-execute-command \
   --task-definition $TASK_DEF_FAMILY \
   --launch-type FARGATE \
   --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SG_ID],assignPublicIp=ENABLED}" \
-  --overrides "$PROD_OVERRIDES" \
+  --overrides file://prod_overrides.json \
   --region $AWS_REGION \
   --query "tasks[0].taskArn" --output text)
 
@@ -143,7 +143,7 @@ SANDBOX_TASK_ARN=$(aws ecs run-task --enable-execute-command \
   --task-definition $TASK_DEF_FAMILY \
   --launch-type FARGATE \
   --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SG_ID],assignPublicIp=ENABLED}" \
-  --overrides "$SANDBOX_OVERRIDES" \
+  --overrides file://sandbox_overrides.json \
   --region $AWS_REGION \
   --query "tasks[0].taskArn" --output text)
 
