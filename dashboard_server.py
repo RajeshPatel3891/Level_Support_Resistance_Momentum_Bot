@@ -769,6 +769,13 @@ def enrich_active_positions_with_live_quotes(trades):
     return trades, total_deployed_basis, total_floating_pnl_val
 
 def fetch_portfolio_state(page=1, selected_date=None, tenant_id="COMPANY_A_PROD", env=None):
+    if not env:
+        acct_id = os.getenv("TRADIER_ACCOUNT_ID", "")
+        exec_env = os.getenv("EXECUTION_ENV", "").upper()
+        if exec_env in ["PROD", "PRODUCTION", "LIVE"] or acct_id == "6YB87601":
+            env = "PROD"
+        else:
+            env = "SANDBOX" 
     if not selected_date:
         selected_date = datetime.now().strftime("%Y-%m-%d")
         
