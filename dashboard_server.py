@@ -586,21 +586,32 @@ def get_live_quote(symbol):
 
 def fetch_tradier_balances(env=None):
     from dotenv import dotenv_values
-    env_name = str(env or os.getenv("EXECUTION_ENV") or os.getenv("TRADIER_ENV") or os.getenv("ENVIRONMENT") or CURRENT_ENV).upper()
     
-    if env_name in ["PROD", "PRODUCTION", "LIVE"]:
+    passed_env = str(env or "").upper()
+    exec_env = str(os.getenv("EXECUTION_ENV", "")).upper()
+    tradier_env = str(os.getenv("TRADIER_ENV", "")).upper()
+    
+    # Explicit passed_env override takes precedence over system env
+    if passed_env in ["SANDBOX", "PAPER"]:
+        is_prod = False
+    elif passed_env in ["PROD", "PRODUCTION", "LIVE"]:
+        is_prod = True
+    else:
+        is_prod = ("PROD" in exec_env or "PROD" in tradier_env or "LIVE" in exec_env)
+
+    if is_prod:
         p_env = dotenv_values(".env.prod") if os.path.exists(".env.prod") else {}
-        token = p_env.get("TRADIER_ACCESS_TOKEN") or os.getenv("TRADIER_ACCESS_TOKEN") or os.getenv("TRADIER_TOKEN")
+        token = p_env.get("TRADIER_ACCESS_TOKEN") or p_env.get("TRADIER_TOKEN") or os.getenv("TRADIER_ACCESS_TOKEN")
         acct = p_env.get("TRADIER_ACCOUNT_ID") or os.getenv("TRADIER_ACCOUNT_ID")
         base_url = "https://api.tradier.com/v1"
     else:
         sb_env = dotenv_values(".env.sandbox") if os.path.exists(".env.sandbox") else {}
-        token = sb_env.get("TRADIER_ACCESS_TOKEN") or sb_env.get("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_ACCESS_TOKEN")
+        token = sb_env.get("TRADIER_ACCESS_TOKEN") or sb_env.get("TRADIER_SANDBOX_TOKEN")
         acct = sb_env.get("TRADIER_ACCOUNT_ID") or "VA83416608"
         base_url = "https://sandbox.tradier.com/v1"
 
     if not token or not acct:
-        print(f"[❌ TRADIER AUTH ERROR] Missing token or account_id for env: {env_name}")
+        print(f"[❌ TRADIER AUTH ERROR] Missing token or account_id. is_prod={is_prod}")
         return 0.0, 0.0, 0.0
 
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
