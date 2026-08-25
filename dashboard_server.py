@@ -279,19 +279,19 @@ INDEX_HTML_TEMPLATE = r"""
     <div class="grid grid-cols-4 gap-2 mb-4">
         <div class="bg-gray-900/80 p-2 rounded-xl border border-gray-800 text-center">
             <div class="text-[8px] text-gray-400 font-medium uppercase tracking-wider">STARTING</div>
-            <div class="text-xs font-black text-gray-200">{{ ledger.starting_settled_cash }}</div>
+            <div class="text-xs font-black text-gray-200">{{ str_starting }}</div>
         </div>
         <div class="bg-gray-900/80 p-2 rounded-xl border border-emerald-500/40 text-center">
             <div class="text-[8px] text-emerald-400 font-medium uppercase tracking-wider">SETTLED FREE</div>
-            <div class="text-xs font-black text-emerald-400">{{ ledger.available_settled_cash }}</div>
+            <div class="text-xs font-black text-emerald-400">{{ str_settled }}</div>
         </div>
         <div class="bg-gray-900/80 p-2 rounded-xl border border-amber-500/40 text-center">
             <div class="text-[8px] text-amber-400 font-medium uppercase tracking-wider">DEPLOYED</div>
-            <div class="text-xs font-black text-amber-400">{{ ledger.deployed_capital }}</div>
+            <div class="text-xs font-black text-amber-400">{{ str_deployed }}</div>
         </div>
         <div class="bg-gray-900/80 p-2 rounded-xl border border-gray-800 text-center">
             <div class="text-[8px] text-gray-400 font-medium uppercase tracking-wider">UNSETTLED</div>
-            <div class="text-xs font-black text-gray-400">{{ ledger.unsettled_cash }}</div>
+            <div class="text-xs font-black text-gray-400">{{ str_unsettled }}</div>
         </div>
     </div>
 
@@ -864,8 +864,21 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
 
     # Enforce Sandbox Baseline Override
     if os.getenv("ENVIRONMENT") == "sandbox" or "SANDBOX" in os.getenv("TRADIER_ACCOUNT_ID", "") or not os.getenv("TRADIER_ACCESS_TOKEN"):
-        starting_balance = 113210.62
+        starting_balance = 113210.62 if os.getenv("ENVIRONMENT") == "sandbox" else starting_balance
         settled_free = 113210.62
+        settled_free = starting_balance
+    
+    # Dual-Environment Balance Isolation
+    if os.getenv("ENVIRONMENT") == "sandbox":
+        starting_balance = 113210.62 if os.getenv("ENVIRONMENT") == "sandbox" else starting_balance
+        settled_free = 113210.62
+        settled_free = starting_balance
+
+    # Sandbox Baseline Guard
+    if os.getenv("ENVIRONMENT") == "sandbox":
+        starting_balance = 113210.62 if os.getenv("ENVIRONMENT") == "sandbox" else starting_balance
+        settled_free = 113210.62
+        settled_free = starting_balance
     str_starting = f"${starting_balance:,.2f}" 
     str_settled = f"${settled_free:,.2f}"
     str_deployed = f"${deployed_capital:,.2f}"
@@ -914,8 +927,10 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
 
     template = Template(INDEX_HTML_TEMPLATE)
     rendered_html = template.render(
-        settled_cash="113,210.62",
-        starting_balance="113,210.62",
+        str_starting=str_starting,
+        str_settled=str_settled,
+        str_deployed=str_deployed,
+        str_unsettled=str_unsettled,
         proximity_matrix=levels_data,
         level_proximity=levels_data,
         trades=trades,
@@ -976,8 +991,8 @@ async def close_all_positions():
 async def get_dashboard_data_json():
     try:
         trades, closed, total_pnl, total_closed_pnl, current_date, starting_balance, settled_free, deployed_capital, unsettled = fetch_portfolio_state()
-        if os.getenv("ENVIRONMENT") == "sandbox" or "SANDBOX" in os.getenv("TRADIER_ACCOUNT_ID", "") or not os.getenv("TRADIER_ACCESS_TOKEN"):
-            starting_balance = 113210.62
+        if os.getenv("ENVIRONMENT") == "sandbox":
+            starting_balance = 113210.62 if os.getenv("ENVIRONMENT") == "sandbox" else starting_balance
             settled_free = 113210.62
         pnl_prefix_total = '+' if total_pnl >= 0 else ''
         floating_pnl_str = f"{pnl_prefix_total}${total_pnl:.2f}"
