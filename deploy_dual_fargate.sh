@@ -75,6 +75,25 @@ SUBNET_ID=$(aws ec2 describe-subnets --region $AWS_REGION --query "Subnets[0].Su
 SG_ID=$(aws ec2 describe-security-groups --region $AWS_REGION --query "SecurityGroups[0].GroupId" --output text 2>/dev/null || echo "sg-01c0f0a51fb7ee502")
 
 echo "[*] Step 7: Generating ECS JSON Overrides for Production and Sandbox..."
+PROD_TOKEN=$(grep TRADIER_ACCESS_TOKEN .env.prod | cut -d "=" -f2 | tr -d ""'")
+PROD_ACCT=$(grep TRADIER_ACCOUNT_ID .env.prod | cut -d "=" -f2 | tr -d ""'")
+
+PROD_OVERRIDE_JSON=$(cat <<EOF
+{
+  "containerOverrides": [
+    {
+      "name": "harmonized-bot-container",
+      "environment": [
+        {"name": "EXECUTION_ENV", "value": "PROD"},
+        {"name": "TRADIER_ENV", "value": "PROD"},
+        {"name": "TRADIER_ACCESS_TOKEN", "value": "${PROD_TOKEN}"},
+        {"name": "TRADIER_ACCOUNT_ID", "value": "${PROD_ACCT}"}
+      ]
+    }
+  ]
+}
+EOF
+)
 PROD_OVERIDES=$(python3 -c "
 import json
 env_vars = []
@@ -126,8 +145,10 @@ print(json.dumps(overrides))
 ")
 
 echo "
-PROD_TOKEN=$(grep TRADIER_ACCESS_TOKEN .env.prod | cut -d "=" -f2 | tr -d ""'")
-PROD_ACCT=$(grep TRADIER_ACCOUNT_ID .env.prod | cut -d "=" -f2 | tr -d ""'")
+PROD_TOKEN=$(grep TRADIER_ACCESS_TOKEN .env.prod | cut -d "=" -f2 | tr -d ""'
+")
+PROD_ACCT=$(grep TRADIER_ACCOUNT_ID .env.prod | cut -d "=" -f2 | tr -d ""'
+")
 
 PROD_CONTAINER_OVERRIDES=$(cat <<EOF
 {
