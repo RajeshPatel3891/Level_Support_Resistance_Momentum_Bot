@@ -75,25 +75,6 @@ SUBNET_ID=$(aws ec2 describe-subnets --region $AWS_REGION --query "Subnets[0].Su
 SG_ID=$(aws ec2 describe-security-groups --region $AWS_REGION --query "SecurityGroups[0].GroupId" --output text 2>/dev/null || echo "sg-01c0f0a51fb7ee502")
 
 echo "[*] Step 7: Generating ECS JSON Overrides for Production and Sandbox..."
-PROD_TOKEN=$(grep TRADIER_ACCESS_TOKEN .env.prod | cut -d "=" -f2 | tr -d ""'")
-PROD_ACCT=$(grep TRADIER_ACCOUNT_ID .env.prod | cut -d "=" -f2 | tr -d ""'")
-
-PROD_OVERRIDE_JSON=$(cat <<EOF
-{
-  "containerOverrides": [
-    {
-      "name": "harmonized-bot-container",
-      "environment": [
-        {"name": "EXECUTION_ENV", "value": "PROD"},
-        {"name": "TRADIER_ENV", "value": "PROD"},
-        {"name": "TRADIER_ACCESS_TOKEN", "value": "${PROD_TOKEN}"},
-        {"name": "TRADIER_ACCOUNT_ID", "value": "${PROD_ACCT}"}
-      ]
-    }
-  ]
-}
-EOF
-)
 PROD_OVERIDES=$(python3 -c "
 import json
 env_vars = []
@@ -144,31 +125,8 @@ overrides = {
 print(json.dumps(overrides))
 ")
 
-echo "
-PROD_TOKEN=$(grep TRADIER_ACCESS_TOKEN .env.prod | cut -d "=" -f2 | tr -d ""'
-")
-PROD_ACCT=$(grep TRADIER_ACCOUNT_ID .env.prod | cut -d "=" -f2 | tr -d ""'
-")
-
-PROD_CONTAINER_OVERRIDES=$(cat <<EOF
-{
-  "containerOverrides": [
-    {
-      "name": "harmonized-bot-container",
-      "environment": [
-        {"name": "EXECUTION_ENV", "value": "PROD"},
-        {"name": "TRADIER_ENV", "value": "PROD"},
-        {"name": "TRADIER_ACCESS_TOKEN", "value": "${PROD_TOKEN}"},
-        {"name": "TRADIER_ACCOUNT_ID", "value": "${PROD_ACCT}"}
-      ]
-    }
-  ]
-}
-EOF
-)
-
-[*] Step 8: Launching PRODUCTION Fargate Task..."
-PROD_TASK_ARN=$(aws ecs run-task --enable-execute-command \
+echo "[*] Step 8: Launching PRODUCTION Fargate Task..."
+PROD_TASK_ARN=$(aws ecs run-task --enable-execute-command \ --overrides '{"containerOverrides": [{"name": "harmonized-bot-container", "environment": [{"name": "EXECUTION_ENV", "value": "PROD"}, {"name": "TRADIER_ENV", "value": "PROD"}, {"name": "TRADIER_ACCESS_TOKEN", "value": ""}, {"name": "TRADIER_ACCOUNT_ID", "value": "6YB87601"}]}]}'
   --cluster $CLUSTER_NAME \
   --task-definition $TASK_DEF_FAMILY \
   --launch-type FARGATE \
@@ -180,7 +138,7 @@ PROD_TASK_ARN=$(aws ecs run-task --enable-execute-command \
 echo "  [✓] LIVE PROD Task ARN: $PROD_TASK_ARN"
 
 echo "[*] Step 9: Launching SANDBOX PAPER Fargate Task..."
-SANDBOX_TASK_ARN=$(aws ecs run-task --enable-execute-command \
+SANDBOX_TASK_ARN=$(aws ecs run-task --enable-execute-command \ --overrides '{"containerOverrides": [{"name": "harmonized-bot-container", "environment": [{"name": "EXECUTION_ENV", "value": "SANDBOX"}, {"name": "TRADIER_ENV", "value": "SANDBOX"}]}]}'
   --cluster $CLUSTER_NAME \
   --task-definition $TASK_DEF_FAMILY \
   --launch-type FARGATE \
