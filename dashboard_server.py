@@ -772,7 +772,9 @@ def fetch_portfolio_state(page=1, selected_date=None, tenant_id="COMPANY_A_PROD"
     if not env:
         acct_id = os.getenv("TRADIER_ACCOUNT_ID", "")
         exec_env = os.getenv("EXECUTION_ENV", "").upper()
-        if exec_env in ["PROD", "PRODUCTION", "LIVE"] or acct_id == "6YB87601":
+        tradier_env = os.getenv("TRADIER_ENV", "").upper()
+        
+        if exec_env in ["PROD", "PRODUCTION", "LIVE"] or tradier_env in ["PROD", "PRODUCTION", "LIVE"] or acct_id == "6YB87601":
             env = "PROD"
         else:
             env = "SANDBOX" 
