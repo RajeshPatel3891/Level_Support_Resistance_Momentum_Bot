@@ -125,7 +125,28 @@ overrides = {
 print(json.dumps(overrides))
 ")
 
-echo "[*] Step 8: Launching PRODUCTION Fargate Task..."
+echo "
+PROD_TOKEN=$(grep TRADIER_ACCESS_TOKEN .env.prod | cut -d "=" -f2 | tr -d ""'")
+PROD_ACCT=$(grep TRADIER_ACCOUNT_ID .env.prod | cut -d "=" -f2 | tr -d ""'")
+
+PROD_CONTAINER_OVERRIDES=$(cat <<EOF
+{
+  "containerOverrides": [
+    {
+      "name": "harmonized-bot-container",
+      "environment": [
+        {"name": "EXECUTION_ENV", "value": "PROD"},
+        {"name": "TRADIER_ENV", "value": "PROD"},
+        {"name": "TRADIER_ACCESS_TOKEN", "value": "${PROD_TOKEN}"},
+        {"name": "TRADIER_ACCOUNT_ID", "value": "${PROD_ACCT}"}
+      ]
+    }
+  ]
+}
+EOF
+)
+
+[*] Step 8: Launching PRODUCTION Fargate Task..."
 PROD_TASK_ARN=$(aws ecs run-task --enable-execute-command \
   --cluster $CLUSTER_NAME \
   --task-definition $TASK_DEF_FAMILY \

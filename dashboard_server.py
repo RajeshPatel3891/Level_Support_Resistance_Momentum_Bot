@@ -590,23 +590,25 @@ def fetch_tradier_balances(env=None):
     passed_env = str(env or "").upper()
     exec_env = str(os.getenv("EXECUTION_ENV", "")).upper()
     tradier_env = str(os.getenv("TRADIER_ENV", "")).upper()
+    acct_id = str(os.getenv("TRADIER_ACCOUNT_ID", ""))
     
-    # Explicit passed_env override takes precedence over system env
     if passed_env in ["SANDBOX", "PAPER"]:
         is_prod = False
     elif passed_env in ["PROD", "PRODUCTION", "LIVE"]:
         is_prod = True
     else:
-        is_prod = ("PROD" in exec_env or "PROD" in tradier_env or "LIVE" in exec_env)
+        is_prod = (exec_env in ["PROD", "PRODUCTION", "LIVE"] or 
+                   tradier_env in ["PROD", "PRODUCTION", "LIVE"] or 
+                   acct_id == "6YB87601")
 
     if is_prod:
         p_env = dotenv_values(".env.prod") if os.path.exists(".env.prod") else {}
-        token = p_env.get("TRADIER_ACCESS_TOKEN") or p_env.get("TRADIER_TOKEN") or os.getenv("TRADIER_ACCESS_TOKEN")
-        acct = p_env.get("TRADIER_ACCOUNT_ID") or os.getenv("TRADIER_ACCOUNT_ID")
+        token = os.getenv("TRADIER_ACCESS_TOKEN") or p_env.get("TRADIER_ACCESS_TOKEN") or os.getenv("TRADIER_TOKEN")
+        acct = os.getenv("TRADIER_ACCOUNT_ID") or p_env.get("TRADIER_ACCOUNT_ID") or "6YB87601"
         base_url = "https://api.tradier.com/v1"
     else:
         sb_env = dotenv_values(".env.sandbox") if os.path.exists(".env.sandbox") else {}
-        token = sb_env.get("TRADIER_ACCESS_TOKEN") or sb_env.get("TRADIER_SANDBOX_TOKEN")
+        token = sb_env.get("TRADIER_ACCESS_TOKEN") or sb_env.get("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_SANDBOX_TOKEN")
         acct = sb_env.get("TRADIER_ACCOUNT_ID") or "VA83416608"
         base_url = "https://sandbox.tradier.com/v1"
 
