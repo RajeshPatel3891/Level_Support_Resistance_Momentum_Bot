@@ -109,9 +109,8 @@ def validate_reentry_eligibility(ticker, db_path=DB_PATH):
     try:
         conn = sqlite3.connect(db_path)
         c = conn.cursor()
-        today_str = datetime.now().strftime('%Y-%m-%d')
+        today_str = datetime.now().strftime("%Y-%m-%d")
         
-        # 1. Check total trades today for this ticker
         c.execute("""
             SELECT COUNT(*), MAX(timestamp) FROM trades 
             WHERE UPPER(ticker) = UPPER(?) AND timestamp LIKE ?
@@ -120,8 +119,8 @@ def validate_reentry_eligibility(ticker, db_path=DB_PATH):
         row = c.fetchone()
         conn.close()
         
-        trade_count = row[0] if row else 0
-        last_timestamp_str = row[1] if row else None
+        trade_count = row[0] if row and row[0] is not None else 0
+        last_timestamp_str = row[1] if row and row[1] is not None else None
         
         if trade_count >= 2:
             print(f"[⛔ RE-ENTRY BLOCKED] {ticker} has hit maximum 2 trades for today.")
@@ -129,35 +128,17 @@ def validate_reentry_eligibility(ticker, db_path=DB_PATH):
             
         if last_timestamp_str:
             try:
-                last_time = datetime.strptime(last_timestamp_str, "%Y-%m-%d %H:%M:%S")
+                last_time = datetime.strptime(str(last_timestamp_str), "%Y-%m-%d %H:%M:%S")
                 elapsed_mins = (datetime.now() - last_time).total_seconds() / 60.0
                 if elapsed_mins < 15.0:
                     print(f"[⏳ COOLDOWN ACTIVE] {ticker} entered/exited {elapsed_mins:.1f}m ago. Need 15m cooldown.")
                     return False
-            except Exception:
-                pass
+            except Exception as parse_err:
+                print(f"[!] Timestamp parse error: {parse_err}")
     except Exception as e:
-        log_msg(f"[!] Re-entry validation warning: {e}")
+        print(f"[!] Re-entry validation warning: {e}")
             
     return True
-
-# ===============================================================================
-# HARM.AI // BETA CALIBRATION & EXECUTION WATERFALL
-# ===============================================================================
-
-BETA_PROFILES = {
-    "HIGH": {"zone": 0.0075, "turn_ticks": 3, "trail_mult": 1.5},  # Widen band to arm SPY/QQQ/NVDA
-    "MID":  {"zone": 0.0030, "turn_ticks": 3, "trail_mult": 1.0},
-    "LOW":  {"zone": 0.0020, "turn_ticks": 2, "trail_mult": 0.75}
-}
-
-TICKER_BETA_MAP = {
-    "SPY": "HIGH", "QQQ": "HIGH", "IWM": "HIGH", "NVDA": "HIGH", "TSLA": "HIGH",
-    "AAPL": "HIGH", "AMZN": "HIGH", "GOOGL": "HIGH", "AMD": "HIGH", "META": "HIGH",
-    "NFLX": "HIGH", "MARA": "HIGH",
-    "PLTR": "MID", "RIVN": "MID", "SOFI": "MID", "HOOD": "MID", "UBER": "MID", "SNAP": "MID",
-    "INTC": "LOW", "AAL": "LOW", "F": "LOW", "BAC": "LOW", "CCL": "LOW", "NKE": "LOW"
-}
 
 def get_ticker_calibration(ticker: str):
     beta_tier = TICKER_BETA_MAP.get(ticker.upper(), "MID")
