@@ -126,26 +126,12 @@ print(json.dumps(overrides))
 ")
 
 echo "[*] Step 8: Launching PRODUCTION Fargate Task..."
-PROD_TASK_ARN=$(aws ecs run-task --enable-execute-command \ --overrides '{"containerOverrides": [{"name": "harmonized-bot-container", "environment": [{"name": "EXECUTION_ENV", "value": "PROD"}, {"name": "TRADIER_ENV", "value": "PROD"}, {"name": "TRADIER_ACCESS_TOKEN", "value": ""}, {"name": "TRADIER_ACCOUNT_ID", "value": "6YB87601"}]}]}'
-  --cluster $CLUSTER_NAME \
-  --task-definition $TASK_DEF_FAMILY \
-  --launch-type FARGATE \
-  --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SG_ID],assignPublicIp=ENABLED}" \
-  --overrides "$PROD_OVERIDES" \
-  --region $AWS_REGION \
-  --query "tasks[0].taskArn" --output text)
+PROD_TASK_ARN=$(aws ecs run-task --enable-execute-command  --cluster $CLUSTER_NAME  --task-definition $TASK_DEF_FAMILY  --launch-type FARGATE  --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SG_ID],assignPublicIp=ENABLED}"  --overrides "$PROD_OVERIDES"  --region $AWS_REGION  --query "tasks[0].taskArn" --output text)
 
 echo "  [✓] LIVE PROD Task ARN: $PROD_TASK_ARN"
 
 echo "[*] Step 9: Launching SANDBOX PAPER Fargate Task..."
-SANDBOX_TASK_ARN=$(aws ecs run-task --enable-execute-command \ --overrides '{"containerOverrides": [{"name": "harmonized-bot-container", "environment": [{"name": "EXECUTION_ENV", "value": "SANDBOX"}, {"name": "TRADIER_ENV", "value": "SANDBOX"}]}]}'
-  --cluster $CLUSTER_NAME \
-  --task-definition $TASK_DEF_FAMILY \
-  --launch-type FARGATE \
-  --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SG_ID],assignPublicIp=ENABLED}" \
-  --overrides "$SANDBOX_OVERIDES" \
-  --region $AWS_REGION \
-  --query "tasks[0].taskArn" --output text)
+SANDBOX_TASK_ARN=$(aws ecs run-task --enable-execute-command  --cluster $CLUSTER_NAME  --task-definition $TASK_DEF_FAMILY  --launch-type FARGATE  --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SG_ID],assignPublicIp=ENABLED}"  --overrides "$SANDBOX_OVERIDES"  --region $AWS_REGION  --query "tasks[0].taskArn" --output text)
 
 echo "  [✓] SANDBOX Task ARN: $SANDBOX_TASK_ARN"
 
