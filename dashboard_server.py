@@ -586,7 +586,7 @@ def get_live_quote(symbol):
 
 def fetch_tradier_balances(env=None):
     from dotenv import dotenv_values
-    env_name = str(env or os.getenv("EXECUTION_ENV") or os.getenv("ENVIRONMENT") or os.getenv("TRADIER_ENV") or CURRENT_ENV).upper()
+    env_name = str(env or os.getenv("EXECUTION_ENV") or os.getenv("TRADIER_ENV") or os.getenv("ENVIRONMENT") or CURRENT_ENV).upper()
     
     if env_name in ["PROD", "PRODUCTION", "LIVE"]:
         p_env = dotenv_values(".env.prod") if os.path.exists(".env.prod") else {}
@@ -599,22 +599,26 @@ def fetch_tradier_balances(env=None):
         acct = sb_env.get("TRADIER_ACCOUNT_ID") or "VA83416608"
         base_url = "https://sandbox.tradier.com/v1"
 
-    if token and acct:
-        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-        try:
-            r = requests.get(f"{base_url}/accounts/{acct}/balances", headers=headers, timeout=5)
-            if r.status_code == 200:
-                bal = r.json().get("balances", {})
-                equity = float(bal.get("total_equity", 113286.62) or 113286.62)
-                cash = float(bal.get("total_cash", 113210.62) or 113210.62)
-                unsettled = float(bal.get("uncleared_funds", bal.get("unsettled_funds", 0.0)) or 0.0)
-                return equity, cash, unsettled
-        except Exception as e:
-            pass
-            
-    if env_name in ["PROD", "PRODUCTION", "LIVE"]:
-        return 490.90, 490.90, 0.0
-    return 113286.62, 113210.62, 0.0
+    if not token or not acct:
+        print(f"[❌ TRADIER AUTH ERROR] Missing token or account_id for env: {env_name}")
+        return 0.0, 0.0, 0.0
+
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    try:
+        url = f"{base_url}/accounts/{acct}/balances"
+        r = requests.get(url, headers=headers, timeout=5)
+        if r.status_code == 200:
+            bal = r.json().get("balances", {})
+            equity = float(bal.get("total_equity", 0.0) or 0.0)
+            cash = float(bal.get("total_cash", bal.get("cash", {}).get("cash_available", 0.0)) or 0.0)
+            unsettled = float(bal.get("uncleared_funds", bal.get("unsettled_funds", 0.0)) or 0.0)
+            return equity, cash, unsettled
+        else:
+            print(f"[❌ TRADIER API ERROR] {url} returned HTTP {r.status_code}: {r.text}")
+    except Exception as e:
+        print(f"[❌ TRADIER CONNECTION EXCEPTION]: {e}")
+
+    return 0.0, 0.0, 0.0
 
 def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A_PROD'):
     db_path = "/app/harm_telemetry.db" if os.path.exists("/app/harm_telemetry.db") else DB_PATH
