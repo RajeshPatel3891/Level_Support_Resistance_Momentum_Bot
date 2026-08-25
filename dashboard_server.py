@@ -869,13 +869,13 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         settled_free = starting_balance
     
     # Dual-Environment Balance Isolation
-    if os.getenv("ENVIRONMENT") == "sandbox":
+    if os.getenv("ENVIRONMENT") == "sandbox" or os.getenv("EXECUTION_ENV") == "SANDBOX" or os.getenv("IS_SANDBOX") == "true" or os.getenv("TRADIER_ACCOUNT_ID") == "VA83416608":
         starting_balance = 113210.62 if os.getenv("ENVIRONMENT") == "sandbox" else starting_balance
         settled_free = 113210.62
         settled_free = starting_balance
 
     # Sandbox Baseline Guard
-    if os.getenv("ENVIRONMENT") == "sandbox":
+    if os.getenv("ENVIRONMENT") == "sandbox" or os.getenv("EXECUTION_ENV") == "SANDBOX" or os.getenv("IS_SANDBOX") == "true" or os.getenv("TRADIER_ACCOUNT_ID") == "VA83416608":
         starting_balance = 113210.62 if os.getenv("ENVIRONMENT") == "sandbox" else starting_balance
         settled_free = 113210.62
         settled_free = starting_balance
@@ -991,7 +991,7 @@ async def close_all_positions():
 async def get_dashboard_data_json():
     try:
         trades, closed, total_pnl, total_closed_pnl, current_date, starting_balance, settled_free, deployed_capital, unsettled = fetch_portfolio_state()
-        if os.getenv("ENVIRONMENT") == "sandbox":
+        if os.getenv("ENVIRONMENT") == "sandbox" or os.getenv("EXECUTION_ENV") == "SANDBOX" or os.getenv("IS_SANDBOX") == "true" or os.getenv("TRADIER_ACCOUNT_ID") == "VA83416608":
             starting_balance = 113210.62 if os.getenv("ENVIRONMENT") == "sandbox" else starting_balance
             settled_free = 113210.62
         pnl_prefix_total = '+' if total_pnl >= 0 else ''
