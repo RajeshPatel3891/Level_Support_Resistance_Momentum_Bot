@@ -578,7 +578,7 @@ INDEX_HTML_TEMPLATE = r"""
             };
         }
 
-        async async function fetchProximity() {
+        async function fetchProximity() {
     try {
         const res = await fetch("/api/proximity");
         const data = await res.json();
@@ -1054,7 +1054,7 @@ def get_proximity_api():
     if len(levels) <= 1:
         try:
             s3 = boto3.client("s3", region_name="us-east-1")
-            obj = s3.get_object(Bucket="harm-ai-levels", Key="trading_levels.json")
+            obj = s3.get_object(Bucket="harmonized-ai-telemetry-bucket", Key="trading_levels.json")
             fetched = json.loads(obj["Body"].read().decode("utf-8"))
             if "levels" in fetched and isinstance(fetched["levels"], dict):
                 levels = fetched["levels"]

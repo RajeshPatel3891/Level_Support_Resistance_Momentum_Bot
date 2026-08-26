@@ -1,9 +1,196 @@
 {
-  "test_ticker": {
-    "zone_pct": 0.003,
-    "turn_ticks": 3,
-    "mttp_minutes": 35,
-    "beta": "MID",
-    "target": 200.0
+  "levels": {
+    "SPY": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "QQQ": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "IWM": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "NVDA": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "TSLA": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "AAPL": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "AMZN": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "GOOGL": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "AMD": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "META": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "NFLX": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "PLTR": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "SOFI": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "F": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "AAL": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "INTC": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "RIVN": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "HOOD": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "BAC": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "SNAP": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "MARA": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "CCL": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "UBER": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    },
+    "NKE": {
+      "spot_price": 100.0,
+      "spot_target_call": 101.5,
+      "spot_target_put": 98.5,
+      "status": "ARMED",
+      "armed": true,
+      "proximity_pct": 0.5
+    }
   }
 }
