@@ -578,52 +578,56 @@ INDEX_HTML_TEMPLATE = r"""
             };
         }
 
-        async function fetchProximity() {
-            try {
-                const res = await fetch('/api/proximity');
-                const data = await res.json();
-                const container = document.getElementById('proximity-container');
-                if (!container) return;
-                  
-                let html = '';
-                for (const [ticker, info] of Object.entries(data)) {
-                    const statusBg = info.armed ? 'rgba(0, 230, 118, 0.15)' : 'rgba(255, 255, 255, 0.05)';
-                    const statusColor = info.armed ? '#00e676' : '#8f9bba';
-                    const statusText = info.armed ? 'ARMED' : 'WAITING';
-                    
-                    const injectBtn = info.armed ? `
-                        <button id="btn-inject-${ticker}" onclick="triggerUiInjectStream('${ticker}')" 
-                                class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] px-2 py-1 rounded transition-colors ml-2">
-                            ⚡ INJECT
-                        </button>
-                    ` : '';
-                      
-                    html += `
-                        <div style="background: #111827; border: 1px solid #1f293d; border-radius: 8px; padding: 12px;">
-                            <div style="display: flex; justify-between; align-items: center; margin-bottom: 8px;">
-                                <span style="font-weight: 800; font-size: 16px; color: #ffffff;">${ticker}</span>
-                                <div>
-                                    <span style="background: ${statusBg}; color: ${statusColor}; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 4px;">${statusText}</span>
-                                    ${injectBtn}
-                                </div>
-                            </div>
-                            <div style="font-size: 12px; color: #8f9bba; display: flex; justify-content: space-between; margin-bottom: 4px;">
-                                <span>Spot: <strong style="color: #fff;">$${info.spot.toFixed(2)}</strong></span>
-                                <span>VWAP: <strong style="color: #fff;">$${info.vwap.toFixed(2)}</strong></span>
-                            </div>
-                            <div style="font-size: 12px; color: #8f9bba; display: flex; justify-content: space-between;">
-                                <span>Target: <strong style="color: #3b82f6;">${info.target}</strong></span>
-                                <span>Gap: <strong style="color: #ffb74d;">${info.gap_dollars} (${info.gap_pct})</strong></span>
-                            </div>
-                            <pre id="console-${ticker}" class="hidden mt-2 p-2 bg-black text-emerald-400 font-mono text-[10px] rounded max-h-36 overflow-y-auto whitespace-pre-wrap leading-tight border border-gray-800 text-left"></pre>
+        async async function fetchProximity() {
+    try {
+        const res = await fetch("/api/proximity");
+        const data = await res.json();
+        const container = document.getElementById("proximity-container");
+        if (!container) return;
+
+        let html = "";
+        for (const [ticker, info] of Object.entries(data)) {
+            const statusBg = info.armed ? "rgba(0, 230, 118, 0.15)" : "rgba(255, 255, 255, 0.05)";
+            const statusColor = info.armed ? "#00e676" : "#8f9bba";
+            const statusText = info.status || (info.armed ? "ARMED" : "WAITING");
+
+            const spot = (info.spot || 0).toFixed(2);
+            const targetCall = (info.target_call || 0).toFixed(2);
+            const targetPut = (info.target_put || 0).toFixed(2);
+
+            const injectBtn = info.armed ? `
+                <button id="btn-inject-${ticker}" onclick="triggerUiInjectStream('${ticker}')" 
+                        class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] px-2 py-1 rounded transition-colors ml-2">
+                    ⚡ INJECT
+                </button>
+            ` : "";
+
+            html += `
+                <div style="background: #111827; border: 1px solid #1f293d; border-radius: 8px; padding: 12px;">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                        <span style="font-weight: 800; font-size: 16px; color: #ffffff;">${ticker}</span>
+                        <div>
+                            <span style="background: ${statusBg}; color: ${statusColor}; font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 4px;">${statusText}</span>
+                            ${injectBtn}
                         </div>
-                    `;
-                }
-                container.innerHTML = html;
-            } catch (e) {
-                console.error("Proximity fetch error:", e);
-            }
+                    </div>
+                    <div style="font-size: 12px; color: #8f9bba; display: flex; justify-content: space-between; margin-bottom: 4px;">
+                        <span>Spot: <strong style="color: #fff;">$${spot}</strong></span>
+                        <span>Prox: <strong style="color: #ffb74d;">${info.prox || 0}%</strong></span>
+                    </div>
+                    <div style="font-size: 12px; color: #8f9bba; display: flex; justify-content: space-between;">
+                        <span>Call Tgt: <strong style="color: #00e676;">$${targetCall}</strong></span>
+                        <span>Put Tgt: <strong style="color: #ef4444;">$${targetPut}</strong></span>
+                    </div>
+                    <pre id="console-${ticker}" class="hidden mt-2 p-2 bg-black text-emerald-400 font-mono text-[10px] rounded max-h-36 overflow-y-auto whitespace-pre-wrap leading-tight border border-gray-800 text-left"></pre>
+                </div>
+            `;
         }
+        container.innerHTML = html;
+    } catch (e) {
+        console.error("Proximity fetch error:", e);
+    }
+}
 
         function triggerUiInjectStream(ticker) {
             const btn = document.getElementById(`btn-inject-${ticker}`);
