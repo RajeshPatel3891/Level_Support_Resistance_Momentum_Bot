@@ -478,8 +478,21 @@ INDEX_HTML_TEMPLATE = r"""
         }
     }
 
-    function triggerConfigAudit() {
-        alert("⚡ Strategy Audit: All parameter caps are active and locked.");
+    async function triggerConfigAudit() {
+        const raw = document.getElementById("config-raw-json");
+        if (!raw) return;
+        raw.classList.remove("hidden");
+        raw.innerText = "> Running real-time Strategy Guard Audit...";
+        try {
+            const res = await fetch("/api/audit_config");
+            const data = await res.json();
+            raw.innerText = `[⚡ AUDIT RESULT - ${data.timestamp}]
+Status: ${data.status}
+Active Guards:
+` + JSON.stringify(data.active_guards, null, 2);
+        } catch(e) {
+            raw.innerText = "[⚠️ AUDIT ERROR] Could not reach audit endpoint.";
+        }
     }
 
     loadStrategyConfigUI();
@@ -1317,6 +1330,28 @@ def load_dashboard_config():
         except Exception as e:
             print(f"[⚠️] Failed to load config, fallback to default: {e}")
     return DEFAULT_CONFIG.copy()
+
+
+@app.get("/api/audit_config")
+def audit_config():
+    config = load_dashboard_config()
+    passed = True
+    issues = []
+    
+    if config.get("max_trade_dollar_cost", 0) > 500:
+        issues.append("Max trade dollar cost exceeds safe $500 threshold.")
+        passed = False
+    if config.get("max_bid_ask_spread_cap", 0) > 20:
+        issues.append("Spread cap > 20% increases slippage risk.")
+        passed = False
+        
+    return {
+        "status": "PASS" if passed else "WARN",
+        "timestamp": datetime.now().strftime("%H:%M:%S ET"),
+        "issues": issues,
+        "active_guards": config
+    }
+
 
 @app.get("/api/config")
 def get_config():
