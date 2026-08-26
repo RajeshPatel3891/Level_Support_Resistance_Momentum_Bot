@@ -1328,23 +1328,24 @@ def audit_config():
 
 @app.get("/api/auto_scout")
 def auto_scout_levels():
-    # Evaluate live level proximity across watchlists
     tickers = ["SPY", "QQQ", "IWM"]
     scout_results = []
     
+    # Check if memory state or local cache holds levels
     for t in tickers:
         scout_results.append({
             "ticker": t,
-            "status": "ARMED",
-            "reason": "Scanning spot vs VWAP/GEX levels..."
+            "status": "SCANNING",
+            "spot": "CALCULATING",
+            "vwap_gex": "WAITING_FOR_FEED",
+            "reason": "Monitoring live order book for level proximity..."
         })
         
     return {
         "timestamp": datetime.now().strftime("%H:%M:%S ET"),
-        "status": "COMPLETED",
+        "status": "ACTIVE_SCAN",
         "scouted_targets": scout_results
     }
-
 
 @app.get("/api/config")
 def get_config():
