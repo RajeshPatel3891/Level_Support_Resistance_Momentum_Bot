@@ -518,7 +518,169 @@ Active Guards:
 
     <!-- Active Positions -->
     <div class="flex items-center justify-between mb-3">
-        <h2 class="text-xs font-bold text-gray-400 uppercase tracking-wider">ACTIVE POSITIONS, GEX TARGETS & RISK MATRIX</h2>
+        <h2 class="text-xs font-bold text-gray-400 uppercase tracking-wider">
+    <!-- STRATEGY CONFIGURATION & GUARDS PANEL -->
+    <div class="bg-gray-900/90 border border-amber-500/30 rounded-xl p-4 mb-6 shadow-xl">
+        <div class="flex items-center justify-between pb-3 mb-3 border-b border-gray-800">
+            <div>
+                <h2 class="text-xs font-bold text-blue-400 tracking-wider uppercase flex items-center gap-1">
+                    ⚙️ STRATEGY CONFIGURATION & GUARDS
+                </h2>
+                <p class="text-[9px] text-gray-400 font-mono mt-0.5">DYNAMIC ORDER PARAMETER ENFORCEMENT ENGINE</p>
+            </div>
+            <div class="flex items-center space-x-2">
+                <button type="button" onclick="triggerConfigAudit()" class="bg-blue-600 hover:bg-blue-500 text-white font-bold text-[10px] px-2.5 py-1 rounded shadow cursor-pointer">⚡ AUDIT</button>
+                <button type="button" onclick="triggerAutoScout()" class="bg-amber-600 hover:bg-amber-500 text-white font-bold text-[10px] px-2.5 py-1 rounded shadow cursor-pointer">🚀 AUTO-SCOUT</button>
+                <button type="button" onclick="toggleConfigRaw()" class="bg-gray-800 hover:bg-gray-700 text-gray-300 font-mono text-[10px] px-2 py-1 rounded border border-gray-700 cursor-pointer">{ }</button>
+                <button type="button" onclick="saveStrategyConfig()" class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] px-2.5 py-1 rounded shadow cursor-pointer">SAVE CHANGES</button>
+                <button type="button" onclick="toggleConfigBody()" id="btn-toggle-config" class="bg-gray-800 hover:bg-gray-700 text-gray-300 text-[10px] px-2 py-1 rounded font-bold cursor-pointer">▲ HIDE</button>
+            </div>
+        </div>
+
+        <div id="config-panel-body" class="space-y-4">
+            <!-- EXPIRATION & DTE FLOORS -->
+            <div class="bg-gray-950/60 p-3 rounded-lg border border-gray-800">
+                <div class="text-[10px] font-bold text-gray-300 uppercase tracking-wider mb-2">📅 EXPIRATION & DTE FLOORS</div>
+                <div class="space-y-3">
+                    <div>
+                        <div class="flex justify-between text-[11px] font-semibold text-gray-300 mb-1">
+                            <span>MIN DTE DEFAULT</span>
+                            <span id="val-min-dte" class="text-blue-400 font-bold bg-gray-900 px-2 py-0.5 rounded border border-gray-800">1 DAYS</span>
+                        </div>
+                        <input type="range" id="input-min-dte" min="0" max="14" value="1" oninput="document.getElementById('val-min-dte').innerText = this.value + ' DAYS'" class="w-full accent-blue-500 h-1.5 bg-gray-800 rounded-lg cursor-pointer">
+                    </div>
+                    <div>
+                        <div class="flex justify-between text-[11px] font-semibold text-gray-300 mb-1">
+                            <span>LOW PRICE STOCK MIN DTE</span>
+                            <span id="val-low-dte" class="text-blue-400 font-bold bg-gray-900 px-2 py-0.5 rounded border border-gray-800">5 DAYS</span>
+                        </div>
+                        <input type="range" id="input-low-dte" min="1" max="30" value="5" oninput="document.getElementById('val-low-dte').innerText = this.value + ' DAYS'" class="w-full accent-blue-500 h-1.5 bg-gray-800 rounded-lg cursor-pointer">
+                    </div>
+                </div>
+            </div>
+
+            <!-- RISK & CAPITAL BOUNDARIES -->
+            <div class="bg-gray-950/60 p-3 rounded-lg border border-gray-800">
+                <div class="text-[10px] font-bold text-gray-300 uppercase tracking-wider mb-2">🛡️ RISK & CAPITAL BOUNDARIES</div>
+                <div class="space-y-3">
+                    <div>
+                        <div class="flex justify-between text-[11px] font-semibold text-gray-300 mb-1">
+                            <span>LOW PRICE STOCK THRESHOLD</span>
+                            <span id="val-low-thresh" class="text-emerald-400 font-bold bg-gray-900 px-2 py-0.5 rounded border border-gray-800">$100</span>
+                        </div>
+                        <input type="range" id="input-low-thresh" min="10" max="500" step="5" value="100" oninput="document.getElementById('val-low-thresh').innerText = '$' + this.value" class="w-full accent-emerald-500 h-1.5 bg-gray-800 rounded-lg cursor-pointer">
+                    </div>
+                    <div>
+                        <div class="flex justify-between text-[11px] font-semibold text-gray-300 mb-1">
+                            <span>MAX TRADE DOLLAR COST</span>
+                            <span id="val-max-cost" class="text-emerald-400 font-bold bg-gray-900 px-2 py-0.5 rounded border border-gray-800">$225</span>
+                        </div>
+                        <input type="range" id="input-max-cost" min="50" max="1000" step="25" value="225" oninput="document.getElementById('val-max-cost').innerText = '$' + this.value" class="w-full accent-emerald-500 h-1.5 bg-gray-800 rounded-lg cursor-pointer">
+                    </div>
+                </div>
+            </div>
+
+            <!-- EXECUTION FILTERS & SCALPS -->
+            <div class="bg-gray-950/60 p-3 rounded-lg border border-gray-800 space-y-3">
+                <div class="text-[10px] font-bold text-gray-300 uppercase tracking-wider">⚡ EXECUTION FILTERS & SCALPS</div>
+                <div>
+                    <div class="flex justify-between text-[11px] font-semibold text-gray-300 mb-1">
+                        <span>MAX BID/ASK SPREAD CAP</span>
+                        <span id="val-spread-cap" class="text-purple-400 font-bold bg-gray-900 px-2 py-0.5 rounded border border-gray-800">10%</span>
+                    </div>
+                    <input type="range" id="input-spread-cap" min="1" max="30" value="10" oninput="document.getElementById('val-spread-cap').innerText = this.value + '%'" class="w-full accent-purple-500 h-1.5 bg-gray-800 rounded-lg cursor-pointer">
+                </div>
+                <div class="flex items-center justify-between p-2 bg-gray-900 rounded border border-gray-800">
+                    <label for="input-green-stays-green" class="cursor-pointer">
+                        <div class="text-[11px] font-bold text-emerald-400">GREEN STAYS GREEN</div>
+                        <div class="text-[9px] text-gray-400">LATE-DAY TRAILING STOP PROFIT LOCK (15:15 ET)</div>
+                    </label>
+                    <input type="checkbox" id="input-green-stays-green" checked class="w-4 h-4 accent-emerald-500 rounded cursor-pointer">
+                </div>
+            </div>
+            
+            <pre id="config-raw-json" class="p-3 bg-black text-amber-400 font-mono text-[10px] rounded border border-gray-800 overflow-x-auto shadow-inner">> System Guards Engine Initialized.</pre>
+        </div>
+    </div>
+
+    <script>
+    function toggleConfigBody() {
+        var body = document.getElementById("config-panel-body");
+        var btn = document.getElementById("btn-toggle-config");
+        body.classList.toggle("hidden");
+        btn.innerText = body.classList.contains("hidden") ? "▼ SHOW" : "▲ HIDE";
+    }
+    function toggleConfigRaw() {
+        var raw = document.getElementById("config-raw-json");
+        raw.classList.toggle("hidden");
+    }
+    function triggerConfigAudit() {
+        var raw = document.getElementById("config-raw-json");
+        raw.classList.remove("hidden");
+        raw.innerText = "> Running Strategy Guard Audit...";
+        fetch("/api/audit_config")
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+                raw.innerText = "[⚡ AUDIT RESULT - " + data.timestamp + "]\nStatus: " + data.status + "\nActive Guards:\n" + JSON.stringify(data.active_guards, null, 2);
+            })
+            .catch(function(err) { raw.innerText = "[⚠️ AUDIT ERROR] Could not reach endpoint."; });
+    }
+    function triggerAutoScout() {
+        var raw = document.getElementById("config-raw-json");
+        raw.classList.remove("hidden");
+        raw.innerText = "> Launching Auto-Scout Engine across watchlists...";
+        fetch("/api/auto_scout")
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+                raw.innerText = "[🚀 AUTO-SCOUT RESULT - " + data.timestamp + "]\nStatus: " + data.status + "\nScouted Watchlist:\n" + JSON.stringify(data.scouted_targets, null, 2);
+            })
+            .catch(function(err) { raw.innerText = "[⚠️ SCOUT ERROR] Auto-Scout execution failed."; });
+    }
+    function saveStrategyConfig() {
+        var payload = {
+            min_dte_default: parseInt(document.getElementById("input-min-dte").value),
+            low_price_stock_min_dte: parseInt(document.getElementById("input-low-dte").value),
+            low_price_stock_threshold: parseInt(document.getElementById("input-low-thresh").value),
+            max_trade_dollar_cost: parseInt(document.getElementById("input-max-cost").value),
+            max_bid_ask_spread_cap: parseInt(document.getElementById("input-spread-cap").value),
+            green_stays_green: document.getElementById("input-green-stays-green").checked
+        };
+        var raw = document.getElementById("config-raw-json");
+        raw.classList.remove("hidden");
+        raw.innerText = "> Saving strategy configuration...";
+        fetch("/api/save_config", {
+            method: "POST",
+            headers: {"Content-Type": "application/json"},
+            body: JSON.stringify(payload)
+        })
+        .then(function(res) { return res.json(); })
+        .then(function(resData) {
+            raw.innerText = "[✓ SAVED SUCCESS]\n" + JSON.stringify(resData.config, null, 2);
+        })
+        .catch(function(err) { raw.innerText = "[⚠️ SAVE ERROR] Save request failed."; });
+    }
+    function loadStrategyConfigUI() {
+        fetch("/api/config")
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+                document.getElementById("input-min-dte").value = data.min_dte_default;
+                document.getElementById("val-min-dte").innerText = data.min_dte_default + " DAYS";
+                document.getElementById("input-low-dte").value = data.low_price_stock_min_dte;
+                document.getElementById("val-low-dte").innerText = data.low_price_stock_min_dte + " DAYS";
+                document.getElementById("input-low-thresh").value = data.low_price_stock_threshold;
+                document.getElementById("val-low-thresh").innerText = "$" + data.low_price_stock_threshold;
+                document.getElementById("input-max-cost").value = data.max_trade_dollar_cost;
+                document.getElementById("val-max-cost").innerText = "$" + data.max_trade_dollar_cost;
+                document.getElementById("input-spread-cap").value = data.max_bid_ask_spread_cap;
+                document.getElementById("val-spread-cap").innerText = data.max_bid_ask_spread_cap + "%";
+                document.getElementById("input-green-stays-green").checked = data.green_stays_green;
+            })
+            .catch(function(err) { console.error("Config fetch error:", err); });
+    }
+    loadStrategyConfigUI();
+    </script>
+
+    ACTIVE POSITIONS, GEX TARGETS & RISK MATRIX</h2>
     </div>
       
     <div class="space-y-3 mb-6">
