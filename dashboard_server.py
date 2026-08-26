@@ -1424,13 +1424,25 @@ def auto_scout_levels():
                 target = metrics.get("target", 0.0)
                 prox_score = metrics.get("prox", 0.0)
             else:
-                # Direct fallback to trading_levels.json state
+                # Direct fallback to trading_levels.json state with full key mapping
                 if os.path.exists("trading_levels.json"):
                     with open("trading_levels.json", "r") as tf:
-                        tdata = json.load(tf).get(ticker, {})
-                        spot = tdata.get("spot", 0.0)
-                        target = tdata.get("call_target", 0.0)
-                        prox_score = 80.0 if tdata.get("execution_armed") else 40.0
+                        raw_data = json.load(tf)
+                        levels_dict = raw_data.get("levels", raw_data.get("data", raw_data))
+                        tdata = levels_dict.get(ticker, {})
+                        
+                        spot = tdata.get("spot_price") or tdata.get("spot") or tdata.get("current_price") or 0.0
+                        call_tgt = tdata.get("spot_target_call") or tdata.get("target_call") or tdata.get("call_target") or 0.0
+                        put_tgt = tdata.get("spot_target_put") or tdata.get("target_put") or tdata.get("put_target") or 0.0
+                        target = call_tgt if call_tgt > 0 else put_tgt
+                        
+                        if spot > 0 and (call_tgt > 0 or put_tgt > 0):
+                            valid_tgts = [t for t in [call_tgt, put_tgt] if t > 0]
+                            nearest_tgt = min(valid_tgts, key=lambda x: abs(x - spot))
+                            gap_pct = abs(spot - nearest_tgt) / spot
+                            prox_score = max(0.0, min(100.0, (1.0 - gap_pct) * 100.0))
+                        else:
+                            prox_score = 80.0 if tdata.get("execution_armed") or tdata.get("armed") else 0.0
             
             # Fetch Option Chain Micro-Structure & Indicators
             spread_pct = getattr(smart_cso_injector, "get_option_spread_pct", lambda t: 5.0)(ticker)
