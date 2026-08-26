@@ -137,7 +137,10 @@ def init_cloud_state_and_hydrate():
         conn.close()
 
 # Execute boot-time cloud state auto-provisioning and hydration
-init_cloud_state_and_hydrate()
+try:
+    init_cloud_state_and_hydrate()
+except Exception as e:
+    print(f"[⚠️ WARNING] Could not hydrate cloud state: {e}")
 
 def fetch_closed_dynamo_positions(selected_date=None):
     """Fetch closed positions from DynamoDB matching the current host environment."""

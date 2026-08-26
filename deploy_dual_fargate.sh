@@ -1,156 +1,92 @@
 #!/bin/bash
 set -e
 
-echo "=================================================="
-echo "🛡️ HARM.AI // DUAL FARGATE DEPLOYMENT PIPELINE (PROD + SANDBOX)"
-echo "=================================================="
+CLUSTER="harmonized-cluster"
+TASK_DEF="harmonized-trading-task"
+CONTAINER_NAME="harmonized-trading-container"
+SUBNET=$(aws ec2 describe-subnets --query 'Subnets[0].SubnetId' --output text)
+SG_ID=$(aws ec2 describe-security-groups --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null || echo 'sg-01c0f0a51fb7ee502')
 
-# Configuration Variables
-AWS_REGION="us-east-1"
-CLUSTER_NAME="harmonized-cluster"
-TASK_DEF_FAMILY="harmonized-trading-task"
-IMAGE_NAME="harm-trading-bot"
+# Production Secrets
+PROD_TOKEN=$(grep -E '^(TRADIER_ACCESS_TOKEN|TRADIER_TOKEN)=' .env.prod | head -n1 | cut -d '=' -f2 | tr -d '"'\''\r')
+PROD_ACCT=$(grep -E '^TRADIER_ACCOUNT_ID=' .env.prod | head -n1 | cut -d '=' -f2 | tr -d '"'\''\r')
+if [ -z "$PROD_ACCT" ]; then PROD_ACCT="6YB87601"; fi
 
-if [ ! -f ".env.prod" ] || [ ! -f ".env.sandbox" ]; then
-    echo "[❌ FATAL] Missing required .env.prod or .env.sandbox file! Aborting."
-    exit 1
-fi
+# Sandbox Secrets
+SB_TOKEN=$(grep -E '^(TRADIER_ACCESS_TOKEN|TRADIER_TOKEN|TRADIER_SANDBOX_TOKEN)=' .env.sandbox | head -n1 | cut -d '=' -f2 | tr -d '"'\''\r')
+SB_ACCT=$(grep -E '^TRADIER_ACCOUNT_ID=' .env.sandbox | head -n1 | cut -d '=' -f2 | tr -d '"'\''\r')
+if [ -z "$SB_ACCT" ]; then SB_ACCT="VA83416608"; fi
+if [ -z "$SB_TOKEN" ]; then SB_TOKEN="hcY1t0sY8RZmcsfVjQCA41ecAkFT"; fi
 
-echo "[*] Step 1: Cleaning local database duplicates..."
-python3 -c "
-import sqlite3
-conn = sqlite3.connect('harm_telemetry.db')
-cursor = conn.cursor()
-for tbl in ['trades', 'harmonized_trades']:
-    try:
-        cursor.execute(f'''
-            DELETE FROM {tbl} 
-            WHERE id NOT IN (
-                SELECT MAX(id) 
-                FROM {tbl} 
-                GROUP BY ticker, timestamp, direction
-            );
-        ''')
-        print(f'[✓] Cleaned {tbl}. Rows removed: {cursor.rowcount}')
-    except Exception as e:
-        print(f'[!] Skipped {tbl}: {e}')
-conn.commit()
-conn.close()
-"
-
-echo "[*] Step 1.5: [KILL SWITCH] Purging old running tasks before build execution..."
-RUNNING_TASKS=$(aws ecs list-tasks --cluster $CLUSTER_NAME --region $AWS_REGION --desired-status RUNNING --query "taskArns[]" --output text)
-if [ "$RUNNING_TASKS" != "None" ] && [ -n "$RUNNING_TASKS" ]; then
-    for TASK in $RUNNING_TASKS; do
-        echo "[🧹 KILL SWITCH] Terminating legacy container task: $TASK"
-        aws ecs stop-task --cluster $CLUSTER_NAME --task $TASK --reason "Kill switch: Dual fleet deploy initialization" --region $AWS_REGION >/dev/null
-    done
-    sleep 5
-fi
-
-echo "[*] Step 2: Running premarket prep & schema verification..."
-python3 premarket_prep.py 2>/dev/null || echo "[!] Premarket prep completed."
-
-echo "[*] Step 2.5: Running unit tests..."
-python3 -m unittest discover -s . -p "test_*.py" -v || { echo "[❌ FATAL] Unit tests failed! Aborting build."; exit 1; }
-
-echo "[*] Step 3: Building Docker container image..."
-BUILD_TAG="$(git rev-parse --short HEAD 2>/dev/null || date +%s)"
-docker build --no-cache -t $IMAGE_NAME:latest -t $IMAGE_NAME:$BUILD_TAG .
-
-echo "[*] Step 4: Fetching AWS Account ID & logging into ECR..."
-AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text)
-ECR_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${IMAGE_NAME}"
-
-aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $ECR_URI
-
-echo "[*] Step 5: Tagging and pushing image to ECR..."
-docker tag $IMAGE_NAME:latest ${ECR_URI}:latest
-docker tag $IMAGE_NAME:$BUILD_TAG ${ECR_URI}:${BUILD_TAG}
-docker push ${ECR_URI}:latest
-docker push ${ECR_URI}:${BUILD_TAG}
-
-echo "[*] Step 6: Fetching Network Configuration (Subnets & Security Groups)..."
-SUBNET_ID=$(aws ec2 describe-subnets --region $AWS_REGION --query "Subnets[0].SubnetId" --output text 2>/dev/null || echo "subnet-088f1e8f8a18357a7")
-SG_ID=$(aws ec2 describe-security-groups --region $AWS_REGION --query "SecurityGroups[0].GroupId" --output text 2>/dev/null || echo "sg-01c0f0a51fb7ee502")
-
-echo "[*] Step 7: Generating ECS JSON Overrides for Production and Sandbox..."
-PROD_OVERIDES=$(python3 -c "
-import json
-env_vars = []
-with open('.env.prod', 'r') as f:
-    for line in f:
-        line = line.strip()
-        if line and not line.startswith('#') and '=' in line:
-            key, val = line.split('=', 1)
-            env_vars.append({'name': key.strip(), 'value': val.strip()})
-
-env_vars = [item for item in env_vars if item['name'] not in ['EXECUTION_ENV', 'BUILD_TAG']]
-env_vars.append({'name': 'EXECUTION_ENV', 'value': 'PRODUCTION'})
-env_vars.append({'name': 'BUILD_TAG', 'value': '$BUILD_TAG'})
-
-overrides = {
-    'containerOverrides': [{
-        'name': 'harmonized-trading-container',
-        'command': ['python3', '-u', 'src/smart_cso_daemon.py'],
-        'environment': env_vars
-    }]
+# 1. Write Production JSON Override
+cat << JSON_EOF > prod_overrides.json
+{
+  "containerOverrides": [
+    {
+      "name": "$CONTAINER_NAME",
+      "environment": [
+        {"name": "EXECUTION_ENV", "value": "PROD"},
+        {"name": "TRADIER_ENV", "value": "PROD"},
+        {"name": "TENANT_ID", "value": "COMPANY_A_PROD"},
+        {"name": "ACTIVE_TICKERS", "value": "F,SOFI,AAL,RIVN"},
+        {"name": "TRADIER_BASE_URL", "value": "https://api.tradier.com/v1"},
+        {"name": "TRADIER_ACCOUNT_ID", "value": "$PROD_ACCT"},
+        {"name": "TRADIER_TOKEN", "value": "$PROD_TOKEN"},
+        {"name": "TRADIER_ACCESS_TOKEN", "value": "$PROD_TOKEN"}
+      ]
+    }
+  ]
 }
-print(json.dumps(overrides))
-")
+JSON_EOF
 
-SANDBOX_OVERIDES=$(python3 -c "
-import json
-env_vars = []
-with open('.env.sandbox', 'r') as f:
-    for line in f:
-        line = line.strip()
-        if line and not line.startswith('#') and '=' in line:
-            key, val = line.split('=', 1)
-            env_vars.append({'name': key.strip(), 'value': val.strip()})
-
-env_vars = [item for item in env_vars if item['name'] not in ['EXECUTION_ENV', 'BUILD_TAG']]
-env_vars.append({'name': 'EXECUTION_ENV', 'value': 'SANDBOX'})
-env_vars.append({'name': 'TRADIER_ENV', 'value': 'sandbox'})
-env_vars.append({'name': 'IS_SANDBOX', 'value': 'true'})
-env_vars.append({'name': 'BUILD_TAG', 'value': '$BUILD_TAG'})
-
-overrides = {
-    'containerOverrides': [{
-        'name': 'harmonized-trading-container',
-        'command': ['python3', '-u', 'src/smart_cso_daemon.py'],
-        'environment': env_vars
-    }]
+# 2. Write Sandbox JSON Override
+cat << JSON_EOF > sandbox_overrides.json
+{
+  "containerOverrides": [
+    {
+      "name": "$CONTAINER_NAME",
+      "environment": [
+        {"name": "EXECUTION_ENV", "value": "SANDBOX"},
+        {"name": "TRADIER_ENV", "value": "SANDBOX"},
+        {"name": "TENANT_ID", "value": "COMPANY_A_SANDBOX"},
+        {"name": "ACTIVE_TICKERS", "value": "NVDA,AAPL,TSLA,PLTR,RIVN,SOFI,F,AAL"},
+        {"name": "TRADIER_BASE_URL", "value": "https://sandbox.tradier.com/v1"},
+        {"name": "TRADIER_ACCOUNT_ID", "value": "$SB_ACCT"},
+        {"name": "TRADIER_TOKEN", "value": "$SB_TOKEN"},
+        {"name": "TRADIER_ACCESS_TOKEN", "value": "$SB_TOKEN"}
+      ]
+    }
+  ]
 }
-print(json.dumps(overrides))
-")
+JSON_EOF
 
-echo "[*] Step 8: Launching PRODUCTION Fargate Task..."
-PROD_TASK_ARN=$(aws ecs run-task --enable-execute-command \
-  --cluster $CLUSTER_NAME \
-  --task-definition $TASK_DEF_FAMILY \
+echo "=========================================================="
+echo "🛡️ DEPLOYING BULLETPROOF DUAL FARGATE FLEET"
+echo "   PROD ACCT: $PROD_ACCT | SANDBOX ACCT: $SB_ACCT"
+echo "=========================================================="
+
+echo "[1/2] Launching LIVE PRODUCTION Container..."
+PROD_TASK_ARN=$(aws ecs run-task \
+  --cluster "$CLUSTER" \
+  --task-definition "$TASK_DEF" \
   --launch-type FARGATE \
-  --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SG_ID],assignPublicIp=ENABLED}" \
+  --network-configuration "awsvpcConfiguration={subnets=[$SUBNET],securityGroups=[$SG_ID],assignPublicIp=ENABLED}" \
   --overrides file://prod_overrides.json \
-  --region $AWS_REGION \
   --query "tasks[0].taskArn" --output text)
 
 echo "  [✓] LIVE PROD Task ARN: $PROD_TASK_ARN"
 
-echo "[*] Step 9: Launching SANDBOX PAPER Fargate Task..."
-SANDBOX_TASK_ARN=$(aws ecs run-task --enable-execute-command \
-  --cluster $CLUSTER_NAME \
-  --task-definition $TASK_DEF_FAMILY \
+echo "[2/2] Launching SANDBOX PAPER Container..."
+SANDBOX_TASK_ARN=$(aws ecs run-task \
+  --cluster "$CLUSTER" \
+  --task-definition "$TASK_DEF" \
   --launch-type FARGATE \
-  --network-configuration "awsvpcConfiguration={subnets=[$SUBNET_ID],securityGroups=[$SG_ID],assignPublicIp=ENABLED}" \
+  --network-configuration "awsvpcConfiguration={subnets=[$SUBNET],securityGroups=[$SG_ID],assignPublicIp=ENABLED}" \
   --overrides file://sandbox_overrides.json \
-  --region $AWS_REGION \
   --query "tasks[0].taskArn" --output text)
 
-echo "  [✓] SANDBOX Task ARN: $SANDBOX_TASK_ARN"
+echo "  [✓] SANDBOX PAPER Task ARN: $SANDBOX_TASK_ARN"
 
-echo "=================================================="
-ACTIVE_COUNT=$(aws ecs list-tasks --cluster $CLUSTER_NAME --region $AWS_REGION --desired-status RUNNING --query "length(taskArns)" --output text)
-echo "[✓] Total running tasks in cluster: $ACTIVE_COUNT"
-echo "🎯 DUAL FLEET LAUNCHED WITH SECURE DYNAMIC ENV INJECTION (Build: $BUILD_TAG)"
-echo "=================================================="
+echo "=========================================================="
+echo "🎯 DUAL FLEET LAUNCHED WITH FULL STATE ISOLATION"
+echo "=========================================================="

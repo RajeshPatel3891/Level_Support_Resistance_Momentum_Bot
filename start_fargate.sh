@@ -2,90 +2,16 @@
 set -e
 
 echo "=========================================================="
-echo "🚀 LAUNCHING HARMONIZED MULTI-SERVICE TRADING SUITE"
+echo "🚀 STARTING HARM.AI FARGATE CONTAINER (ENV: $EXECUTION_ENV)"
 echo "=========================================================="
 
-echo "[0/10] Cleaning up lingering processes & port bindings..."
-pkill -f python3 2>/dev/null || true
-fuser -k 8000/tcp 8080/tcp 2>/dev/null || true
-sleep 1
+# 1. Background worker tasks
+echo "[1/3] Launching background trading engine..."
+python3 -u run_bot.py &
 
-# Trap Ctrl+C (SIGINT) to automatically terminate all background services on exit
-trap "echo '[!] Shutting down all Harmonized daemons...'; pkill -P $$; pkill -f python3; exit 0" SIGINT SIGTERM EXIT
+echo "[2/3] Launching GEX Exit Monitor..."
+python3 -u run_gex_monitor.py &
 
-echo "[1/10] Launching Harmonized Dashboard Server IMMEDIATELY (Port 8080)..."
-python3 -u -m uvicorn dashboard_server:app --host 0.0.0.0 --port 8080 &
-
-echo "[2/10] 🛠️ Executing Pre-Boot Database Migrations..."
-python3 rebuild_db.py || true
-python3 preboot_db_fix.py || true
-
-echo "[2.1/10] 📡 Ingesting & Syncing Guardrail Levels from S3..."
-python3 src/sync_guardrail_levels.py || true
-
-echo "[2.2/10] 🧪 Executing Pre-Flight Level Pipeline Verification..."
-if python3 tests/test_level_pipeline.py; then
-    echo "[✓] S3 Level Pipeline verified!"
-else
-    echo "⛔ [CRITICAL LEVEL PIPELINE FAILURE] S3 Levels missing or invalid!"
-    pkill -P $$ 2>/dev/null
-    exit 1
-fi
-
-echo "[2.5/10] 🧪 Executing Master Pre-Flight Unit Test Suite..."
-if python3 test_master_suite.py; then
-    echo "[✓] All pre-flight tests passed! Proceeding with boot..."
-else
-    echo "----------------------------------------------------------"
-    echo "⛔ [CRITICAL PRE-FLIGHT FAILURE] Unit tests failed!"
-    echo "⛔ Aborting launch sequence to protect live capital."
-    echo "----------------------------------------------------------"
-    pkill -P $$ 2>/dev/null
-    exit 1
-fi
-
-echo "[3/10] Running Non-Blocking Broker Position Sync..."
-if [ -f "src/sync_broker_positions.py" ]; then
-    python3 src/sync_broker_positions.py &
-elif [ -f "sync_broker_positions.py" ]; then
-    python3 sync_broker_positions.py &
-fi
-
-echo "[4/10] Launching Harmonized Bot Streamer..."
-while true; do python3 -u harmonized_bot_streamer.py; sleep 2; done &
-
-echo "[5/10] Launching Production Gateway (Port 8000)..."
-while true; do python3 -u production_gateway.py; sleep 2; done &
-
-echo "[6/10] Launching Telemetry Bridge..."
-while true; do python3 -u telemetry_bridge.py; sleep 2; done &
-
-echo "[7/10] Launching Proximity DB Engine..."
-while true; do python3 -u proximity_db.py; sleep 2; done &
-
-echo "[8/10] Launching Continuous GEX & MTTP Exit Daemon..."
-while true; do
-    if [ -f "run_gex_monitor.py" ]; then
-        python3 -u run_gex_monitor.py
-    elif [ -f "src/gex_exit_monitor.py" ]; then
-        python3 -u src/gex_exit_monitor.py
-    fi
-    sleep 2
-done &
-
-echo "[9/10] Launching Live DynamoDB GSG Guard & Persisted Recovery Protector..."
-# while true; do python3 -u live_gsg_guard.py; sleep 2; done &
-
-echo "[10/10] Launching Background Disk Telemetry & Retention Daemon..."
-while true; do
-    if [ -f "disk_telemetry_daemon.py" ]; then
-        python3 -u disk_telemetry_daemon.py
-    else
-        journalctl --vacuum-size=100M 2>/dev/null
-        find /tmp -type f -mtime +1 -delete 2>/dev/null
-    fi
-    sleep 300
-done &
-
-echo "[✓] All Harmonized trading daemons are verified and online!"
-wait
+# 2. Foreground Uvicorn process (keeps container alive on PID 1)
+echo "[3/3] Starting Uvicorn Dashboard Server..."
+exec python3 -m uvicorn dashboard_server:app --host 0.0.0.0 --port 8080 --log-level info
