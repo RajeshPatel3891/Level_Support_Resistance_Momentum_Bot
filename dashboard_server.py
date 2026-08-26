@@ -1038,7 +1038,6 @@ def get_proximity_api():
         with open(levels_path, "r", encoding="utf-8") as f:
             levels = json.load(f)
         
-        # Extract dictionary if wrapped inside metadata
         if "levels" in levels and isinstance(levels["levels"], dict):
             levels = levels["levels"]
         elif "data" in levels and isinstance(levels["data"], dict):
