@@ -1,7 +1,8 @@
 import pandas as pd
 import os
 
-TICKERS = ["SPY", "IWM", "QQQ", "GOOGL", "AMZN", "AAPL", "NVDA", "TSLA"]
+from src.utils.universe import get_playbook_tickers
+TICKERS = get_playbook_tickers()
 
 def debug_conviction():
     for ticker in TICKERS:

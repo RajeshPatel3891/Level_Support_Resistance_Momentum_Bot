@@ -1,7 +1,8 @@
 import pandas as pd
 import os
 
-TICKERS = ["SPY", "QQQ", "IWM"]
+from src.utils.universe import get_playbook_tickers
+TICKERS = get_playbook_tickers()
 
 def extract_production_levels():
     print(f"{'Ticker':<8} | {'Price':<10} | {'SL':<10} | {'TP1':<10} | {'TP2':<10} | {'Note'}")

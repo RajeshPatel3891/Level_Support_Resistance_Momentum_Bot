@@ -1,3 +1,4 @@
+from src.utils.universe import get_playbook_tickers
 #!/usr/bin/env python3
 """
 HARM.AI // PRE-FLIGHT FARGATE LEVEL PIPELINE UNIT TEST
@@ -13,7 +14,8 @@ import sys
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from src.level_loader import load_trading_levels
 
-REQUIRED_TICKERS = ["AAPL", "NVDA", "TSLA", "PLTR", "RIVN", "SOFI", "INTC", "AAL", "F"]
+
+TICKERS = get_playbook_tickers()
 REQUIRED_KEYS = ["spot", "call_target", "put_target", "support_zone", "resistance_zone", "beta", "zone_pct", "mttp_minutes"]
 
 class TestS3LevelPipeline(unittest.TestCase):
@@ -31,6 +33,7 @@ class TestS3LevelPipeline(unittest.TestCase):
         self.assertNotIn("test_ticker", levels, "CRITICAL: S3 levels file still contains dummy 'test_ticker'!")
         
         # 4. Assert all required production tickers are present
+        REQUIRED_TICKERS = ["SPY", "QQQ", "IWM", "NVDA", "TSLA", "AAPL", "AMZN", "GOOGL", "AMD", "META", "NFLX", "PLTR", "SOFI", "F", "AAL", "INTC", "RIVN", "HOOD", "BAC", "SNAP", "MARA", "CCL", "UBER", "NKE"]
         for ticker in REQUIRED_TICKERS:
             self.assertIn(ticker, levels, f"CRITICAL: Production ticker {ticker} missing from S3 levels payload!")
             

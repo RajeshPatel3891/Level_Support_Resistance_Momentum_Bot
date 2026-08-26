@@ -11,7 +11,8 @@ import os
 import sys
 from datetime import datetime
 
-UNIVERSE = ["AAPL", "NVDA", "TSLA", "PLTR", "RIVN", "SOFI", "INTC", "AAL", "F"]
+from src.utils.universe import get_playbook_tickers
+UNIVERSE = get_playbook_tickers()
 
 # Simulation profiles for time-in-trade decay
 EXIT_PROFILES = {

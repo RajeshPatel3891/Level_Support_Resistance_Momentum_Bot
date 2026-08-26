@@ -26,7 +26,8 @@ LEVELS_FILE = os.path.join(PARENT_DIR, 'trading_levels.json')
 MACRO_STATE_FILE = os.path.join(PARENT_DIR, 'macro_state.json')
 
 # Expanded to natively include TSLA
-TICKERS = ["SPY", "QQQ", "NVDA", "IWM", "AMZN", "AAPL", "MSFT", "TSLA"]
+from src.utils.universe import get_playbook_tickers
+TICKERS = get_playbook_tickers()
 
 class BacktestBot:
     def __init__(self, is_live=False, date="2026-07-07", max_risk=20.0):

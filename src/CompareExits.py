@@ -25,7 +25,8 @@ except ImportError:
     def calculate_exits(price):
         return (price - 0.50, price + 1.00, None)
 
-TICKERS = ["SPY", "QQQ", "NVDA", "IWM", "AMZN", "AAPL", "MSFT", "TSLA"]
+from src.utils.universe import get_playbook_tickers
+TICKERS = get_playbook_tickers()
 
 class EvaluationHarness:
     def __init__(self, date="2026-07-07"):

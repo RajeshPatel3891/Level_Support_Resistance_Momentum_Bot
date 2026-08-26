@@ -2,7 +2,8 @@ import requests, time, json, os, tempfile
 from dotenv import load_dotenv
 load_dotenv()
 
-TICKERS = ["IWM", "QQQ", "GOOGL", "AMZN", "AAPL", "NVDA", "TSLA"]
+from src.utils.universe import get_playbook_tickers
+TICKERS = get_playbook_tickers()
 API_KEY = os.environ.get('MASSIVE_API_KEY')
 HEADERS = {"Authorization": f"Bearer {API_KEY}"}
 

@@ -19,7 +19,8 @@ import time
 from datetime import datetime, timedelta
 
 # Universe definition
-UNIVERSE = ["AAPL", "NVDA", "TSLA", "PLTR", "RIVN", "SOFI", "INTC", "AAL", "F"]
+from src.utils.universe import get_playbook_tickers
+UNIVERSE = get_playbook_tickers()
 
 # Mock Historical Intraday Reference Premiums & Spreads
 TICKER_PROFILES = {

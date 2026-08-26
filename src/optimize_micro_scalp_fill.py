@@ -13,7 +13,8 @@ import sys
 import json
 from datetime import datetime
 
-UNIVERSE = ["AAPL", "NVDA", "TSLA", "PLTR", "RIVN", "SOFI", "INTC", "AAL", "F"]
+from src.utils.universe import get_playbook_tickers
+UNIVERSE = get_playbook_tickers()
 
 # Simulation grid for polling windows (seconds)
 TIMEOUT_GRID = [1.5, 2.5, 3.5, 5.0]

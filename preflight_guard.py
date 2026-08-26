@@ -108,7 +108,7 @@ def check_playbooks():
         except Exception as e:
             print(f" [X] ERROR LOADING PLAYBOOK {pb_mod}: {e}")
             return False
-    print(" [✓] All 9 Playbooks verified with active guardrails.")
+    print(" [✓] All 24 Playbooks verified with active guardrails.")
     return True
 
 def check_database_schema():

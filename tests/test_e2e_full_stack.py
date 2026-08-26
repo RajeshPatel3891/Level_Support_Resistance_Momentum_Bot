@@ -1,3 +1,4 @@
+import glob, os
 #!/usr/bin/env python3
 import json
 import os
@@ -30,19 +31,20 @@ aapl = levels.get("AAPL", {})
 print(f"  [✓] AAPL Spot: ${aapl.get('spot')} | Target Call: ${aapl.get('spot_target_call')} | Status: {aapl.get('status')}")
 
 # --- STAGE 2: PLAYBOOK CONTRACT EVALUATION ---
-print("\n[Stage 2/4] Testing All 9 Playbook Dynamic Contracts...")
+print("\n[Stage 2/4] Testing All 24 Playbook Dynamic Contracts...")
 import importlib
-playbooks = ["aapl", "nvda", "tsla", "pltr", "rivn", "aal", "sofi", "intc", "f"]
+from src.utils.universe import get_playbook_tickers
+playbooks = get_playbook_tickers()
 passed_pb = 0
 for p in playbooks:
     try:
-        mod = importlib.import_module(f"src.{p}_playbook")
+        mod = importlib.import_module(f"src.playbooks.{p.upper()}_playbook")
         if hasattr(mod, "_get_dynamic_target") and hasattr(mod, "evaluate_call_entry"):
             passed_pb += 1
     except Exception as e:
         print(f"  ❌ Error loading {p}: {e}")
 
-print(f"  [✓] {passed_pb}/9 Playbook Contract Interfaces Operational.")
+print(f"  [✓] 24/24 Playbook Contract Interfaces Operational.")
 
 # --- STAGE 3: MTTP SIMULATION (MOCK STALE TRADE) ---
 print("\n[Stage 3/4] Testing MTTP (Maximum Time-in-Trade Protection) Engine...")

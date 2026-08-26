@@ -5,7 +5,8 @@ import argparse
 from datetime import datetime
 
 # Expanded to natively include TSLA
-TICKERS = ["SPY", "QQQ", "NVDA", "IWM", "AMZN", "AAPL", "MSFT", "TSLA"]
+from src.utils.universe import get_playbook_tickers
+TICKERS = get_playbook_tickers()
 
 def analyze_portfolio(date_str="2026-07-07"):
     print("DEBUG: Starting Native Python Audit...")

@@ -1,3 +1,4 @@
+import glob, os
 #!/usr/bin/env python3
 import json
 import os
@@ -52,8 +53,8 @@ except Exception as e:
     print(f"  ❌ sync_market_data Error: {e}")
 
 # 3. TEST PLAYBOOK DYNAMIC BINDINGS
-print("\n[3/4] Validating All 9 Playbook Dynamic Binding Contracts...")
-playbooks = ["aapl", "nvda", "tsla", "pltr", "rivn", "aal", "sofi", "intc", "f"]
+print("\n[3/4] Validating All 24 Playbook Dynamic Binding Contracts...")
+playbooks = [os.path.basename(f).replace("_playbook.py", "").lower() for f in glob.glob("src/playbooks/*_playbook.py")]
 playbook_passes = 0
 
 for p in playbooks:
@@ -72,7 +73,7 @@ for p in playbooks:
     except Exception as e:
         print(f"  ❌ Exception loading {mod_name}: {e}")
 
-print(f"  └─> Summary: {playbook_passes}/9 Playbooks Contract Validated.")
+print(f"  └─> Summary: {playbook_passes}/24 Playbooks Contract Validated.")
 
 # 4. TRACE BACKGROUND OVERWRITE MUTATIONS
 print("\n[4/4] Monitoring 'trading_levels.json' for Background Overwrite Mutations (5s probe)...")

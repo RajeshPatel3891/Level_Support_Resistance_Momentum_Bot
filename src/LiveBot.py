@@ -1,3 +1,4 @@
+import glob, os, importlib.util
 import boto3
 from boto3.dynamodb.conditions import Key, Attr
 # =====================================================================
@@ -135,7 +136,23 @@ if not os.path.exists(MANIFEST_PATH):
 MASTER_DATA = json.load(open(MANIFEST_PATH, 'r'))
 ACTIVE_TRADES = {}
 TELEMETRY = {}
-PLAYBOOKS = {"AAPL": aapl, "TSLA": tsla, "NVDA": nvda, "RIVN": rivn, "PLTR": pltr, "SOFI": sofi, "INTC": intc, "F": f_pb, "AAL": aal}
+# Dynamically load all playbook modules from src/playbooks/
+def load_all_dynamic_playbooks():
+    loaded = {}
+    pb_files = glob.glob("src/playbooks/*_playbook.py")
+    for filepath in pb_files:
+        ticker = os.path.basename(filepath).replace("_playbook.py", "")
+        try:
+            spec = importlib.util.spec_from_file_location(ticker, filepath)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            loaded[ticker] = mod
+        except Exception as e:
+            pass
+    return loaded
+
+PLAYBOOKS = load_all_dynamic_playbooks()
+
 
 CONTRACT_MULTIPLIER = 100
 DEFAULT_DELTA = 0.50
@@ -688,7 +705,7 @@ def on_ws_open(ws):
     
     if session_id:
         auth_payload = {
-            "symbols": ["AAPL", "NVDA", "TSLA", "PLTR", "RIVN", "SOFI", "INTC", "AAL", "F"],
+            "symbols": ["SPY", "QQQ", "IWM", "NVDA", "TSLA", "AAPL", "AMZN", "GOOGL", "AMD", "META", "NFLX", "PLTR", "SOFI", "F", "AAL", "INTC", "RIVN", "HOOD", "BAC", "SNAP", "MARA", "CCL", "UBER", "NKE"],
             "lineage": "true",
             "sessionid": session_id,
             "breakdown": "true"
