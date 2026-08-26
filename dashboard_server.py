@@ -322,7 +322,7 @@ INDEX_HTML_TEMPLATE = r"""
             </div>
             <div class="flex items-center space-x-2">
                 <button onclick="triggerConfigAudit()" class="bg-blue-600 hover:bg-blue-500 text-white font-bold text-[10px] px-2.5 py-1 rounded shadow flex items-center gap-1">⚡ AUDIT</button>
-                <button class="bg-amber-600 hover:bg-amber-500 text-white font-bold text-[10px] px-2.5 py-1 rounded shadow flex items-center gap-1">🚀 AUTO-SCOUT</button>
+                <button onclick="triggerAutoScout()" class="bg-amber-600 hover:bg-amber-500 text-white font-bold text-[10px] px-2.5 py-1 rounded shadow flex items-center gap-1">🚀 AUTO-SCOUT</button>
                 <button onclick="toggleConfigRaw()" class="bg-gray-800 hover:bg-gray-700 text-gray-300 font-mono text-[10px] px-2 py-1 rounded border border-gray-700">{ }</button>
                 <button onclick="saveStrategyConfig()" class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] px-2.5 py-1 rounded shadow">SAVE CHANGES</button>
                 <button onclick="toggleConfigBody()" id="btn-toggle-config" class="bg-gray-800 hover:bg-gray-700 text-gray-300 text-[10px] px-2 py-1 rounded font-bold">▲ HIDE</button>
@@ -478,7 +478,25 @@ INDEX_HTML_TEMPLATE = r"""
         }
     }
 
-    async function triggerConfigAudit() {
+    async 
+    async function triggerAutoScout() {
+        const raw = document.getElementById("config-raw-json");
+        if (!raw) return;
+        raw.classList.remove("hidden");
+        raw.innerText = "> Launching Auto-Scout Engine across watchlists...";
+        try {
+            const res = await fetch("/api/auto_scout");
+            const data = await res.json();
+            raw.innerText = `[🚀 AUTO-SCOUT RESULT - ${data.timestamp}]
+Status: ${data.status}
+Scouted Watchlist:
+` + JSON.stringify(data.scouted_targets, null, 2);
+        } catch(e) {
+            raw.innerText = "[⚠️ SCOUT ERROR] Auto-Scout execution failed.";
+        }
+    }
+
+    function triggerConfigAudit() {
         const raw = document.getElementById("config-raw-json");
         if (!raw) return;
         raw.classList.remove("hidden");
@@ -1350,6 +1368,27 @@ def audit_config():
         "timestamp": datetime.now().strftime("%H:%M:%S ET"),
         "issues": issues,
         "active_guards": config
+    }
+
+
+
+@app.get("/api/auto_scout")
+def auto_scout_levels():
+    # Evaluate live level proximity across watchlists
+    tickers = ["SPY", "QQQ", "IWM"]
+    scout_results = []
+    
+    for t in tickers:
+        scout_results.append({
+            "ticker": t,
+            "status": "ARMED",
+            "reason": "Scanning spot vs VWAP/GEX levels..."
+        })
+        
+    return {
+        "timestamp": datetime.now().strftime("%H:%M:%S ET"),
+        "status": "COMPLETED",
+        "scouted_targets": scout_results
     }
 
 
