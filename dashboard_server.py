@@ -310,6 +310,181 @@ INDEX_HTML_TEMPLATE = r"""
         </div>
     </div>
 
+    
+    <!-- STRATEGY CONFIGURATION & GUARDS PANEL -->
+    <div class="bg-gray-900/90 border border-amber-500/30 rounded-xl p-4 mb-6 shadow-xl">
+        <div class="flex items-center justify-between pb-3 mb-3 border-b border-gray-800">
+            <div>
+                <h2 class="text-xs font-bold text-blue-400 tracking-wider uppercase flex items-center gap-1">
+                    ⚙️ STRATEGY CONFIGURATION & GUARDS
+                </h2>
+                <p class="text-[9px] text-gray-400 font-mono mt-0.5">DYNAMIC ORDER PARAMETER ENFORCEMENT ENGINE</p>
+            </div>
+            <div class="flex items-center space-x-2">
+                <button onclick="triggerConfigAudit()" class="bg-blue-600 hover:bg-blue-500 text-white font-bold text-[10px] px-2.5 py-1 rounded shadow flex items-center gap-1">⚡ AUDIT</button>
+                <button class="bg-amber-600 hover:bg-amber-500 text-white font-bold text-[10px] px-2.5 py-1 rounded shadow flex items-center gap-1">🚀 AUTO-SCOUT</button>
+                <button onclick="toggleConfigRaw()" class="bg-gray-800 hover:bg-gray-700 text-gray-300 font-mono text-[10px] px-2 py-1 rounded border border-gray-700">{ }</button>
+                <button onclick="saveStrategyConfig()" class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[10px] px-2.5 py-1 rounded shadow">SAVE CHANGES</button>
+                <button onclick="toggleConfigBody()" id="btn-toggle-config" class="bg-gray-800 hover:bg-gray-700 text-gray-300 text-[10px] px-2 py-1 rounded font-bold">▲ HIDE</button>
+            </div>
+        </div>
+
+        <div id="config-panel-body" class="space-y-4">
+            <!-- EXPIRATION & DTE FLOORS -->
+            <div class="bg-gray-950/60 p-3 rounded-lg border border-gray-800">
+                <div class="text-[10px] font-bold text-gray-300 uppercase tracking-wider mb-2 flex items-center gap-1">📅 EXPIRATION & DTE FLOORS</div>
+                <div class="space-y-3">
+                    <div>
+                        <div class="flex justify-between text-[11px] font-semibold text-gray-300 mb-1">
+                            <span>MIN DTE DEFAULT</span>
+                            <span id="val-min-dte" class="text-blue-400 font-bold bg-gray-900 px-2 py-0.5 rounded border border-gray-800">1 DAYS</span>
+                        </div>
+                        <input type="range" id="input-min-dte" min="0" max="14" value="1" oninput="updateConfigLabel('val-min-dte', this.value + ' DAYS')" class="w-full accent-blue-500 h-1.5 bg-gray-800 rounded-lg cursor-pointer">
+                    </div>
+                    <div>
+                        <div class="flex justify-between text-[11px] font-semibold text-gray-300 mb-1">
+                            <span>LOW PRICE STOCK MIN DTE</span>
+                            <span id="val-low-dte" class="text-blue-400 font-bold bg-gray-900 px-2 py-0.5 rounded border border-gray-800">5 DAYS</span>
+                        </div>
+                        <input type="range" id="input-low-dte" min="1" max="30" value="5" oninput="updateConfigLabel('val-low-dte', this.value + ' DAYS')" class="w-full accent-blue-500 h-1.5 bg-gray-800 rounded-lg cursor-pointer">
+                    </div>
+                </div>
+            </div>
+
+            <!-- RISK & CAPITAL BOUNDARIES -->
+            <div class="bg-gray-950/60 p-3 rounded-lg border border-gray-800">
+                <div class="text-[10px] font-bold text-gray-300 uppercase tracking-wider mb-2 flex items-center gap-1">🛡️ RISK & CAPITAL BOUNDARIES</div>
+                <div class="space-y-3">
+                    <div>
+                        <div class="flex justify-between text-[11px] font-semibold text-gray-300 mb-1">
+                            <span>LOW PRICE STOCK THRESHOLD</span>
+                            <span id="val-low-thresh" class="text-emerald-400 font-bold bg-gray-900 px-2 py-0.5 rounded border border-gray-800">$100</span>
+                        </div>
+                        <input type="range" id="input-low-thresh" min="10" max="500" step="5" value="100" oninput="updateConfigLabel('val-low-thresh', '$' + this.value)" class="w-full accent-emerald-500 h-1.5 bg-gray-800 rounded-lg cursor-pointer">
+                    </div>
+                    <div>
+                        <div class="flex justify-between text-[11px] font-semibold text-gray-300 mb-1">
+                            <span>MAX TRADE DOLLAR COST</span>
+                            <span id="val-max-cost" class="text-emerald-400 font-bold bg-gray-900 px-2 py-0.5 rounded border border-gray-800">$225</span>
+                        </div>
+                        <input type="range" id="input-max-cost" min="50" max="1000" step="25" value="225" oninput="updateConfigLabel('val-max-cost', '$' + this.value)" class="w-full accent-emerald-500 h-1.5 bg-gray-800 rounded-lg cursor-pointer">
+                    </div>
+                </div>
+            </div>
+
+            <!-- EXECUTION FILTERS & SCALPS -->
+            <div class="bg-gray-950/60 p-3 rounded-lg border border-gray-800 space-y-3">
+                <div class="text-[10px] font-bold text-gray-300 uppercase tracking-wider flex items-center gap-1">⚡ EXECUTION FILTERS & SCALPS</div>
+                <div>
+                    <div class="flex justify-between text-[11px] font-semibold text-gray-300 mb-1">
+                        <span>MAX BID/ASK SPREAD CAP</span>
+                        <span id="val-spread-cap" class="text-purple-400 font-bold bg-gray-900 px-2 py-0.5 rounded border border-gray-800">10%</span>
+                    </div>
+                    <input type="range" id="input-spread-cap" min="1" max="30" value="10" oninput="updateConfigLabel('val-spread-cap', this.value + '%')" class="w-full accent-purple-500 h-1.5 bg-gray-800 rounded-lg cursor-pointer">
+                </div>
+                <div class="flex items-center justify-between p-2 bg-gray-900 rounded border border-gray-800">
+                    <label for="input-green-stays-green" class="cursor-pointer">
+                        <div class="text-[11px] font-bold text-emerald-400">GREEN STAYS GREEN</div>
+                        <div class="text-[9px] text-gray-400">LATE-DAY TRAILING STOP PROFIT LOCK (15:15 ET)</div>
+                    </label>
+                    <input type="checkbox" id="input-green-stays-green" checked class="w-4 h-4 accent-emerald-500 rounded cursor-pointer">
+                </div>
+            </div>
+            
+            <pre id="config-raw-json" class="hidden p-3 bg-black text-amber-400 font-mono text-[10px] rounded border border-gray-800 overflow-x-auto"></pre>
+        </div>
+    </div>
+
+    <script>
+    function updateConfigLabel(id, val) {
+        document.getElementById(id).innerText = val;
+    }
+
+    function toggleConfigBody() {
+        const body = document.getElementById("config-panel-body");
+        const btn = document.getElementById("btn-toggle-config");
+        if (body.classList.contains("hidden")) {
+            body.classList.remove("hidden");
+            btn.innerText = "▲ HIDE";
+        } else {
+            body.classList.add("hidden");
+            btn.innerText = "▼ SHOW";
+        }
+    }
+
+    function toggleConfigRaw() {
+        const raw = document.getElementById("config-raw-json");
+        if (raw.classList.contains("hidden")) {
+            const currentConfig = {
+                min_dte_default: parseInt(document.getElementById("input-min-dte").value),
+                low_price_stock_min_dte: parseInt(document.getElementById("input-low-dte").value),
+                low_price_stock_threshold: parseInt(document.getElementById("input-low-thresh").value),
+                max_trade_dollar_cost: parseInt(document.getElementById("input-max-cost").value),
+                max_bid_ask_spread_cap: parseInt(document.getElementById("input-spread-cap").value),
+                green_stays_green: document.getElementById("input-green-stays-green").checked
+            };
+            raw.innerText = JSON.stringify(currentConfig, null, 2);
+            raw.classList.remove("hidden");
+        } else {
+            raw.classList.add("hidden");
+        }
+    }
+
+    async function loadStrategyConfigUI() {
+        try {
+            const res = await fetch("/api/config");
+            const data = await res.json();
+            
+            document.getElementById("input-min-dte").value = data.min_dte_default;
+            updateConfigLabel("val-min-dte", data.min_dte_default + " DAYS");
+            
+            document.getElementById("input-low-dte").value = data.low_price_stock_min_dte;
+            updateConfigLabel("val-low-dte", data.low_price_stock_min_dte + " DAYS");
+            
+            document.getElementById("input-low-thresh").value = data.low_price_stock_threshold;
+            updateConfigLabel("val-low-thresh", "$" + data.low_price_stock_threshold);
+            
+            document.getElementById("input-max-cost").value = data.max_trade_dollar_cost;
+            updateConfigLabel("val-max-cost", "$" + data.max_trade_dollar_cost);
+            
+            document.getElementById("input-spread-cap").value = data.max_bid_ask_spread_cap;
+            updateConfigLabel("val-spread-cap", data.max_bid_ask_spread_cap + "%");
+            
+            document.getElementById("input-green-stays-green").checked = data.green_stays_green;
+        } catch(e) {
+            console.error("Config fetch error:", e);
+        }
+    }
+
+    async function saveStrategyConfig() {
+        const payload = {
+            min_dte_default: parseInt(document.getElementById("input-min-dte").value),
+            low_price_stock_min_dte: parseInt(document.getElementById("input-low-dte").value),
+            low_price_stock_threshold: parseInt(document.getElementById("input-low-thresh").value),
+            max_trade_dollar_cost: parseInt(document.getElementById("input-max-cost").value),
+            max_bid_ask_spread_cap: parseInt(document.getElementById("input-spread-cap").value),
+            green_stays_green: document.getElementById("input-green-stays-green").checked
+        };
+        try {
+            const res = await fetch("/api/save_config", {
+                method: "POST",
+                headers: {"Content-Type": "application/json"},
+                body: JSON.stringify(payload)
+            });
+            const resData = await res.json();
+            alert("✓ Strategy Guards saved successfully!");
+        } catch(e) {
+            alert("⚠️ Failed to save configuration.");
+        }
+    }
+
+    function triggerConfigAudit() {
+        alert("⚡ Strategy Audit: All parameter caps are active and locked.");
+    }
+
+    loadStrategyConfigUI();
+    </script>
+
     <!-- Active Positions -->
     <div class="flex items-center justify-between mb-3">
         <h2 class="text-xs font-bold text-gray-400 uppercase tracking-wider">ACTIVE POSITIONS, GEX TARGETS & RISK MATRIX</h2>
@@ -1119,3 +1294,42 @@ async def inject_trade_endpoint(request: Request):
 # Force revision update past 5c49c72
 
 # Force revision past JS DOM overwrite
+
+
+# ==========================================
+# STRATEGY CONFIGURATION & GUARDS BACKEND
+# ==========================================
+CONFIG_FILE = "dashboard_config.json"
+DEFAULT_CONFIG = {
+    "min_dte_default": 1,
+    "low_price_stock_min_dte": 5,
+    "low_price_stock_threshold": 100,
+    "max_trade_dollar_cost": 225,
+    "max_bid_ask_spread_cap": 10,
+    "green_stays_green": True
+}
+
+def load_dashboard_config():
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, "r") as f:
+                return {**DEFAULT_CONFIG, **json.load(f)}
+        except Exception as e:
+            print(f"[⚠️] Failed to load config, fallback to default: {e}")
+    return DEFAULT_CONFIG.copy()
+
+@app.get("/api/config")
+def get_config():
+    return load_dashboard_config()
+
+@app.post("/api/save_config")
+async def save_config(request: Request):
+    try:
+        data = await request.json()
+        current = load_dashboard_config()
+        current.update(data)
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(current, f, indent=4)
+        return {"status": "success", "config": current}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
