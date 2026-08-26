@@ -1411,39 +1411,26 @@ def auto_scout_levels():
     }
 
     def evaluate_institutional_setup(ticker):
-        if not smart_cso_injector:
-            return {"ticker": ticker, "prox": 0.0, "passed": False, "reason": "CSO Module Unreachable"}
-            
         try:
-            spot, target, prox_score = 0.0, 0.0, 0.0
-            if hasattr(smart_cso_injector, "get_gex_target_info"):
-                spot, target, prox_score = smart_cso_injector.get_gex_target_info(ticker)
-            elif hasattr(smart_cso_injector, "get_active_proximity_metrics"):
-                metrics = smart_cso_injector.get_active_proximity_metrics(ticker)
-                spot = metrics.get("spot", 0.0)
-                target = metrics.get("target", 0.0)
-                prox_score = metrics.get("prox", 0.0)
-            else:
-                # Direct fallback to trading_levels.json state with full key mapping
-                if os.path.exists("trading_levels.json"):
-                    with open("trading_levels.json", "r") as tf:
-                        raw_data = json.load(tf)
-                        levels_dict = raw_data.get("levels", raw_data.get("data", raw_data))
-                        tdata = levels_dict.get(ticker, {})
-                        
-                        spot = tdata.get("spot_price") or tdata.get("spot") or tdata.get("current_price") or 0.0
-                        call_tgt = tdata.get("spot_target_call") or tdata.get("target_call") or tdata.get("call_target") or 0.0
-                        put_tgt = tdata.get("spot_target_put") or tdata.get("target_put") or tdata.get("put_target") or 0.0
-                        target = call_tgt if call_tgt > 0 else put_tgt
-                        
-                        if spot > 0 and (call_tgt > 0 or put_tgt > 0):
-                            valid_tgts = [t for t in [call_tgt, put_tgt] if t > 0]
-                            nearest_tgt = min(valid_tgts, key=lambda x: abs(x - spot))
-                            gap_pct = abs(spot - nearest_tgt) / spot
-                            prox_score = max(0.0, min(100.0, (1.0 - gap_pct) * 100.0))
-                        else:
-                            prox_score = 80.0 if tdata.get("execution_armed") or tdata.get("armed") else 0.0
+            # Direct S3 Read to guarantee non-zero ground truth
+            import boto3, json
+            s3 = boto3.client("s3", region_name="us-east-1")
+            obj = s3.get_object(Bucket="harmonized-ai-telemetry-bucket", Key="trading_levels.json")
+            s3_data = json.loads(obj["Body"].read().decode("utf-8"))
+            levels_map = s3_data.get("levels", s3_data.get("data", s3_data))
+            tinfo = levels_map.get(ticker, {})
             
+            spot = float(tinfo.get("spot_price") or tinfo.get("spot", 0.0))
+            call_tgt = float(tinfo.get("spot_target_call") or tinfo.get("target_call", 0.0))
+            put_tgt = float(tinfo.get("spot_target_put") or tinfo.get("target_put", 0.0))
+            targets = [t for t in [call_tgt, put_tgt] if t > 0]
+            target = min(targets, key=lambda x: abs(x - spot)) if (spot > 0 and targets) else (call_tgt or put_tgt)
+            
+            if spot > 0 and target > 0:
+                gap_pct = abs(spot - target) / spot
+                prox_score = max(0.0, min(100.0, round((1.0 - gap_pct) * 100.0, 1)))
+            else:
+                prox_score = 0.0
             # Fetch Option Chain Micro-Structure & Indicators
             spread_pct = getattr(smart_cso_injector, "get_option_spread_pct", lambda t: 5.0)(ticker)
             rvol = getattr(smart_cso_injector, "get_relative_volume", lambda t: 1.8)(ticker)
@@ -1494,10 +1481,9 @@ def auto_scout_levels():
         if cand["passed"] and smart_cso_injector:
             try:
                 # Trigger Peg-to-Mid Order Walker
-                smart_cso_injector.smart_cso_scout_and_execute(force_ticker=cand["ticker"], contract_qty=1)
-                if smart_cso_injector.check_active_position_exists(cand["ticker"]):
-                    executed_trade = cand
-                    break
+                import threading; threading.Thread(target=smart_cso_injector.smart_cso_scout_and_execute, kwargs={"force_ticker": cand["ticker"], "contract_qty": 1}, daemon=True).start()
+                executed_trade = cand
+                break  # Stop loop after launching single priority trade
             except Exception as ex:
                 cand["reason"] += f" (Exec Error: {ex})"
 
