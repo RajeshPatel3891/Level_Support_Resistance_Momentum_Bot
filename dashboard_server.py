@@ -1042,8 +1042,8 @@ def get_proximity_api():
         try:
             with open(levels_path, "r", encoding="utf-8") as f:
                 levels = json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[⚠️ S3 PULL FAILED IN FARGATE]: {e}")
 
     if "levels" in levels and isinstance(levels["levels"], dict):
         levels = levels["levels"]
@@ -1060,8 +1060,8 @@ def get_proximity_api():
                 levels = fetched["levels"]
             elif isinstance(fetched, dict):
                 levels = fetched
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[⚠️ S3 PULL FAILED IN FARGATE]: {e}")
 
     # Guaranteed 24-ticker fallback structure if disk and S3 are blocked
     if len(levels) <= 1:
@@ -1120,8 +1120,8 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         try:
             with open('trading_levels.json', 'r') as lf:
                 levels_data = json.load(lf)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[⚠️ S3 PULL FAILED IN FARGATE]: {e}")
 
     # Enforce Sandbox Baseline Override
     if os.getenv("ENVIRONMENT") == "sandbox" or "SANDBOX" in os.getenv("TRADIER_ACCOUNT_ID", "") or not os.getenv("TRADIER_ACCESS_TOKEN"):
@@ -1228,8 +1228,8 @@ async def close_single_position(ticker: str):
         try:
             from live_gsg_guard import execute_tradier_close, get_active_base_url
             active_url = get_active_base_url() if callable(get_active_base_url) else os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[⚠️ S3 PULL FAILED IN FARGATE]: {e}")
         
         close_position_in_db(ticker)
     except Exception as e:
