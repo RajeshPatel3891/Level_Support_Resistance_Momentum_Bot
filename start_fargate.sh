@@ -7,6 +7,9 @@ echo "=========================================================="
 
 # 1. Background worker tasks
 echo "[1/3] Launching background trading engine..."
+echo "[*] Hydrating market quotes & S3 levels..."
+python3 src/sync_market_data.py
+
 python3 -u run_bot.py &
 
 echo "[2/3] Launching GEX Exit Monitor..."
