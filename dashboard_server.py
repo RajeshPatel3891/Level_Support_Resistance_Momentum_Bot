@@ -391,7 +391,7 @@ INDEX_HTML_TEMPLATE = r"""
                 </div>
             </div>
             
-            <pre id="config-raw-json" class="hidden p-3 bg-black text-amber-400 font-mono text-[10px] rounded border border-gray-800 overflow-x-auto"></pre>
+            <pre id="config-raw-json" class=" p-3 bg-black text-amber-400 font-mono text-[10px] rounded border border-gray-800 overflow-x-auto"></pre>
         </div>
     </div>
 
