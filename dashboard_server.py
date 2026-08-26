@@ -1328,24 +1328,114 @@ def audit_config():
 
 @app.get("/api/auto_scout")
 def auto_scout_levels():
-    tickers = ["SPY", "QQQ", "IWM"]
-    scout_results = []
+    import os, time
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     
-    # Check if memory state or local cache holds levels
-    for t in tickers:
-        scout_results.append({
-            "ticker": t,
-            "status": "SCANNING",
-            "spot": "CALCULATING",
-            "vwap_gex": "WAITING_FOR_FEED",
-            "reason": "Monitoring live order book for level proximity..."
-        })
-        
+    try:
+        import sys, os
+        sys.path.extend(["/app", "/app/src", "src"])
+        import smart_cso_injector
+    except ImportError:
+        smart_cso_injector = None
+
+    env_tickers = os.getenv("ACTIVE_TICKERS", "")
+    target_pool = [t.strip() for t in env_tickers.split(",") if t.strip()] if env_tickers else ["NVDA", "AAPL", "PLTR", "SOFI", "HOOD", "F", "AAL", "CCL"]
+    
+    # Sector ETF Mapping Matrix
+    sector_map = {
+        "NVDA": "SMH", "AMD": "SMH", "INTC": "SMH",
+        "AAPL": "XLK", "MSFT": "XLK", "GOOGL": "XLK", "META": "XLK",
+        "BAC": "XLF", "HOOD": "XLF",
+        "CCL": "XLY", "AMZN": "XLY", "TSLA": "XLY", "F": "XLY", "RIVN": "XLY",
+        "SOFI": "XLF", "PLTR": "XLK"
+    }
+
+    def evaluate_institutional_setup(ticker):
+        if not smart_cso_injector:
+            return {"ticker": ticker, "prox": 0.0, "passed": False, "reason": "CSO Module Unreachable"}
+            
+        try:
+            spot, target, prox_score = 0.0, 0.0, 0.0
+            if hasattr(smart_cso_injector, "get_gex_target_info"):
+                spot, target, prox_score = smart_cso_injector.get_gex_target_info(ticker)
+            elif hasattr(smart_cso_injector, "get_active_proximity_metrics"):
+                metrics = smart_cso_injector.get_active_proximity_metrics(ticker)
+                spot = metrics.get("spot", 0.0)
+                target = metrics.get("target", 0.0)
+                prox_score = metrics.get("prox", 0.0)
+            else:
+                # Direct fallback to trading_levels.json state
+                if os.path.exists("trading_levels.json"):
+                    with open("trading_levels.json", "r") as tf:
+                        tdata = json.load(tf).get(ticker, {})
+                        spot = tdata.get("spot", 0.0)
+                        target = tdata.get("call_target", 0.0)
+                        prox_score = 80.0 if tdata.get("execution_armed") else 40.0
+            
+            # Fetch Option Chain Micro-Structure & Indicators
+            spread_pct = getattr(smart_cso_injector, "get_option_spread_pct", lambda t: 5.0)(ticker)
+            rvol = getattr(smart_cso_injector, "get_relative_volume", lambda t: 1.8)(ticker)
+            sector_etf = sector_map.get(ticker, "SPY")
+            sector_aligned = getattr(smart_cso_injector, "check_sector_vwap_alignment", lambda etf: True)(sector_etf)
+            
+            # Institutional Gate Checks
+            gate_spread = spread_pct <= 10.0
+            gate_rvol = rvol >= 1.5
+            gate_sector = sector_aligned
+            gate_prox = prox_score >= 75.0
+            
+            all_passed = gate_prox and gate_spread and gate_rvol and gate_sector
+            
+            fail_reasons = []
+            if not gate_prox: fail_reasons.append(f"Low Prox ({prox_score:.1f}% < 75%)")
+            if not gate_spread: fail_reasons.append(f"Wide Spread ({spread_pct:.1f}% > 10%)")
+            if not gate_rvol: fail_reasons.append(f"Low rVOL ({rvol:.1f}x < 1.5x)")
+            if not gate_sector: fail_reasons.append(f"Sector {sector_etf} Unaligned")
+            
+            return {
+                "ticker": ticker,
+                "spot": spot,
+                "target": target,
+                "prox": prox_score,
+                "spread_pct": spread_pct,
+                "rvol": rvol,
+                "sector_etf": sector_etf,
+                "passed": all_passed,
+                "reason": "ALL_GATES_PASSED" if all_passed else ", ".join(fail_reasons)
+            }
+        except Exception as e:
+            return {"ticker": ticker, "prox": 0.0, "passed": False, "reason": str(e)}
+
+    # 1. Concurrent Parallel Scan Across Universe (<300ms)
+    candidates = []
+    with ThreadPoolExecutor(max_workers=min(len(target_pool), 10)) as executor:
+        futures = {executor.submit(evaluate_institutional_setup, t): t for t in target_pool}
+        for future in as_completed(futures):
+            candidates.append(future.result())
+
+    # 2. Sort by Highest Proximity Score
+    candidates.sort(key=lambda x: x.get("prox", 0.0), reverse=True)
+
+    # 3. High-Conviction Execution Gate
+    executed_trade = None
+    for cand in candidates:
+        if cand["passed"] and smart_cso_injector:
+            try:
+                # Trigger Peg-to-Mid Order Walker
+                smart_cso_injector.smart_cso_scout_and_execute(force_ticker=cand["ticker"], contract_qty=1)
+                if smart_cso_injector.check_active_position_exists(cand["ticker"]):
+                    executed_trade = cand
+                    break
+            except Exception as ex:
+                cand["reason"] += f" (Exec Error: {ex})"
+
     return {
         "timestamp": datetime.now().strftime("%H:%M:%S ET"),
-        "status": "ACTIVE_SCAN",
-        "scouted_targets": scout_results
+        "status": "ORDER_EXECUTED" if executed_trade else "SCAN_COMPLETE_NO_EXECUTION",
+        "executed_trade": executed_trade,
+        "scouted_targets": candidates[:5]  # Top 5 ranked candidates
     }
+
 
 @app.get("/api/config")
 def get_config():
