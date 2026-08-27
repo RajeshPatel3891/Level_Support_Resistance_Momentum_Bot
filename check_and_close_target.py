@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-HARM.AI // DYNAMIC MULTI-TICKER BRACKET EXIT HELPER
+HARM.AI // DYNAMIC MULTI-TICKER BRACKET EXIT HELPER (PATCHED)
 ===============================================================================
 Usage Examples:
-  # Universal target floor ($1.00):
-  python3 check_and_close_target.py 1.00
+  # Single negative value = STOP LOSS ONLY (-$1.00 PnL floor):
+  python3 check_and_close_target.py -tt F=-1.00 -tt MARA=-1.00
 
-  # SOFI bracket between -$1.00 and +$3.00 | F bracket between -$2.00 and +$2.00
-  python3 check_and_close_target.py -tt SOFI=-1.00,3.00 -tt F=-2.00,2.00
+  # Single positive value = TAKE PROFIT ONLY (+$2.00 PnL target):
+  python3 check_and_close_target.py -tt F=2.00
 
-  # SOFI target only (+3.00), F bracket (-1.00 to +2.00)
-  python3 check_and_close_target.py -tt SOFI=3.00 -tt F=-1.00,2.00
+  # Full Bracket (Stop Loss -$10.00, Take Profit +$5.00):
+  python3 check_and_close_target.py -tt HOOD=-10.00,5.00
 """
 
 import os
@@ -45,18 +45,17 @@ def parse_args():
         "-tt", "--ticker-target",
         action="append",
         default=[],
-        help="Per-ticker bracket in format TICKER=STOP,TARGET or TICKER=TARGET (e.g., -tt SOFI=-1.00,3.00)"
+        help="Per-ticker bracket: TICKER=STOP,TARGET or TICKER=-STOP or TICKER=TARGET"
     )
 
     args = parser.parse_args()
 
-    global_target = float(os.getenv("TARGET_PROFIT_DOLLARS", 1.00))
+    global_target = None
     if args.target is not None:
         global_target = args.target
     elif args.default_target is not None:
         global_target = args.default_target
 
-    # Parse ticker brackets: {TICKER: {'stop': float or None, 'target': float}}
     ticker_brackets = {}
     for entry in args.ticker_target:
         if "=" in entry:
@@ -64,20 +63,28 @@ def parse_args():
             tkr = tkr.strip().upper()
             val_str = val_str.strip()
             
+            # Explicit Bracket: -tt TICKER=STOP,TARGET
             if "," in val_str:
                 parts = val_str.split(",")
                 try:
                     stop_val = float(parts[0].strip())
                     target_val = float(parts[1].strip())
+                    # Ensure stop_val is represented as a negative float
+                    stop_val = -abs(stop_val) if stop_val != 0 else 0.0
                     ticker_brackets[tkr] = {'stop': stop_val, 'target': target_val}
                 except ValueError:
                     print(f"[!] Invalid numeric bracket format for '{entry}'. Skipping.")
             else:
                 try:
-                    target_val = float(val_str)
-                    ticker_brackets[tkr] = {'stop': None, 'target': target_val}
+                    val = float(val_str)
+                    if val < 0:
+                        # Negative single value implies STOP LOSS ONLY
+                        ticker_brackets[tkr] = {'stop': val, 'target': None}
+                    else:
+                        # Positive single value implies TAKE PROFIT ONLY
+                        ticker_brackets[tkr] = {'stop': None, 'target': val}
                 except ValueError:
-                    print(f"[!] Invalid numeric target for '{entry}'. Skipping.")
+                    print(f"[!] Invalid numeric target/stop for '{entry}'. Skipping.")
 
     return global_target, ticker_brackets
 
@@ -103,8 +110,9 @@ def scan_and_close_targets(global_target, ticker_brackets):
         if entry_price <= 0 or not occ_symbol:
             continue
 
-        # Resolve brackets for ticker
-        bracket = ticker_brackets.get(ticker, {'stop': None, 'target': global_target})
+        # Resolve bracket defaults for ticker
+        default_bracket = {'stop': None, 'target': global_target}
+        bracket = ticker_brackets.get(ticker, default_bracket)
         stop_loss = bracket['stop']
         profit_target = bracket['target']
 
@@ -117,16 +125,17 @@ def scan_and_close_targets(global_target, ticker_brackets):
         pnl_pct = ((mark - entry_price) / entry_price) * 100.0
 
         stop_str = f"-${abs(stop_loss):.2f}" if stop_loss is not None else "NONE"
-        print(f"[*] {ticker} ({occ_symbol}) | Shares: {shares}x | Entry: ${entry_price:.2f} | Live: ${mark:.2f} | PnL: ${pnl_dollar:+.2f} ({pnl_pct:+.1f}%) | Bracket: [SL: {stop_str} / TP: +${profit_target:.2f}]")
+        target_str = f"+${profit_target:.2f}" if profit_target is not None else "NONE"
+        print(f"[*] {ticker} ({occ_symbol}) | Shares: {shares}x | Entry: ${entry_price:.2f} | Live: ${mark:.2f} | PnL: ${pnl_dollar:+.2f} ({pnl_pct:+.1f}%) | Bracket: [SL: {stop_str} / TP: {target_str}]")
 
-        # 1. Check Take Profit
-        if pnl_dollar >= profit_target:
+        # 1. Check Take Profit (Only if profit_target is explicitly set)
+        if profit_target is not None and pnl_dollar >= profit_target:
             print(f"[🚀 TAKE PROFIT HIT] {ticker} reached +${pnl_dollar:.2f} >= +${profit_target:.2f}! Executing market sell_to_close...")
             if gex.execute_tradier_close(occ_symbol, ticker, shares, active_url):
                 print(f"[✓] {ticker} successfully closed on Tradier.")
                 gex.synchronize_dynamo_with_tradier()
 
-        # 2. Check Stop Loss
+        # 2. Check Stop Loss (Only if stop_loss is explicitly set)
         elif stop_loss is not None and pnl_dollar <= stop_loss:
             print(f"[🛑 STOP LOSS HIT] {ticker} dropped to ${pnl_dollar:.2f} <= ${stop_loss:.2f}! Executing market sell_to_close...")
             if gex.execute_tradier_close(occ_symbol, ticker, shares, active_url):

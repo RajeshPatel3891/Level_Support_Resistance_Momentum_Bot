@@ -153,7 +153,7 @@ def get_ticker_calibration(ticker: str):
 def execute_smart_order(tradier_client, account_id, symbol, option_symbol, bid, ask, quantity=1):
     """
     Stage 1: Attempt Limit order fill at MID price.
-    Stage 2: Fallback to ASK if unfilled after 3s and spread <= 1.0%.
+    Stage 2: Fallback to ASK if unfilled after 3s and spread <= 4.0%.
     """
     bid_f = float(bid or 0.0)
     ask_f = float(ask or 0.0)
@@ -177,13 +177,13 @@ def execute_smart_order(tradier_client, account_id, symbol, option_symbol, bid, 
         print(f"[✓] [MID FILL SUCCESS] Filled {option_symbol} at ${mid_price:.2f}!")
         return {'order_id': order_id, 'fill_price': mid_price, 'type': 'MID_FILL'}
 
-    if spread_pct <= 0.01:
-        print(f"[*] [STAGE 2] Mid unfilled. Spread is tight ({spread_pct*100.0:.2f}% <= 1.0%). Escalating to ASK (${ask_f:.2f})...")
+    if spread_pct <= 0.04:
+        print(f"[*] [STAGE 2] Mid unfilled. Spread is tight ({spread_pct*100.0:.2f}% <= 4.0%). Escalating to ASK (${ask_f:.2f})...")
         tradier_client.modify_order(account_id, order_id, price=ask_f)
         time.sleep(1)
         return {'order_id': order_id, 'fill_price': ask_f, 'type': 'ASK_FALLBACK'}
     else:
-        print(f"[⛔ SPREAD GUARD] Canceling order {order_id}. Mid unfilled & spread ({spread_pct*100.0:.2f}%) > 1.0%.")
+        print(f"[⛔ SPREAD GUARD] Canceling order {order_id}. Mid unfilled & spread ({spread_pct*100.0:.2f}%) > 4.0%.")
         tradier_client.cancel_order(account_id, order_id)
         return None
 
@@ -292,15 +292,13 @@ def search_smart_option_chain(ticker, direction="CALL", spot_price=0.0):
             if bid < 0.05 or ask <= 0:
                 continue
             spread_pct = (ask - bid) / ask
-            if spread_pct > 0.08:  # Enforce tight 8% maximum spread threshold for entry options
+            if spread_pct > 0.04:  # Enforce tight 4% maximum spread threshold for entry options
                 continue
             valid_contracts.append(opt)
             
         if valid_contracts:
-            if spot_price > 0:
-                best_opt = min(valid_contracts, key=lambda x: abs(float(x.get("strike", 0)) - spot_price))
-            else:
-                best_opt = min(valid_contracts, key=lambda x: abs(float(x.get("ask", 0)) - 1.00))
+            # Target NTM contracts near $0.65 ask price sweet spot ($0.45 - $0.85 range)
+            best_opt = min(valid_contracts, key=lambda x: abs(float(x.get("ask", 0)) - 0.65))
             return best_opt
     except Exception as e:
         log_msg(f"[!] Chain search error for {ticker}: {e}")

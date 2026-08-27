@@ -39,7 +39,7 @@ def generate_data():
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
 
-    cursor.execute("SELECT * FROM trades ORDER BY id DESC")
+    cursor.execute("SELECT * FROM trades ORDER BY rowid DESC")
     rows = cursor.fetchall()
     conn.close()
 
