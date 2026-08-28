@@ -340,40 +340,7 @@ INDEX_HTML_TEMPLATE = r"""
                             <span>MIN DTE DEFAULT</span>
                             <span id="val-min-dte" class="text-blue-400 font-bold bg-gray-900 px-2 py-0.5 rounded border border-gray-800">1 DAYS</span>
                         </div>
-                        <input type="range" id="input-min-dte" min="0" max="14" value="1" oninput="
-        // Render Active Telemetry Cards
-        const cardsContainer = document.getElementById('active-cards-container');
-        if (cardsContainer) {
-            const activeItems = data.active_positions || data.active_trade_cards || [];
-            if (activeItems.length === 0) {
-                cardsContainer.innerHTML = '<div style="color: #6c757d; font-style: italic; padding: 10px;">No Active Positions Deployed</div>';
-            } else {
-                cardsContainer.innerHTML = activeItems.map(item => `
-                    <div style="background: #1e222d; border: 1px solid #2a2e3d; border-radius: 8px; padding: 15px; width: 320px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
-                        <div style="display: flex; justify-space-between; align-items: center; border-bottom: 1px solid #2a2e3d; padding-bottom: 8px; margin-bottom: 10px;">
-                            <span style="font-weight: bold; font-size: 1.1em; color: #fff;">${item.ticker} <span style="font-size: 0.8em; color: #00bc8c;">${item.direction}</span></span>
-                            <span style="background: #2b3245; padding: 2px 8px; border-radius: 4px; font-size: 0.85em; color: #ffb74d;">${item.gex_engagement || 'TARGET'}</span>
-                        </div>
-                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 0.9em;">
-                            <div><span style="color: #848e9c;">Entry:</span> $${item.entry_price}</div>
-                            <div><span style="color: #848e9c;">Bid/Ask:</span> $${item.current_bid}/$${item.current_ask}</div>
-                            <div><span style="color: #848e9c;">Fill Quality:</span> <b style="color:#00bc8c;">${item.fill_quality_score}/10</b></div>
-                            <div><span style="color: #848e9c;">Confidence:</span> <b>${item.confidence_status || item.confidence_score}</b></div>
-                            <div><span style="color: #848e9c;">Spot:</span> $${item.spot_price}</div>
-                            <div><span style="color: #848e9c;">VWAP:</span> $${item.vwap}</div>
-                        </div>
-                        <div style="margin-top: 12px; padding-top: 8px; border-top: 1px dashed #2a2e3d; display: flex; justify-content: space-between; align-items: center;">
-                            <span style="color: #848e9c; font-size: 0.85em;">PNL:</span>
-                            <span style="font-weight: bold; font-size: 1.1em; color: ${item.pnl_dollars >= 0 ? '#00c853' : '#ff5252'};">
-                                ${item.pnl_dollars >= 0 ? '+' : ''}$${item.pnl_dollars} (${item.pnl_pct}%)
-                            </span>
-                        </div>
-                    </div>
-                `).join('');
-            }
-        }
-
-        document.getElementById('val-min-dte').innerText = this.value + ' DAYS'" class="w-full accent-blue-500 h-1.5 bg-gray-800 rounded-lg cursor-pointer">
+                        <input type="range" id="input-min-dte" min="0" max="14" value="1" oninput="document.getElementById('val-min-dte').innerText = this.value + ' DAYS'" class="w-full accent-blue-500 h-1.5 bg-gray-800 rounded-lg cursor-pointer">
                     </div>
                     <div>
                         <div class="flex justify-between text-[11px] font-semibold text-gray-300 mb-1">
@@ -769,7 +736,7 @@ async function adjustTP(ticker, step) {
 }
 </script>
 
-<script src="/dashboard_data.json"></script>
+
 
 <script>
 async function renderActiveCards() {
