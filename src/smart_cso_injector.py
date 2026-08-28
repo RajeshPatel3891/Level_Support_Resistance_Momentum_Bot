@@ -50,8 +50,27 @@ def log_msg(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [SMART_CSO] {msg}")
 
 # ===============================================================================
-# FILL QUALITY SCORE CALCULATORS
+# FILL QUALITY SCORE CALCULATORS & GRADIENT PROXIMITY SCORING
 # ===============================================================================
+
+def calculate_proximity_score(spot: float, target: float, threshold_pct: float = 0.0075) -> float:
+    """
+    Computes a continuous proximity score from 0 to 100 based on distance to target.
+    - 100: Spot is precisely on or past the target zone.
+    - 0: Spot is outside the maximum proximity threshold window.
+    """
+    if spot <= 0 or target <= 0:
+        return 0.0
+
+    distance_pct = abs(spot - target) / spot
+    
+    # If outside the threshold window, score is 0
+    if distance_pct >= threshold_pct:
+        return 0.0
+        
+    # Linearly scale score from 0 (at threshold edge) to 100 (at target)
+    score = (1.0 - (distance_pct / threshold_pct)) * 100.0
+    return round(max(0.0, min(100.0, score)), 2)
 
 def calculate_fill_quality_score(fill_price: float, bid: float, ask: float, side: str = "buy") -> float:
     """
@@ -278,7 +297,7 @@ def validate_reentry_eligibility(ticker, db_path=DB_PATH):
         if trade_count >= 2:
             print(f"[⛔ RE-ENTRY BLOCKED] {ticker} has hit maximum 2 trades for today.")
             return False
-            
+             
         if last_timestamp_str:
             try:
                 last_time = datetime.strptime(str(last_timestamp_str), "%Y-%m-%d %H:%M:%S")
@@ -290,7 +309,7 @@ def validate_reentry_eligibility(ticker, db_path=DB_PATH):
                 print(f"[!] Timestamp parse error: {parse_err}")
     except Exception as e:
         print(f"[!] Re-entry validation warning: {e}")
-            
+             
     return True
 
 def check_active_position_exists(ticker, tenant_id='COMPANY_A'):
@@ -382,20 +401,20 @@ def search_smart_option_chain(ticker, direction="CALL", spot_price=0.0):
             options = [options]
         if not options:
             return None
-            
+             
         target_side = direction.lower()
         valid_contracts = []
-        
+         
         for opt in options:
             if opt.get("option_type") != target_side:
                 continue
-            
+             
             valid_liquidity, reason = validate_option_liquidity(opt)
             if not valid_liquidity:
                 continue
                 
             valid_contracts.append(opt)
-            
+             
         if valid_contracts:
             best_opt = min(valid_contracts, key=lambda x: abs(float(x.get("ask", 0)) - 0.65))
             return best_opt
@@ -421,7 +440,7 @@ def fetch_occ_symbol(underlying, option_type, spot_price):
     best_opt = search_smart_option_chain(underlying, option_type, spot_price)
     if best_opt and best_opt.get("symbol"):
         return best_opt.get("symbol"), float(best_opt.get("ask") or 1.00)
-        
+         
     occ = generate_valid_occ_symbol(underlying, option_type, spot_price, min_dte=3)
     return occ, 1.00
 
@@ -677,10 +696,20 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
         info = levels.get(ticker_upper, {}) if isinstance(levels, dict) else {}
         stock_quote = get_live_quote(ticker_upper)
         spot = float(stock_quote.get("last") or info.get("spot") or info.get("last_price") or 0.0)
-        
+        target = float(info.get("target") or info.get("call_target") or 0.0)
+         
         if spot <= 0:
             log_msg(f"[!] Could not fetch valid spot price for {ticker_upper}. Aborting.")
             return
+
+        # Integrate Continuous Proximity Gradient Score Evaluation
+        score = calculate_proximity_score(spot, target, threshold_pct=0.0075)
+        if score > 0:
+            log_msg(f"[⚡ PROXIMITY GRADIENT] {ticker_upper} | Score: {score}/100")
+            if score >= 90:
+                contract_qty = max(contract_qty, 2)
+            elif score >= 50:
+                contract_qty = max(1, contract_qty // 2)
 
         if direction_override in ["CALL", "PUT"]:
             direction = direction_override.upper()
@@ -708,8 +737,13 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
                     continue
 
                 spot = float(info.get("spot", info.get("last_price", 0.0)))
+                target = float(info.get("target") or info.get("call_target") or 0.0)
                 armed = bool(info.get("execution_armed", False))
-                
+
+                score = calculate_proximity_score(spot, target, threshold_pct=0.0075)
+                if score > 0:
+                    log_msg(f"[⚡ PROXIMITY GRADIENT] {ticker_upper} | Score: {score}/100")
+                 
                 if armed or spot > 0:
                     direction, reason = resolve_smart_direction(info, spot)
                     candidates.append({
@@ -741,13 +775,13 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
     best_opt = search_smart_option_chain(ticker, direction, spot_price=spot)
     if best_opt:
         occ_symbol = best_opt.get("symbol")
-        
+         
         # PRE-ENTRY PREDICTIVE FILL QUALITY GATE
         pred_score, score_reason = predict_fill_quality_score(best_opt, side="buy")
         if pred_score < 7.5:
             log_msg(f"[⛔ PREDICTIVE FILL SCORE REJECTED] {ticker} ({occ_symbol}) | {score_reason}")
             return
-            
+             
         log_msg(f"[🎯 PREDICTIVE SCORE PASSED] Expected Fill Score: {pred_score}/10.0 | Proceeding to Midpoint Order...")
         ask_price = float(best_opt.get("ask") or 0.80)
         log_msg(f"[✓ OPTION CHAIN MATCH] Contract: {occ_symbol} | Ask: ${ask_price:.2f}")

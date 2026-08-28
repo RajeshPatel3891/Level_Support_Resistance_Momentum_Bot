@@ -5,7 +5,8 @@ HARM.AI // LIVE MARKET DATA & DYNAMIC ARMING STATE SYNC (24-TICKER S3 ALIGNED)
 1. Fetches live spot & VWAP quotes from Tradier API across all 24 matrix tickers.
 2. Extracts active OCC option symbols from local SQLite telemetry DB.
 3. Evaluates dynamic price-tiered proximity thresholds to calculate arming states.
-4. Synchronizes updated levels atomically to disk, in-memory cache, and S3.
+4. Computes continuous proximity scores via gradient metrics for intelligent execution.
+5. Synchronizes updated levels atomically to disk, in-memory cache, and S3.
 """
 
 import os
@@ -49,27 +50,46 @@ if "sandbox" in TRADIER_BASE_URL.lower():
 def get_dynamic_proximity_threshold(price: float) -> float:
     """Returns dynamic arming threshold based on asset price tier."""
     if price >= 100.0:
-        return 0.0075  # 0.75% (, , )
+        return 0.0075  # 0.75%
     elif price >= 30.0:
-        return 0.0085  # 0.85% (, )
+        return 0.0085  # 0.85%
     else:
-        return 0.0120  # 1.20% (, , )
+        return 0.0120  # 1.20%
+
+def calculate_proximity_score(spot: float, target: float, threshold_pct: float = 0.0075) -> float:
+    """
+    Computes a continuous proximity score from 0 to 100 based on distance to target.
+    - 100: Spot is precisely on or past the target zone.
+    - 0: Spot is outside the maximum proximity threshold window.
+    """
+    if spot <= 0 or target <= 0:
+        return 0.0
+
+    distance_pct = abs(spot - target) / spot
+    
+    # If outside the threshold window, score is 0
+    if distance_pct >= threshold_pct:
+        return 0.0
+        
+    # Linearly scale score from 0 (at threshold edge) to 100 (at target)
+    score = (1.0 - (distance_pct / threshold_pct)) * 100.0
+    return round(max(0.0, min(100.0, score)), 2)
 
 def is_armed(price: float, target: float, threshold: float, support: list = None, resistance: list = None) -> bool:
     """Dynamically arms execution route if spot is within dynamic proximity threshold of target or zone."""
     if price <= 0:
         return False
-    
+     
     if target and target > 0:
         gap_pct = abs(price - target) / price
         if gap_pct <= threshold:
             return True
-            
+             
     if support and len(support) >= 2 and (support[0] <= price <= support[1]):
         return True
     if resistance and len(resistance) >= 2 and (resistance[0] <= price <= resistance[1]):
         return True
-        
+         
     return False
 
 def sync():
@@ -124,13 +144,13 @@ def sync():
 
         q = quotes.get(ticker, {})
         default_fallback = LIVE_PRICES_FALLBACK.get(ticker, 0.0)
-        
+         
         spot = float(q.get('last') or q.get('close') or val.get('last_price') or default_fallback)
         vwap = float(q.get('vwap') or q.get('average_price') or 0.0)
-        
+         
         if vwap == 0.0 and spot > 0:
             vwap = spot
-            
+             
         val["last_price"] = spot
         val["spot"] = spot
         val["spot_price"] = spot
@@ -139,6 +159,10 @@ def sync():
         target = float(val.get('target') or val.get('call_target') or 0.0)
         threshold = get_dynamic_proximity_threshold(spot)
         gap_pct = abs(spot - target) / spot if spot > 0 else 1.0
+
+        # Calculate continuous gradient proximity score
+        prox_score = calculate_proximity_score(spot, target, threshold)
+        val["proximity_score"] = prox_score
 
         sup = val.get("support_zone", val.get("support", [val.get("support_a", 0.0), val.get("support_b", 0.0)]))
         res = val.get("resistance_zone", val.get("resistance", [val.get("resistance_a", 0.0), val.get("resistance_b", 0.0)]))
