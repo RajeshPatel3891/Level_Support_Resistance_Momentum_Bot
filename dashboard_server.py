@@ -1513,7 +1513,7 @@ def auto_scout_levels():
 
     env_tickers = os.getenv("ACTIVE_TICKERS", "")
     full_manifest = ["SPY", "QQQ", "IWM", "NVDA", "TSLA", "AAPL", "AMZN", "GOOGL", "AMD", "META", "NFLX", "PLTR", "SOFI", "F", "AAL", "INTC", "RIVN", "HOOD", "BAC", "SNAP", "MARA", "CCL", "UBER", "NKE"]
-    target_pool = [t.strip() for t in env_tickers.split(",") if t.strip()] if env_tickers else full_manifest
+    target_pool = full_manifest
     
     # Sector ETF Mapping Matrix
     sector_map = {
