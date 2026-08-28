@@ -1255,6 +1255,19 @@ async def close_all_positions():
 @app.get("/dashboard_data.json")
 async def get_dashboard_data_json():
     try:
+        # 1. Trigger fresh payload generation if generator is available
+        try:
+            import src.generate_dashboard_data as gdd
+            gdd.generate_data()
+        except Exception:
+            pass
+
+        # 2. Serve enriched JSON payload from disk if available
+        if os.path.exists("dashboard_data.json"):
+            with open("dashboard_data.json", "r") as f:
+                return json.load(f)
+
+        # 3. Fallback to inline state resolution if file read fails
         trades, closed, total_pnl, total_closed_pnl, current_date, starting_balance, settled_free, deployed_capital, unsettled = fetch_portfolio_state()
         if os.getenv("ENVIRONMENT") == "sandbox" or os.getenv("EXECUTION_ENV") == "SANDBOX" or os.getenv("IS_SANDBOX") == "true" or os.getenv("TRADIER_ACCOUNT_ID") == "VA83416608":
             starting_balance = 113210.62 if (os.getenv("ENVIRONMENT") == "sandbox" or os.getenv("EXECUTION_ENV") == "SANDBOX" or starting_balance == 113210.62) else starting_balance
@@ -1264,14 +1277,14 @@ async def get_dashboard_data_json():
 
         return {
             "active_positions": trades,
+            "active_trade_cards": trades,
             "closed_positions": closed,
             "deployed_capital": deployed_capital,
             "floating_pnl": floating_pnl_str,
             "status": "success"
         }
     except Exception as e:
-        return {"active_positions": [], "closed_positions": [], "error": str(e), "trace": traceback.format_exc()}
-
+        return {"status": "error", "message": str(e)}
 if __name__ == '__main__':
     uvicorn.run(app, host='0.0.0.0', port=8080)
 
