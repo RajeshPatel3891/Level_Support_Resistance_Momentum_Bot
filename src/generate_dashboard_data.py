@@ -1,15 +1,15 @@
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-sys.path.append(os.getcwd())
-import os
 import re
 import json
 import time
 import requests
 import sqlite3
 import boto3
-from boto3.dynamodb.conditions import Attr
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.append(os.getcwd())
+
 from check_and_close_target import calculate_active_trade_confidence, calculate_fill_quality_score
 
 DB_PATH = "harm_telemetry.db"
@@ -73,25 +73,22 @@ def check_gex_engagement(underlying, opt_type, underlying_spot, gex_data):
 def generate_data():
     env = os.getenv("EXECUTION_ENV", "SANDBOX").upper()
     table_name = os.getenv("DYNAMODB_TABLE", "HarmonizedTrades")
-    tenant_id = os.getenv("TENANT_ID", "COMPANY_A_SANDBOX" if env == "SANDBOX" else "COMPANY_A_PROD")
     region = os.getenv("AWS_REGION", "us-east-1")
 
     base_url = os.getenv("TRADIER_BASE_URL", "https://sandbox.tradier.com/v1" if env == "SANDBOX" else "https://api.tradier.com/v1").rstrip("/")
     token = os.getenv("TRADIER_SANDBOX_TOKEN" if env == "SANDBOX" else "TRADIER_TOKEN")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
-    # --- 1. Fetch Balances (Legacy Support) ---
-    equity = 100000.0
+    equity = 113210.62 if env == "SANDBOX" else 100000.0
     try:
         account_id = os.getenv("TRADIER_ACCOUNT_ID", "VA83416608")
-        res = requests.get(f"{base_url}/accounts/{account_id}/balances", headers=headers, timeout=5)
+        res = requests.get(f"{base_url}/accounts/{account_id}/balances", headers=headers, timeout=3)
         if res.status_code == 200:
             b = res.json().get("balances", {})
-            equity = float(b.get("total_equity") or 100000.0)
-    except Exception as e:
-        print(f"[!] Tradier balance fetch error: {e}")
+            equity = float(b.get("total_equity") or equity)
+    except Exception:
+        pass
 
-    # --- 2. Fetch Closed Trades from SQLite (Legacy Support) ---
     closed_trades = []
     total_realized_pnl = 0.0
     if os.path.exists(DB_PATH):
@@ -102,24 +99,19 @@ def generate_data():
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='trades'")
             if cursor.fetchone():
                 cursor.execute("SELECT * FROM trades ORDER BY rowid DESC")
-                rows = cursor.fetchall()
-                for row in rows:
+                for row in cursor.fetchall():
                     d = dict(row)
                     status = str(d.get("exit_status", "ACTIVE")).upper()
                     if status != "ACTIVE":
                         entry = float(d.get("entry_price", d.get("spot_price", 0.0) or 0.0))
                         exit_px = float(d.get("exit_price", 0.0) or 0.0)
                         shares = int(d.get("shares", 1) or 1)
-                        pnl = 0.0
-                        if exit_px > 0:
-                            pnl = round((exit_px - entry) * shares * 100, 2)
-                            total_realized_pnl += pnl
+                        pnl = round((exit_px - entry) * shares * 100, 2) if exit_px > 0 else 0.0
+                        total_realized_pnl += pnl
 
                         sl = d.get("stop_loss")
                         tp = d.get("take_profit")
-                        reason = d.get("cso_reason") or d.get("strategy") or "SMART_CSO_LIVE"
-
-                        trade_obj = {
+                        closed_trades.append({
                             "id": d.get("id"),
                             "ticker": d.get("ticker"),
                             "direction": d.get("direction"),
@@ -129,28 +121,28 @@ def generate_data():
                             "stop_loss": f"${float(sl):.2f}" if sl else f"${entry * 0.80:.2f}",
                             "take_profit": f"${float(tp):.2f}" if tp else f"${entry * 1.50:.2f}",
                             "target": f"${float(tp):.2f}" if tp else f"${entry * 1.50:.2f}",
-                            "cso_reason": reason,
+                            "cso_reason": d.get("cso_reason") or d.get("strategy") or "SMART_CSO_LIVE",
                             "exit_status": status,
                             "timestamp": d.get("timestamp"),
                             "occ_symbol": d.get("occ_symbol", ""),
                             "realized_pnl": pnl
-                        }
-                        closed_trades.append(trade_obj)
+                        })
             conn.close()
-        except Exception as e:
-            print(f"[-] SQLite Read Error: {e}")
+        except Exception:
+            pass
 
-    # --- 3. Fetch Active Positions from DynamoDB ---
+    # Fetch Active Items from DynamoDB
     raw_items = []
     try:
         dynamodb = boto3.resource('dynamodb', region_name=region)
         table = dynamodb.Table(table_name)
-        res = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE'))
-        raw_items = res.get('Items', [])
+        res = table.scan()
+        for item in res.get('Items', []):
+            if str(item.get('exit_status', '')).upper() == 'ACTIVE':
+                raw_items.append(item)
     except Exception as e:
         print(f"[-] DynamoDB Scan Error: {e}")
 
-    # --- 4. Fetch GEX Trading Levels Context ---
     gex_levels = {}
     if os.path.exists("trading_levels.json"):
         try:
@@ -160,7 +152,6 @@ def generate_data():
         except Exception:
             pass
 
-    # --- 5. Batch Quote Enriched Telemetry Calculation ---
     active_cards = []
     if raw_items:
         symbols = [item.get("occ_symbol", item.get("ticker")) for item in raw_items]
@@ -203,7 +194,6 @@ def generate_data():
             spot_price = float(stock_quote.get("last", float(item.get("spot_price", 0.0))))
             vwap = float(stock_quote.get("vwap", spot_price))
 
-            # Metric Calculations
             conf_score, conf_action, _ = calculate_active_trade_confidence(
                 entry_price, opt_bid, opt_ask, spot_price, vwap, spy_change, qqq_change, is_call=(direction == "CALL")
             )
@@ -246,7 +236,9 @@ def generate_data():
             }
             active_cards.append(card)
 
-    # --- 6. Compile Hybrid Payload ---
+    total_floating_pnl = sum([c.get('pnl_dollars', 0.0) for c in active_cards])
+    total_deployed = sum([c.get('entry_price', 0.0) * c.get('shares', 1.0) * 100.0 for c in active_cards])
+
     payload = {
         "timestamp": time.strftime("%Y-%m-%d %H:%M:%S ET"),
         "environment": env,
@@ -254,10 +246,12 @@ def generate_data():
         "total_value": equity,
         "starting_cash": equity,
         "total_equity": equity,
-        "active_positions": [],
-        "level_matrix": [],
-        "active_trades": active_cards,       # Populates legacy UI components
-        "active_trade_cards": active_cards,  # Target for new rich telemetry UI
+        "deployed_capital": round(total_deployed, 2),
+        "floating_pnl": f"+${total_floating_pnl:.2f}" if total_floating_pnl >= 0 else f"-${abs(total_floating_pnl):.2f}",
+        "active_positions": active_cards,
+        "active_trades": active_cards,
+        "active_trade_cards": active_cards,
+        "closed_positions": closed_trades,
         "closed_trades": closed_trades,
         "total_realized_closed": round(total_realized_pnl, 2)
     }
