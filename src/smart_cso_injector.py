@@ -7,19 +7,14 @@ if os.getenv('EXECUTION_ENV', '').upper() == 'SANDBOX':
 
 #!/usr/bin/env python3
 """
-HARM.AI // SMART CSO-DRIVEN LIVE TRADER & INJECTOR
+HARM.AI // SMART CSO-DRIVEN LIVE TRADER & INJECTOR (STRICT MIDPOINT & PREDICTIVE FILL GATE)
 ===============================================================================
 Scans trading_levels.json, evaluates proximity/safety and support/resistance 
-boundaries, resolves directional bias (Call vs Put), performs smart option chain
-liquidity & spread searches via Tradier API, enforces strict execution receipts, 
-and synchronizes with both SQLite and AWS DynamoDB with live GSG/MTTP bindings.
-Now features continuous real-time terminal exit telemetry streaming, dynamic
-execution environment tagging (PRODUCTION vs SANDBOX), beta tier calibrations,
-a two-stage Mid-to-Ask order execution waterfall, ghost-fill guards, rolling
-quote smoothing (noise filter), underlying stock confirmation, stateful re-entry
-guardrails (15-min cooldown, max 2 trades/day), valid OCC symbol generator with
-3+ day min DTE guardrail and standard strike rounding, adaptive low-dollar stop
-cushioning (<= $0.50 contracts), full SQLite auto-schema migrations, and unit test stubs.
+boundaries, resolves directional bias (Call vs Put), enforces multivariable momentum 
+confluence (VWAP slope, SPY/QQQ beta alignment), applies Time-of-Day liquidity gates,
+evaluates Pre-Entry Predictive Fill Quality Scores (>= 7.5/10 threshold), validates
+option chain liquidity, executes non-crossing Midpoint limit orders with a hard 5-second
+cancel-and-walk policy, logs dual DB receipts (SQLite/DynamoDB), and streams telemetry.
 """
 
 import os
@@ -34,6 +29,7 @@ import argparse
 import numpy as np
 import datetime
 from datetime import datetime, timedelta
+import pytz
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -52,6 +48,164 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 def log_msg(msg: str):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [SMART_CSO] {msg}")
+
+# ===============================================================================
+# FILL QUALITY SCORE CALCULATORS
+# ===============================================================================
+
+def calculate_fill_quality_score(fill_price: float, bid: float, ask: float, side: str = "buy") -> float:
+    """
+    Calculates Post-Execution Fill Quality Score on a 0.0 to 10.0 scale based on market microstructure.
+    - 10.0 = Best possible fill (Ask on buy, Bid on sell).
+    - 5.0  = Midpoint fill.
+    - 0.0  = Worst possible fill (Bid on buy, Ask on sell).
+    """
+    if ask <= bid or fill_price <= 0:
+        return 0.0
+    spread = ask - bid
+    if side.lower() in ["buy", "buy_to_open"]:
+        score = ((ask - fill_price) / spread) * 10.0
+    else:
+        score = ((fill_price - bid) / spread) * 10.0
+    return round(max(0.0, min(10.0, score)), 1)
+
+def predict_fill_quality_score(quote: dict, side: str = "buy") -> tuple:
+    """
+    Predicts the likelihood of securing a >= 7.5/10 Midpoint fill BEFORE submitting an order.
+    Evaluates spread width, option price level, order book depth imbalance, and volume.
+    Returns (predicted_score: float, reason: str).
+    """
+    bid = float(quote.get("bid") or 0.0)
+    ask = float(quote.get("ask") or 0.0)
+    bid_size = int(quote.get("bidsize") or quote.get("bid_size") or 1)
+    ask_size = int(quote.get("asksize") or quote.get("ask_size") or 1)
+    volume = int(quote.get("volume") or 0)
+
+    if bid <= 0 or ask <= bid:
+        return 0.0, "Zero or inverted bid/ask book"
+
+    spread = round(ask - bid, 2)
+    mid = (bid + ask) / 2.0
+    spread_pct = (spread / mid) if mid > 0 else 1.0
+
+    score = 10.0
+
+    # 1. Spread Width Penalty
+    if spread > 0.05 or spread_pct > 0.05:
+        penalty = min(6.0, (spread / 0.02) * 1.5)
+        score -= penalty
+
+    # 2. Cheap Option Tick Granularity Penalty (Contracts < $0.20)
+    if mid < 0.20 and spread >= 0.02:
+        score -= 2.5
+
+    # 3. Order Book Depth / Imbalance Adjustment
+    total_depth = bid_size + ask_size
+    if total_depth > 0:
+        imbalance = (bid_size - ask_size) / total_depth
+        if side.lower() in ["buy", "buy_to_open"]:
+            score += (imbalance * 1.0)
+        else:
+            score -= (imbalance * 1.0)
+
+    # 4. Low Volume Penalty
+    if volume < 50:
+        score -= 1.5
+
+    final_score = round(max(0.0, min(10.0, score)), 1)
+    
+    if final_score < 7.5:
+        return final_score, f"Predicted Score ({final_score}/10) below 7.5 threshold (Spread: ${spread:.2f})"
+        
+    return final_score, "Passed Predictive Score Gate"
+
+# ===============================================================================
+# TIME-OF-DAY LIQUIDITY GATEWAY
+# ===============================================================================
+
+def is_valid_time_of_day_window() -> bool:
+    """
+    Blocks entries during low-volume mid-day lulls (11:30 AM - 1:30 PM ET).
+    Allows trades during Opening Drive (9:30-11:30 AM) and Power Hour (1:30-4:00 PM).
+    """
+    ny_tz = pytz.timezone('America/New_York')
+    now = datetime.now(ny_tz)
+    
+    if now.weekday() >= 5:  # Weekend guard
+        return False
+        
+    current_time = now.time()
+    lull_start = datetime.strptime("11:30", "%H:%M").time()
+    lull_end = datetime.strptime("13:30", "%H:%M").time()
+    
+    if lull_start <= current_time <= lull_end:
+        log_msg("⏳ [TOD GUARD] In Mid-day Liquidity Lull (11:30 AM - 1:30 PM ET). Aborting injection.")
+        return False
+        
+    return True
+
+# ===============================================================================
+# PRE-ENTRY OPTION LIQUIDITY VALIDATOR
+# ===============================================================================
+
+def validate_option_liquidity(chain_quote):
+    """
+    Validates option chain liquidity before submitting entry orders.
+    Rejects illiquid traps (zero bid, wide spreads, or low volume/OI).
+    """
+    bid = float(chain_quote.get('bid', 0.0) or 0.0)
+    ask = float(chain_quote.get('ask', 0.0) or 0.0)
+    open_interest = int(chain_quote.get('open_interest', 0) or 0)
+    volume = int(chain_quote.get('volume', 0) or 0)
+    
+    spread = ask - bid
+    mid = (bid + ask) / 2.0
+    
+    # 1. Non-zero / Penny-trap check
+    if bid <= 0.01:
+        return False, f"Bid (${bid:.2f}) is $0.01 or zero (Illiquid Trap)"
+        
+    # 2. Spread caps ($0.05 or 5% of mid)
+    if spread > 0.05 or (mid > 0 and (spread / mid) > 0.05):
+        return False, f"Spread (${spread:.2f}) exceeds cap"
+        
+    # 3. Volume & Open Interest floors
+    if open_interest < 100 or volume < 25:
+        return False, f"Low Liquidity (OI: {open_interest}, Vol: {volume})"
+        
+    return True, "Passed"
+
+# ===============================================================================
+# MULTIVARIABLE MOMENTUM CONFLUENCE CHECKER
+# ===============================================================================
+
+def check_multivariable_momentum_confluence(ticker, direction, spot, info):
+    """
+    Validates signal using:
+    1. VWAP Slope / Alignment
+    2. SPY & QQQ Market Beta Confluence
+    """
+    vwap = float(info.get("vwap", spot) or spot)
+    
+    # 1. VWAP Filter
+    if direction == "CALL" and spot < vwap:
+        return False, f"{ticker} Spot (${spot:.2f}) is below VWAP (${vwap:.2f}) - CALL Rejected"
+    elif direction == "PUT" and spot > vwap:
+        return False, f"{ticker} Spot (${spot:.2f}) is above VWAP (${vwap:.2f}) - PUT Rejected"
+
+    # 2. SPY & QQQ Market Beta Confluence
+    spy_quote = get_live_quote("SPY")
+    qqq_quote = get_live_quote("QQQ")
+    
+    spy_change = float(spy_quote.get("change_percentage", 0.0) or 0.0)
+    qqq_change = float(qqq_quote.get("change_percentage", 0.0) or 0.0)
+    
+    if direction == "CALL" and (spy_change < -0.15 or qqq_change < -0.15):
+        return False, f"Market Beta Drag (SPY: {spy_change:+.2f}%, QQQ: {qqq_change:+.2f}%) - CALL Rejected"
+    elif direction == "PUT" and (spy_change > 0.15 or qqq_change > 0.15):
+        return False, f"Market Beta Lift (SPY: {spy_change:+.2f}%, QQQ: {qqq_change:+.2f}%) - PUT Rejected"
+
+    return True, "Confluence Confirmed"
 
 # ===============================================================================
 # STEP 1: ROLLING QUOTE SMOOTHING (NOISE FILTER)
@@ -91,7 +245,6 @@ def is_valid_signal_exit(ticker, spot_price, option_pnl_pct, support_level):
     if option_pnl_pct <= -20.0:
         return True  # Hard -20% stop always executes immediately
         
-    # If option drops between -10% and -19%, verify stock price breakdown
     if spot_price < support_level:
         return True  # Stock broke support -> Real Signal
     else:
@@ -140,53 +293,6 @@ def validate_reentry_eligibility(ticker, db_path=DB_PATH):
             
     return True
 
-def get_ticker_calibration(ticker: str):
-    beta_tier = TICKER_BETA_MAP.get(ticker.upper(), "MID")
-    profile = BETA_PROFILES[beta_tier]
-    return {
-        "beta_tier": beta_tier,
-        "proximity_threshold": profile["zone"],
-        "required_turn_ticks": profile["turn_ticks"],
-        "trailing_stop_multiplier": profile["trail_mult"]
-    }
-
-def execute_smart_order(tradier_client, account_id, symbol, option_symbol, bid, ask, quantity=1):
-    """
-    Stage 1: Attempt Limit order fill at MID price.
-    Stage 2: Fallback to ASK if unfilled after 3s and spread <= 4.0%.
-    """
-    bid_f = float(bid or 0.0)
-    ask_f = float(ask or 0.0)
-    if ask_f <= 0 or bid_f <= 0:
-        print(f"[!] Invalid quote for {option_symbol}. Aborting.")
-        return None
-
-    mid_price = round((bid_f + ask_f) / 2.0, 2)
-    spread_pct = (ask_f - bid_f) / ask_f if ask_f > 0 else 0.0
-
-    print(f"[*] [STAGE 1] Submitting Limit Order at MID: ${mid_price:.2f} (Bid: ${bid_f:.2f} / Ask: ${ask_f:.2f})")
-    order_id = tradier_client.place_option_order(
-        account_id, symbol, option_symbol, side='buy_to_open', 
-        quantity=quantity, order_type='limit', price=mid_price
-    )
-    
-    time.sleep(3)  # Wait 3s for Mid-fill
-    
-    status = tradier_client.get_order_status(account_id, order_id)
-    if status == 'filled':
-        print(f"[✓] [MID FILL SUCCESS] Filled {option_symbol} at ${mid_price:.2f}!")
-        return {'order_id': order_id, 'fill_price': mid_price, 'type': 'MID_FILL'}
-
-    if spread_pct <= 0.04:
-        print(f"[*] [STAGE 2] Mid unfilled. Spread is tight ({spread_pct*100.0:.2f}% <= 4.0%). Escalating to ASK (${ask_f:.2f})...")
-        tradier_client.modify_order(account_id, order_id, price=ask_f)
-        time.sleep(1)
-        return {'order_id': order_id, 'fill_price': ask_f, 'type': 'ASK_FALLBACK'}
-    else:
-        print(f"[⛔ SPREAD GUARD] Canceling order {order_id}. Mid unfilled & spread ({spread_pct*100.0:.2f}%) > 4.0%.")
-        tradier_client.cancel_order(account_id, order_id)
-        return None
-
 def check_active_position_exists(ticker, tenant_id='COMPANY_A'):
     """
     Prevents duplicate active trade stacking in DynamoDB & SQLite.
@@ -194,7 +300,6 @@ def check_active_position_exists(ticker, tenant_id='COMPANY_A'):
     """
     ticker_u = ticker.upper()
 
-    # 1. Check DynamoDB Ground Truth First
     dynamo_active = False
     try:
         dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
@@ -208,7 +313,6 @@ def check_active_position_exists(ticker, tenant_id='COMPANY_A'):
     except Exception as e:
         log_msg(f"[!] DynamoDB active check warning: {e}")
 
-    # 2. Check SQLite
     sqlite_active = False
     try:
         if os.path.exists(DB_PATH):
@@ -221,7 +325,6 @@ def check_active_position_exists(ticker, tenant_id='COMPANY_A'):
     except Exception as e:
         log_msg(f"[!] SQLite active check warning: {e}")
 
-    # 3. Auto-Heal SQLite if out of sync with DynamoDB
     if sqlite_active and not dynamo_active:
         log_msg(f"[🧹 AUTO-HEAL] SQLite had stale ACTIVE record for {ticker_u}, but DynamoDB is clear. Syncing local state...")
         try:
@@ -242,7 +345,6 @@ def get_live_quote(symbol):
         res = requests.get(f"{TRADIER_BASE_URL}/markets/quotes", params={"symbols": symbol}, headers=headers, timeout=4)
         if res.status_code == 200:
             quotes = res.json().get("quotes", {}).get("quote", {})
-            # Intercept Tradier HTTP 200 error payloads
             if isinstance(quotes, dict) and 'errors' in quotes and quotes['errors']:
                 err_body = quotes['errors']
                 err_msg = err_body.get('error', str(err_body)) if isinstance(err_body, dict) else str(err_body)
@@ -287,17 +389,14 @@ def search_smart_option_chain(ticker, direction="CALL", spot_price=0.0):
         for opt in options:
             if opt.get("option_type") != target_side:
                 continue
-            bid = float(opt.get("bid") or 0.0)
-            ask = float(opt.get("ask") or 0.0)
-            if bid < 0.05 or ask <= 0:
+            
+            valid_liquidity, reason = validate_option_liquidity(opt)
+            if not valid_liquidity:
                 continue
-            spread_pct = (ask - bid) / ask
-            if spread_pct > 0.04:  # Enforce tight 4% maximum spread threshold for entry options
-                continue
+                
             valid_contracts.append(opt)
             
         if valid_contracts:
-            # Target NTM contracts near $0.65 ask price sweet spot ($0.45 - $0.85 range)
             best_opt = min(valid_contracts, key=lambda x: abs(float(x.get("ask", 0)) - 0.65))
             return best_opt
     except Exception as e:
@@ -305,22 +404,14 @@ def search_smart_option_chain(ticker, direction="CALL", spot_price=0.0):
     return None
 
 def generate_valid_occ_symbol(ticker: str, option_type: str, spot_price: float, min_dte: int = 3) -> str:
-    """
-    Generates a valid Tradier OCC option symbol enforcing:
-    1. Valid standard strike rounding ($0.50 or $1.00 intervals).
-    2. Minimum DTE guardrail (>= 3 days out, target Friday expiration).
-    """
     now = datetime.now()
-    
-    # Calculate target Friday expiration with min_dte buffer
     target_date = now + timedelta(days=min_dte)
     days_until_friday = (4 - target_date.weekday()) % 7
     friday_expiration = target_date + timedelta(days=days_until_friday)
-    exp_str = friday_expiration.strftime("%y%m%d")  # e.g., '260821'
+    exp_str = friday_expiration.strftime("%y%m%d")
     
-    # Round spot price to nearest $0.50 strike interval
-    strike_rounded = round(spot_price * 2) / 2  # e.g., 18.11 -> 18.00
-    strike_fmt = f"{int(strike_rounded * 1000):08d}"  # 18.00 -> '00018000'
+    strike_rounded = round(spot_price * 2) / 2
+    strike_fmt = f"{int(strike_rounded * 1000):08d}"
     
     opt_char = "C" if option_type.upper() in ["CALL", "C"] else "P"
     occ_symbol = f"{ticker.upper()}{exp_str}{opt_char}{strike_fmt}"
@@ -334,13 +425,14 @@ def fetch_occ_symbol(underlying, option_type, spot_price):
     occ = generate_valid_occ_symbol(underlying, option_type, spot_price, min_dte=3)
     return occ, 1.00
 
-def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_wait_seconds=10):
+# ===============================================================================
+# STRICT MIDPOINT LIMIT EXECUTION WITH 5-SECOND CANCEL POLICY
+# ===============================================================================
+
+def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_wait_seconds=5):
     """
-    Executes order via Low-Ball Adaptive Laddering Engine.
-    - Phase 1: Submits low-ball limit order at/near BID.
-    - Phase 2: Holds for 3.5s while evaluating underlying price velocity & book depth.
-    - Phase 3: Steps up limit price if momentum is high, or cancels/aborts if stagnant/adverse.
-    Enforces Ghost Fill Protection (verifies exec_quantity > 0).
+    Submits a strict Limit Order at Midpoint ((Bid + Ask) / 2).
+    Holds for 5 seconds. If unfilled, CANCELS and walks away—NO spread crossing.
     """
     if not TRADIER_TOKEN or not TRADIER_ACCOUNT_ID:
         log_msg("[!] Tradier Token or Account ID missing.")
@@ -349,21 +441,20 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
     headers = {"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"}
     order_side = "buy_to_open"
 
-    # --- PHASE 1: SAMPLE BOOK & CALCULATE LOW-BALL BID ---
-    initial_q = get_live_quote(occ_symbol)
-    bid = float(initial_q.get("bid") or 0.0)
-    ask = float(initial_q.get("ask") or 0.0)
+    quote = get_live_quote(occ_symbol)
+    bid = float(quote.get("bid") or 0.0)
+    ask = float(quote.get("ask") or 0.0)
 
     if bid <= 0 or ask <= 0:
-        log_msg(f"[⚠️ ADAPTIVE GUARD WARNING] Quote book empty for {occ_symbol}. Falling back to standard execution.")
-        low_ball_px = 0.05
-    else:
-        low_ball_px = round(round(bid / 0.05) * 0.05, 2)
-        if low_ball_px <= 0:
-            low_ball_px = 0.05
+        log_msg(f"[⛔ EXECUTION ABORTED] Quote book empty for {occ_symbol}.")
+        return False, 0.0, ""
 
-    limit_price_str = f"{low_ball_px:.2f}"
-    log_msg(f"[*] [PHASE 1: LOW-BALL ENTRY] Submitting LIMIT order at BID: ${limit_price_str} (Bid: ${bid:.2f} / Ask: ${ask:.2f})...")
+    mid_price = round((bid + ask) / 2.0, 2)
+    if mid_price <= 0:
+        mid_price = 0.05
+
+    limit_price_str = f"{mid_price:.2f}"
+    log_msg(f"[*] [MIDPOINT LIMIT ENTRY] Submitting LIMIT order @ MID: ${limit_price_str} (Bid: ${bid:.2f} / Ask: ${ask:.2f})...")
 
     payload = {
         "class": "option",
@@ -393,89 +484,46 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
             err_data = res_json['errors']
             err_msg = err_data.get('error', str(err_data)) if isinstance(err_data, dict) else str(err_data)
             log_msg(f"[🚨 TRADIER REJECTION]: {err_msg}")
-            print(f"[🚨 TRADIER REJECTION] {err_msg}")
             return False, 0.0, ""
+
         order_data = res_json.get("order", {})
         order_id = str(order_data.get("id"))
-        log_msg(f"[✓] Low-Ball order placed. Order ID: {order_id}. Evaluating fill probability over 3.5s...")
+        log_msg(f"[✓] Midpoint Order {order_id} placed. Waiting 5s for fill...")
 
-        # --- PHASE 2: EVALUATION WINDOW (3.5s) ---
+        # --- STRICT 5-SECOND EVALUATION WINDOW ---
         start_wait = time.time()
-
-        while (time.time() - start_wait) < 3.5:
+        while (time.time() - start_wait) < float(max_wait_seconds):
             time.sleep(1.0)
-            status_res = requests.get(
+            chk = requests.get(
                 f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders/{order_id}",
                 headers=headers,
-                timeout=4
+                timeout=3
             )
-            if status_res.status_code == 200:
-                detailed = status_res.json().get("order", {})
-                status = detailed.get("status", "")
-                if status == "filled":
-                    exec_qty = detailed.get("exec_quantity")
+            if chk.status_code == 200:
+                det = chk.json().get("order", {})
+                if det.get("status") == "filled":
+                    exec_qty = det.get("exec_quantity")
                     if exec_qty is not None and float(exec_qty) == 0:
-                        log_msg(f"[⛔ GHOST FILL DETECTED] Order {order_id} marked filled but exec_quantity=0.")
+                        log_msg(f"[⛔ GHOST FILL] Order {order_id} exec_quantity=0.")
                         return False, 0.0, ""
-                    fill_price = float(detailed.get("avg_fill_price") or low_ball_px)
-                    log_msg(f"[🎯 LOW-BALL FILLED!] Target filled at BID (${fill_price:.2f})! Zero spread slippage.")
+                    fill_price = float(det.get("avg_fill_price") or mid_price)
+                    fill_score = calculate_fill_quality_score(fill_price, bid, ask, side="buy")
+                    log_msg(f"[🎯 ZERO-SLIPPAGE FILL] Filled {quantity}x {occ_symbol} @ MID ${fill_price:.2f} | Fill Quality Score: {fill_score}/10.0")
                     return True, fill_price, order_id
 
-        # --- PHASE 3: MOMENTUM EVALUATION & STEP-UP / ABORT ---
-        log_msg(f"[⏱️ EVALUATION TIMEOUT] Low-ball bid (${limit_price_str}) unfilled after 3.5s. Checking momentum...")
-        
-        latest_q = get_live_quote(occ_symbol)
-        new_bid = float(latest_q.get("bid") or 0.0)
-        new_ask = float(latest_q.get("ask") or 0.0)
-
-        if new_bid >= bid and new_ask > 0:
-            midpoint = (new_bid + new_ask) / 2.0
-            stepped_mid = round(midpoint, 2)  # ✅ 1-cent precision (allows $0.24 midpoint)
-            
-            log_msg(f"[🚀 MOMENTUM CONFIRMED] Stepping up limit price from ${limit_price_str} -> ${stepped_mid:.2f} to secure fill...")
-
-            requests.delete(f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders/{order_id}", headers=headers)
-
-            payload["price"] = f"{stepped_mid:.2f}"
-            step_res = requests.post(f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders", data=payload, headers=headers, timeout=5)
-            
-            if step_res.status_code == 200:
-                step_json = step_res.json()
-                if isinstance(step_json, dict) and 'errors' in step_json and step_json['errors']:
-                    err_data = step_json['errors']
-                    err_msg = err_data.get('error', str(err_data)) if isinstance(err_data, dict) else str(err_data)
-                    log_msg(f"[🚨 TRADIER REJECTION]: {err_msg}")
-                    return False, 0.0, ""
-                
-                new_order_id = str(step_res.json().get("order", {}).get("id"))
-                
-                # ✅ Extended evaluation window: 10 retries @ 1.0s = 10.0s fill window
-                for _ in range(10):
-                    time.sleep(1.0)
-                    chk = requests.get(f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders/{new_order_id}", headers=headers)
-                    if chk.status_code == 200:
-                        det = chk.json().get("order", {})
-                        if det.get("status") == "filled":
-                            exec_qty = det.get("exec_quantity")
-                            if exec_qty is not None and float(exec_qty) == 0:
-                                log_msg(f"[⛔ GHOST FILL DETECTED] Step order {new_order_id} marked filled but exec_quantity=0.")
-                                return False, 0.0, ""
-                            f_px = float(det.get("avg_fill_price") or stepped_mid)
-                            return True, f_px, new_order_id
-
-        log_msg(f"[🛡️ CAPITAL PROTECT] Momentum stagnant or low fill probability. Cancelling low-ball order {order_id}...")
+        # --- UNFILLED AFTER 5 SECONDS: CANCEL AND WALK AWAY ---
+        log_msg(f"[🛡️ 5S TIMEOUT] Midpoint order {order_id} unfilled after 5s. Canceling order and walking away...")
         requests.delete(f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders/{order_id}", headers=headers)
         return False, 0.0, ""
 
     except Exception as e:
-        log_msg(f"[-] Low-Ball Execution Exception: {e}")
+        log_msg(f"[-] Midpoint Execution Exception: {e}")
         return False, 0.0, ""
 
 def log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, direction, occ_symbol, order_id, tenant_id='COMPANY_A'):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     trade_id = str(uuid.uuid4())[:8]
 
-    # Determine execution environment mode dynamically from env
     exec_env = os.getenv("EXECUTION_ENV", "SANDBOX").upper()
     is_live_flag = 1 if exec_env in ["PROD", "PRODUCTION", "LIVE"] else 0
 
@@ -483,7 +531,6 @@ def log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         
-        # Ensure all required columns exist in SQLite trades table schema
         cursor.execute("PRAGMA table_info(trades)")
         columns = [column[1] for column in cursor.fetchall()]
         for col in ['gsg_status', 'mttp_status', 'cso_status', 'execution_env']:
@@ -586,10 +633,15 @@ def resolve_smart_direction(info, spot):
 def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", scan_duration=25, contract_qty=None):
     if contract_qty is None:
         contract_qty = int(os.getenv("CONTRACT_QTY", 1))
+
     print("=" * 65)
     print("🧠 HARM.AI // STRICT RECEIPT SMART CSO LIVE TRADER")
     print(f"[*] Target: {force_ticker or 'AUTO-SCAN'} | Mode: {direction_override}")
     print("=" * 65)
+
+    # Time-of-Day Check
+    if not is_valid_time_of_day_window():
+        return
 
     levels = {}
     if os.path.exists(MANIFEST_PATH):
@@ -629,7 +681,8 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
             "ticker": ticker_upper,
             "spot": spot,
             "direction": direction,
-            "reason": reason
+            "reason": reason,
+            "info": info
         })
     else:
         if isinstance(levels, dict):
@@ -652,7 +705,8 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
                         "ticker": ticker_upper,
                         "spot": spot,
                         "direction": direction,
-                        "reason": reason
+                        "reason": reason,
+                        "info": info
                     })
 
     if not candidates:
@@ -663,12 +717,27 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
     ticker = target["ticker"]
     direction = target["direction"]
     spot = target["spot"]
+    info = target["info"]
 
-    log_msg(f"[🎯 SMART SELECTION] Ticker: {ticker} | Direction: {direction} | Spot: ${spot:.2f} | Reason: {target['reason']}")
+    # Multivariable Momentum Confluence Gate
+    confluent, reason = check_multivariable_momentum_confluence(ticker, direction, spot, info)
+    if not confluent:
+        log_msg(f"[⛔ CONFLUENCE REJECTED] {reason}")
+        return
+
+    log_msg(f"[🎯 SMART SELECTION] Ticker: {ticker} | Direction: {direction} | Spot: ${spot:.2f} | Reason: {target['reason']} | Confluence: Passed")
 
     best_opt = search_smart_option_chain(ticker, direction, spot_price=spot)
     if best_opt:
         occ_symbol = best_opt.get("symbol")
+        
+        # PRE-ENTRY PREDICTIVE FILL QUALITY GATE
+        pred_score, score_reason = predict_fill_quality_score(best_opt, side="buy")
+        if pred_score < 7.5:
+            log_msg(f"[⛔ PREDICTIVE FILL SCORE REJECTED] {ticker} ({occ_symbol}) | {score_reason}")
+            return
+            
+        log_msg(f"[🎯 PREDICTIVE SCORE PASSED] Expected Fill Score: {pred_score}/10.0 | Proceeding to Midpoint Order...")
         ask_price = float(best_opt.get("ask") or 0.80)
         log_msg(f"[✓ OPTION CHAIN MATCH] Contract: {occ_symbol} | Ask: ${ask_price:.2f}")
     else:
@@ -683,9 +752,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
 
     fill_price = fill_px
     
-    # Adaptive Stop-Loss calculation based on Option Premium Tier
     if fill_price <= 0.50:
-        # Enforce $0.10 dollar cushion or 35% max drop for low-dollar options (<= $0.50)
         stop_loss = round(max(0.02, fill_price - 0.10), 2)
         log_msg(f"[🛡️ LOW-DOLLAR CUSHION ENGAGED] Entry: ${fill_price:.2f} -> Stop Loss: ${stop_loss:.2f} ($0.10 cushion)")
     else:
@@ -698,7 +765,6 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
     log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, direction, occ_symbol, order_id)
     log_msg(f"[✓ SUCCESS] Strict Tradier Receipt confirmed and live watch loops engaged for {ticker} {direction}!")
     
-    # Engagement of continuous live terminal exit telemetry
     monitor_live_exit_telemetry(ticker)
 
 # ===============================================================================
@@ -710,11 +776,7 @@ def execute_adaptive_micro_scalp_order(occ_symbol, underlying, side, quantity=1)
     return execute_strict_tradier_order(occ_symbol, underlying, side, quantity=quantity)
 
 def check_predictive_armed_trigger(ticker, spot_or_info, info=None):
-    """
-    Legacy alias evaluating dynamic arming state for tick playback harnesses.
-    Supports both check_predictive_armed_trigger(ticker, info) and (ticker, spot, info).
-    Returns (triggered: bool, reason: str).
-    """
+    """Legacy alias evaluating dynamic arming state for tick playback harnesses."""
     if isinstance(spot_or_info, dict):
         info_dict = spot_or_info
         spot = float(info_dict.get("spot") or info_dict.get("spot_price") or info_dict.get("last_price") or 0.0)
@@ -722,17 +784,8 @@ def check_predictive_armed_trigger(ticker, spot_or_info, info=None):
         spot = float(spot_or_info or 0.0)
         info_dict = info if isinstance(info, dict) else {}
 
-    calibration = get_ticker_calibration(ticker)
-    threshold = calibration["proximity_threshold"]
-    
-    target = float(
-        info_dict.get("armed_target") or 
-        info_dict.get("target") or 
-        info_dict.get("spot_target_call") or 
-        info_dict.get("call_target") or 
-        info_dict.get("spot_target_put") or 
-        info_dict.get("put_target") or 0.0
-    )
+    threshold = 0.005
+    target = float(info_dict.get("armed_target") or info_dict.get("target") or 0.0)
     
     if target <= 0 or spot <= 0:
         return False, "INVALID_TARGET_OR_SPOT"
@@ -742,15 +795,14 @@ def check_predictive_armed_trigger(ticker, spot_or_info, info=None):
         return True, "PREDICTIVE_ARMED_TRIGGER_FIRED"
     return False, "OUTSIDE_ARMED_ZONE"
 
+def cancel_order(order_id: str):
+    return True
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Strict Receipt Smart CSO Live Trader & Injector")
+    parser = argparse.ArgumentParser(description="Strict Midpoint Smart CSO Trader")
     parser.add_argument("--ticker", type=str, default=None, help="Target specific ticker (e.g. F, RIVN, NVDA)")
     parser.add_argument("--direction", type=str, choices=["CALL", "PUT", "SMART"], default="SMART", help="Side selection")
     parser.add_argument("--scan", type=int, default=25, help="Scan duration window in seconds")
     
     args = parser.parse_args()
     smart_cso_scout_and_execute(force_ticker=args.ticker, direction_override=args.direction, scan_duration=args.scan)
-
-
-def cancel_order(order_id: str):
-    return True

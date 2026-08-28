@@ -1,9 +1,746 @@
 {
-  "test_ticker": {
+  "SPY": {
+    "zone_pct": 0.0015,
+    "turn_ticks": 2,
+    "mttp_minutes": 20,
+    "beta": "ETF",
+    "spot": 765.04,
+    "price": 765.04,
+    "last_price": 765.04,
+    "spot_price": 765.04,
+    "vwap": 765.04,
+    "call_target": 768.87,
+    "put_target": 761.21,
+    "spot_target_call": 768.87,
+    "spot_target_put": 761.21,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.0075,
+    "gap_pct": 0.5,
+    "execution_armed": true,
+    "support_a": 759.68,
+    "support_b": 762.74,
+    "resistance_a": 767.34,
+    "resistance_b": 770.4,
+    "support_zone": [
+      759.68,
+      762.74
+    ],
+    "resistance_zone": [
+      767.34,
+      770.4
+    ]
+  },
+  "QQQ": {
+    "zone_pct": 0.002,
+    "turn_ticks": 2,
+    "mttp_minutes": 20,
+    "beta": "ETF",
+    "spot": 709.06,
+    "price": 709.06,
+    "last_price": 709.06,
+    "spot_price": 709.06,
+    "vwap": 709.06,
+    "call_target": 712.61,
+    "put_target": 705.51,
+    "spot_target_call": 712.61,
+    "spot_target_put": 705.51,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.0075,
+    "gap_pct": 0.5,
+    "execution_armed": true,
+    "support_a": 704.1,
+    "support_b": 706.93,
+    "resistance_a": 711.19,
+    "resistance_b": 714.02,
+    "support_zone": [
+      704.1,
+      706.93
+    ],
+    "resistance_zone": [
+      711.19,
+      714.02
+    ]
+  },
+  "IWM": {
+    "zone_pct": 0.0025,
+    "turn_ticks": 2,
+    "mttp_minutes": 25,
+    "beta": "ETF",
+    "spot": 298.44,
+    "price": 298.44,
+    "last_price": 298.44,
+    "spot_price": 298.44,
+    "vwap": 298.44,
+    "call_target": 299.93,
+    "put_target": 296.95,
+    "spot_target_call": 299.93,
+    "spot_target_put": 296.95,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.0075,
+    "gap_pct": 0.5,
+    "execution_armed": true,
+    "support_a": 296.35,
+    "support_b": 297.54,
+    "resistance_a": 299.34,
+    "resistance_b": 300.53,
+    "support_zone": [
+      296.35,
+      297.54
+    ],
+    "resistance_zone": [
+      299.34,
+      300.53
+    ]
+  },
+  "NVDA": {
+    "zone_pct": 0.004,
+    "turn_ticks": 3,
+    "mttp_minutes": 25,
+    "beta": "HIGH",
+    "spot": 209.86,
+    "price": 209.86,
+    "last_price": 209.86,
+    "spot_price": 209.86,
+    "vwap": 209.86,
+    "call_target": 210.91,
+    "put_target": 208.81,
+    "spot_target_call": 210.91,
+    "spot_target_put": 208.81,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.0075,
+    "gap_pct": 0.5,
+    "execution_armed": true,
+    "support_a": 208.39,
+    "support_b": 209.23,
+    "resistance_a": 210.49,
+    "resistance_b": 211.33,
+    "support_zone": [
+      208.39,
+      209.23
+    ],
+    "resistance_zone": [
+      210.49,
+      211.33
+    ]
+  },
+  "TSLA": {
+    "zone_pct": 0.004,
+    "turn_ticks": 3,
+    "mttp_minutes": 25,
+    "beta": "HIGH",
+    "spot": 344.095,
+    "price": 344.095,
+    "last_price": 344.095,
+    "spot_price": 344.095,
+    "vwap": 344.095,
+    "call_target": 345.82,
+    "put_target": 342.37,
+    "spot_target_call": 345.82,
+    "spot_target_put": 342.37,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.0075,
+    "gap_pct": 0.5,
+    "execution_armed": true,
+    "support_a": 341.69,
+    "support_b": 343.06,
+    "resistance_a": 345.13,
+    "resistance_b": 346.5,
+    "support_zone": [
+      341.69,
+      343.06
+    ],
+    "resistance_zone": [
+      345.13,
+      346.5
+    ]
+  },
+  "AAPL": {
+    "zone_pct": 0.004,
+    "turn_ticks": 3,
+    "mttp_minutes": 25,
+    "beta": "HIGH",
+    "spot": 313.41,
+    "price": 313.41,
+    "last_price": 313.41,
+    "spot_price": 313.41,
+    "vwap": 313.41,
+    "call_target": 314.98,
+    "put_target": 311.84,
+    "spot_target_call": 314.98,
+    "spot_target_put": 311.84,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.0075,
+    "gap_pct": 0.5,
+    "execution_armed": true,
+    "support_a": 311.22,
+    "support_b": 312.47,
+    "resistance_a": 314.35,
+    "resistance_b": 315.6,
+    "support_zone": [
+      311.22,
+      312.47
+    ],
+    "resistance_zone": [
+      314.35,
+      315.6
+    ]
+  },
+  "AMZN": {
+    "zone_pct": 0.0035,
+    "turn_ticks": 3,
+    "mttp_minutes": 25,
+    "beta": "HIGH",
+    "spot": 258.64,
+    "price": 258.64,
+    "last_price": 258.64,
+    "spot_price": 258.64,
+    "vwap": 258.64,
+    "call_target": 259.93,
+    "put_target": 257.35,
+    "spot_target_call": 259.93,
+    "spot_target_put": 257.35,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.0075,
+    "gap_pct": 0.5,
+    "execution_armed": true,
+    "support_a": 256.83,
+    "support_b": 257.86,
+    "resistance_a": 259.42,
+    "resistance_b": 260.45,
+    "support_zone": [
+      256.83,
+      257.86
+    ],
+    "resistance_zone": [
+      259.42,
+      260.45
+    ]
+  },
+  "GOOGL": {
+    "zone_pct": 0.003,
+    "turn_ticks": 3,
+    "mttp_minutes": 25,
+    "beta": "HIGH",
+    "spot": 341.47,
+    "price": 341.47,
+    "last_price": 341.47,
+    "spot_price": 341.47,
+    "vwap": 341.47,
+    "call_target": 343.18,
+    "put_target": 339.76,
+    "spot_target_call": 343.18,
+    "spot_target_put": 339.76,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.0075,
+    "gap_pct": 0.5,
+    "execution_armed": true,
+    "support_a": 339.08,
+    "support_b": 340.45,
+    "resistance_a": 342.49,
+    "resistance_b": 343.86,
+    "support_zone": [
+      339.08,
+      340.45
+    ],
+    "resistance_zone": [
+      342.49,
+      343.86
+    ]
+  },
+  "AMD": {
+    "zone_pct": 0.004,
+    "turn_ticks": 3,
+    "mttp_minutes": 25,
+    "beta": "HIGH",
+    "spot": 482.6,
+    "price": 482.6,
+    "last_price": 482.6,
+    "spot_price": 482.6,
+    "vwap": 482.6,
+    "call_target": 485.01,
+    "put_target": 480.19,
+    "spot_target_call": 485.01,
+    "spot_target_put": 480.19,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.0075,
+    "gap_pct": 0.5,
+    "execution_armed": true,
+    "support_a": 479.22,
+    "support_b": 481.15,
+    "resistance_a": 484.05,
+    "resistance_b": 485.98,
+    "support_zone": [
+      479.22,
+      481.15
+    ],
+    "resistance_zone": [
+      484.05,
+      485.98
+    ]
+  },
+  "META": {
+    "zone_pct": 0.0045,
+    "turn_ticks": 3,
+    "mttp_minutes": 25,
+    "beta": "HIGH",
+    "spot": 577.735,
+    "price": 577.735,
+    "last_price": 577.735,
+    "spot_price": 577.735,
+    "vwap": 577.735,
+    "call_target": 580.62,
+    "put_target": 574.85,
+    "spot_target_call": 580.62,
+    "spot_target_put": 574.85,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.0075,
+    "gap_pct": 0.5,
+    "execution_armed": true,
+    "support_a": 573.69,
+    "support_b": 576.0,
+    "resistance_a": 579.47,
+    "resistance_b": 581.78,
+    "support_zone": [
+      573.69,
+      576.0
+    ],
+    "resistance_zone": [
+      579.47,
+      581.78
+    ]
+  },
+  "NFLX": {
+    "zone_pct": 0.0045,
+    "turn_ticks": 3,
+    "mttp_minutes": 25,
+    "beta": "HIGH",
+    "spot": 81.505,
+    "price": 81.505,
+    "last_price": 81.505,
+    "spot_price": 81.505,
+    "vwap": 81.505,
+    "call_target": 81.91,
+    "put_target": 81.1,
+    "spot_target_call": 81.91,
+    "spot_target_put": 81.1,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.0085,
+    "gap_pct": 0.5,
+    "execution_armed": true,
+    "support_a": 80.93,
+    "support_b": 81.26,
+    "resistance_a": 81.75,
+    "resistance_b": 82.08,
+    "support_zone": [
+      80.93,
+      81.26
+    ],
+    "resistance_zone": [
+      81.75,
+      82.08
+    ]
+  },
+  "PLTR": {
     "zone_pct": 0.003,
     "turn_ticks": 3,
     "mttp_minutes": 35,
     "beta": "MID",
-    "target": 200.0
+    "spot": 174.89,
+    "price": 174.89,
+    "last_price": 174.89,
+    "spot_price": 174.89,
+    "vwap": 174.89,
+    "call_target": 175.76,
+    "put_target": 174.02,
+    "spot_target_call": 175.76,
+    "spot_target_put": 174.02,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.0075,
+    "gap_pct": 0.5,
+    "execution_armed": true,
+    "support_a": 173.67,
+    "support_b": 174.37,
+    "resistance_a": 175.41,
+    "resistance_b": 176.11,
+    "support_zone": [
+      173.67,
+      174.37
+    ],
+    "resistance_zone": [
+      175.41,
+      176.11
+    ]
+  },
+  "SOFI": {
+    "zone_pct": 0.003,
+    "turn_ticks": 3,
+    "mttp_minutes": 35,
+    "beta": "MID",
+    "spot": 18.81,
+    "price": 18.81,
+    "last_price": 18.81,
+    "spot_price": 18.81,
+    "vwap": 18.81,
+    "call_target": 18.9,
+    "put_target": 18.72,
+    "spot_target_call": 18.9,
+    "spot_target_put": 18.72,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.012,
+    "gap_pct": 0.48,
+    "execution_armed": true,
+    "support_a": 18.68,
+    "support_b": 18.75,
+    "resistance_a": 18.87,
+    "resistance_b": 18.94,
+    "support_zone": [
+      18.68,
+      18.75
+    ],
+    "resistance_zone": [
+      18.87,
+      18.94
+    ]
+  },
+  "F": {
+    "zone_pct": 0.002,
+    "turn_ticks": 2,
+    "mttp_minutes": 35,
+    "beta": "LOW",
+    "spot": 13.835,
+    "price": 13.835,
+    "last_price": 13.835,
+    "spot_price": 13.835,
+    "vwap": 13.835,
+    "call_target": 13.9,
+    "put_target": 13.77,
+    "spot_target_call": 13.9,
+    "spot_target_put": 13.77,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.012,
+    "gap_pct": 0.47,
+    "execution_armed": true,
+    "support_a": 13.74,
+    "support_b": 13.79,
+    "resistance_a": 13.88,
+    "resistance_b": 13.93,
+    "support_zone": [
+      13.74,
+      13.79
+    ],
+    "resistance_zone": [
+      13.88,
+      13.93
+    ]
+  },
+  "AAL": {
+    "zone_pct": 0.002,
+    "turn_ticks": 2,
+    "mttp_minutes": 35,
+    "beta": "LOW",
+    "spot": 13.9353,
+    "price": 13.9353,
+    "last_price": 13.9353,
+    "spot_price": 13.9353,
+    "vwap": 13.9353,
+    "call_target": 14.0,
+    "put_target": 13.87,
+    "spot_target_call": 14.0,
+    "spot_target_put": 13.87,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.012,
+    "gap_pct": 0.46,
+    "execution_armed": true,
+    "support_a": 13.84,
+    "support_b": 13.89,
+    "resistance_a": 13.98,
+    "resistance_b": 14.03,
+    "support_zone": [
+      13.84,
+      13.89
+    ],
+    "resistance_zone": [
+      13.98,
+      14.03
+    ]
+  },
+  "INTC": {
+    "zone_pct": 0.002,
+    "turn_ticks": 2,
+    "mttp_minutes": 35,
+    "beta": "LOW",
+    "spot": 86.695,
+    "price": 86.695,
+    "last_price": 86.695,
+    "spot_price": 86.695,
+    "vwap": 86.695,
+    "call_target": 87.13,
+    "put_target": 86.26,
+    "spot_target_call": 87.13,
+    "spot_target_put": 86.26,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.0085,
+    "gap_pct": 0.5,
+    "execution_armed": true,
+    "support_a": 86.09,
+    "support_b": 86.43,
+    "resistance_a": 86.96,
+    "resistance_b": 87.3,
+    "support_zone": [
+      86.09,
+      86.43
+    ],
+    "resistance_zone": [
+      86.96,
+      87.3
+    ]
+  },
+  "RIVN": {
+    "zone_pct": 0.003,
+    "turn_ticks": 3,
+    "mttp_minutes": 35,
+    "beta": "MID",
+    "spot": 15.98,
+    "price": 15.98,
+    "last_price": 15.98,
+    "spot_price": 15.98,
+    "vwap": 15.98,
+    "call_target": 16.06,
+    "put_target": 15.9,
+    "spot_target_call": 16.06,
+    "spot_target_put": 15.9,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.012,
+    "gap_pct": 0.5,
+    "execution_armed": true,
+    "support_a": 15.87,
+    "support_b": 15.93,
+    "resistance_a": 16.03,
+    "resistance_b": 16.09,
+    "support_zone": [
+      15.87,
+      15.93
+    ],
+    "resistance_zone": [
+      16.03,
+      16.09
+    ]
+  },
+  "HOOD": {
+    "zone_pct": 0.003,
+    "turn_ticks": 3,
+    "mttp_minutes": 30,
+    "beta": "MID",
+    "spot": 108.805,
+    "price": 108.805,
+    "last_price": 108.805,
+    "spot_price": 108.805,
+    "vwap": 108.805,
+    "call_target": 109.35,
+    "put_target": 108.26,
+    "spot_target_call": 109.35,
+    "spot_target_put": 108.26,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.0075,
+    "gap_pct": 0.5,
+    "execution_armed": true,
+    "support_a": 108.04,
+    "support_b": 108.48,
+    "resistance_a": 109.13,
+    "resistance_b": 109.57,
+    "support_zone": [
+      108.04,
+      108.48
+    ],
+    "resistance_zone": [
+      109.13,
+      109.57
+    ]
+  },
+  "BAC": {
+    "zone_pct": 0.002,
+    "turn_ticks": 2,
+    "mttp_minutes": 35,
+    "beta": "LOW",
+    "spot": 62.28,
+    "price": 62.28,
+    "last_price": 62.28,
+    "spot_price": 62.28,
+    "vwap": 62.28,
+    "call_target": 62.59,
+    "put_target": 61.97,
+    "spot_target_call": 62.59,
+    "spot_target_put": 61.97,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.0085,
+    "gap_pct": 0.5,
+    "execution_armed": true,
+    "support_a": 61.84,
+    "support_b": 62.09,
+    "resistance_a": 62.47,
+    "resistance_b": 62.72,
+    "support_zone": [
+      61.84,
+      62.09
+    ],
+    "resistance_zone": [
+      62.47,
+      62.72
+    ]
+  },
+  "SNAP": {
+    "zone_pct": 0.003,
+    "turn_ticks": 3,
+    "mttp_minutes": 35,
+    "beta": "MID",
+    "spot": 5.44,
+    "price": 5.44,
+    "last_price": 5.44,
+    "spot_price": 5.44,
+    "vwap": 5.44,
+    "call_target": 5.47,
+    "put_target": 5.41,
+    "spot_target_call": 5.47,
+    "spot_target_put": 5.41,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.012,
+    "gap_pct": 0.55,
+    "execution_armed": true,
+    "support_a": 5.4,
+    "support_b": 5.42,
+    "resistance_a": 5.46,
+    "resistance_b": 5.48,
+    "support_zone": [
+      5.4,
+      5.42
+    ],
+    "resistance_zone": [
+      5.46,
+      5.48
+    ]
+  },
+  "MARA": {
+    "zone_pct": 0.004,
+    "turn_ticks": 3,
+    "mttp_minutes": 25,
+    "beta": "HIGH",
+    "spot": 11.11,
+    "price": 11.11,
+    "last_price": 11.11,
+    "spot_price": 11.11,
+    "vwap": 11.11,
+    "call_target": 11.17,
+    "put_target": 11.05,
+    "spot_target_call": 11.17,
+    "spot_target_put": 11.05,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.012,
+    "gap_pct": 0.54,
+    "execution_armed": true,
+    "support_a": 11.03,
+    "support_b": 11.08,
+    "resistance_a": 11.14,
+    "resistance_b": 11.19,
+    "support_zone": [
+      11.03,
+      11.08
+    ],
+    "resistance_zone": [
+      11.14,
+      11.19
+    ]
+  },
+  "CCL": {
+    "zone_pct": 0.0025,
+    "turn_ticks": 2,
+    "mttp_minutes": 35,
+    "beta": "LOW",
+    "spot": 25.695,
+    "price": 25.695,
+    "last_price": 25.695,
+    "spot_price": 25.695,
+    "vwap": 25.695,
+    "call_target": 25.82,
+    "put_target": 25.57,
+    "spot_target_call": 25.82,
+    "spot_target_put": 25.57,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.012,
+    "gap_pct": 0.49,
+    "execution_armed": true,
+    "support_a": 25.52,
+    "support_b": 25.62,
+    "resistance_a": 25.77,
+    "resistance_b": 25.87,
+    "support_zone": [
+      25.52,
+      25.62
+    ],
+    "resistance_zone": [
+      25.77,
+      25.87
+    ]
+  },
+  "UBER": {
+    "zone_pct": 0.003,
+    "turn_ticks": 3,
+    "mttp_minutes": 30,
+    "beta": "MID",
+    "spot": 79.545,
+    "price": 79.545,
+    "last_price": 79.545,
+    "spot_price": 79.545,
+    "vwap": 79.545,
+    "call_target": 79.94,
+    "put_target": 79.15,
+    "spot_target_call": 79.94,
+    "spot_target_put": 79.15,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.0085,
+    "gap_pct": 0.5,
+    "execution_armed": true,
+    "support_a": 78.99,
+    "support_b": 79.31,
+    "resistance_a": 79.78,
+    "resistance_b": 80.1,
+    "support_zone": [
+      78.99,
+      79.31
+    ],
+    "resistance_zone": [
+      79.78,
+      80.1
+    ]
+  },
+  "NKE": {
+    "zone_pct": 0.0025,
+    "turn_ticks": 2,
+    "mttp_minutes": 35,
+    "beta": "MID",
+    "spot": 38.58,
+    "price": 38.58,
+    "last_price": 38.58,
+    "spot_price": 38.58,
+    "vwap": 38.58,
+    "call_target": 38.77,
+    "put_target": 38.39,
+    "spot_target_call": 38.77,
+    "spot_target_put": 38.39,
+    "gex_label": "NEUTRAL",
+    "proximity_threshold": 0.0085,
+    "gap_pct": 0.49,
+    "execution_armed": true,
+    "support_a": 38.31,
+    "support_b": 38.46,
+    "resistance_a": 38.7,
+    "resistance_b": 38.85,
+    "support_zone": [
+      38.31,
+      38.46
+    ],
+    "resistance_zone": [
+      38.7,
+      38.85
+    ]
   }
 }

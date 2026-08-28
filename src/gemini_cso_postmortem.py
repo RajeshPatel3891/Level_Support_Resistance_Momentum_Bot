@@ -1,3 +1,19 @@
+import os, requests, json
+
+def call_gemini_api(prompt_text):
+    api_key = os.getenv("GEMINI_API_KEY", "")
+    if not api_key:
+        return None
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={api_key}"
+    payload = {"contents": [{"parts": [{"text": prompt_text}]}]}
+    headers = {"Content-Type": "application/json"}
+    try:
+        res = requests.post(url, json=payload, headers=headers, timeout=10)
+        if res.status_code == 200:
+            return res.json()["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception as e:
+        pass
+    return None
 #!/usr/bin/env python3
 """
 HARM.AI // GEMINI CSO AUTOMATED EOD POST-MORTEM LOOP

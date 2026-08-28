@@ -29,7 +29,7 @@ python3 -m py_compile dashboard_server.py && echo "[✓ Dashboard Server Syntax 
 
 # 4. Build Fresh Docker Image & Push to AWS ECR
 echo -e "\n[*] [STEP 4/6] Building & Pushing Clean Docker Container..."
-TAG="v1.0.22"
+TAG="v1.0.23"
 AWS_ACCT=$(aws sts get-caller-identity --query Account --output text)
 IMAGE_URI="${AWS_ACCT}.dkr.ecr.us-east-1.amazonaws.com/harm-trading-bot:${TAG}"
 
@@ -44,7 +44,17 @@ python3 -c '
 import json, subprocess, os
 
 aws_acct = subprocess.check_output("aws sts get-caller-identity --query Account --output text", shell=True).decode().strip()
-image_uri = f"{aws_acct}.dkr.ecr.us-east-1.amazonaws.com/harm-trading-bot:v1.0.22"
+image_uri = f"{aws_acct}.dkr.ecr.us-east-1.amazonaws.com/harm-trading-bot:v1.0.23"
+
+# Optional local AWS credentials capture
+try:
+    aws_key = os.getenv("AWS_ACCESS_KEY_ID") or subprocess.check_output("aws configure get aws_access_key_id", shell=True).decode().strip()
+    aws_secret = os.getenv("AWS_SECRET_ACCESS_KEY") or subprocess.check_output("aws configure get aws_secret_access_key", shell=True).decode().strip()
+except Exception:
+    aws_key = ""
+    aws_secret = ""
+
+sandbox_token = "CvtMHhNSylWy5KLTTvU29UD3zMdb"
 
 try:
     prod_token = subprocess.check_output("grep -E \"^(TRADIER_ACCESS_TOKEN|TRADIER_TOKEN)=\" .env.prod 2>/dev/null | head -n1 | cut -d= -f2", shell=True).decode().strip().strip("\x22\x27")
@@ -53,8 +63,6 @@ except Exception:
 
 if not prod_token:
     prod_token = "fyR75AACwlIYhkMyev1doRh6gnSr"
-
-sandbox_token = "hcY1t0sY8RZmcsfVjQCA41ecAkFT"
 
 base_container = {
     "name": "harmonized-trading-container",
@@ -73,7 +81,16 @@ base_container = {
     }
 }
 
-common_env = [{"name": "AWS_DEFAULT_REGION", "value": "us-east-1"}, {"name": "PYTHONUNBUFFERED", "value": "1"}]
+common_env = [
+    {"name": "AWS_DEFAULT_REGION", "value": "us-east-1"},
+    {"name": "PYTHONUNBUFFERED", "value": "1"}
+]
+
+if aws_key and aws_secret:
+    common_env.extend([
+        {"name": "AWS_ACCESS_KEY_ID", "value": aws_key},
+        {"name": "AWS_SECRET_ACCESS_KEY", "value": aws_secret}
+    ])
 
 prod_td = {
     "family": "harmonized-task-prod",

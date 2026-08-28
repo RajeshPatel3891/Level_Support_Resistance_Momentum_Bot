@@ -96,14 +96,16 @@ def ensure_schema():
 
 def get_live_quote(occ_symbol):
     """Fetch live option mark with dynamic Live/Sandbox endpoint auto-switching."""
-    if not TRADIER_TOKEN or not occ_symbol:
-        return 0.0, TRADIER_BASE_URL
+    token = get_tradier_token()
+    if not token or not occ_symbol:
+        return 0.0, os.getenv("TRADIER_BASE_URL", TRADIER_BASE_URL)
     
     endpoints = [
+        os.getenv("TRADIER_BASE_URL", TRADIER_BASE_URL).rstrip('/') + "/markets/quotes",
         "https://api.tradier.com/v1/markets/quotes",
         "https://sandbox.tradier.com/v1/markets/quotes"
     ]
-    headers = {"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"}
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     
     for url in endpoints:
         try:
@@ -126,20 +128,46 @@ def get_live_quote(occ_symbol):
         except Exception:
             continue
             
-    return 0.0, TRADIER_BASE_URL
+    return 0.0, os.getenv("TRADIER_BASE_URL", TRADIER_BASE_URL)
 
 
-def execute_tradier_close(occ_symbol, ticker, shares, base_url, max_wait_seconds=10):
+def get_live_bid_ask(occ_symbol):
+    """Fetch live option bid and ask prices explicitly for realistic execution calculation."""
+    token = get_tradier_token()
+    base_url = os.getenv("TRADIER_BASE_URL", TRADIER_BASE_URL).rstrip('/')
+    if not token or not occ_symbol:
+        return 0.0, 0.0, base_url
+
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    try:
+        res = requests.get(f"{base_url}/markets/quotes?symbols={occ_symbol}", headers=headers, timeout=3)
+        if res.status_code == 200:
+            q = res.json().get('quotes', {}).get('quote', {})
+            if isinstance(q, list):
+                q = q[0] if q else {}
+            bid = float(q.get('bid') or 0.0)
+            ask = float(q.get('ask') or 0.0)
+            return bid, ask, base_url
+    except Exception as e:
+        print(f"[-] Error fetching bid/ask for {occ_symbol}: {e}")
+
+    return 0.0, 0.0, base_url
+
+
+def execute_tradier_close(occ_symbol, ticker, shares, base_url=None, max_wait_seconds=10):
     """Execute sell_to_close order on Tradier API enforcing explicit OCC payload formatting."""
-    if not TRADIER_TOKEN or not TRADIER_ACCOUNT_ID:
+    token = get_tradier_token()
+    account_id = os.getenv("TRADIER_ACCOUNT_ID", TRADIER_ACCOUNT_ID)
+    active_base_url = (base_url or os.getenv("TRADIER_BASE_URL", TRADIER_BASE_URL)).rstrip('/')
+
+    if not token or not account_id:
         print(f"[-] Tradier credentials missing. Could not close {shares}x {occ_symbol}")
         return False
 
-    # Extract clean root ticker if not provided cleanly
     match = re.match(r'^([A-Z]+)\d{6}[CP]\d{8}$', occ_symbol)
     root_symbol = match.group(1) if match else ticker.split('260821')[0].rstrip('0123456789')
 
-    headers = {"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"}
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
     payload = {
         'class': 'option',
@@ -152,7 +180,7 @@ def execute_tradier_close(occ_symbol, ticker, shares, base_url, max_wait_seconds
     }
 
     try:
-        url = f"{base_url.rstrip('/')}/accounts/{TRADIER_ACCOUNT_ID}/orders"
+        url = f"{active_base_url}/accounts/{account_id}/orders"
         res = requests.post(url, data=payload, headers=headers, timeout=5)
         
         if res.status_code == 200:
@@ -172,6 +200,62 @@ def execute_tradier_close(occ_symbol, ticker, shares, base_url, max_wait_seconds
     except Exception as e:
         print(f"[-] Tradier Close Exception for {occ_symbol}: {e}")
         return False
+
+
+def execute_tradier_close_stepped(occ_symbol, ticker, shares, base_url=None, max_wait_seconds=10):
+    """
+    Executes a stepped sell_to_close limit order trying Midpoint first,
+    stepping down toward Bid to prevent slippage on illiquid option contracts.
+    """
+    token = get_tradier_token()
+    account_id = os.getenv("TRADIER_ACCOUNT_ID", TRADIER_ACCOUNT_ID)
+    active_base_url = (base_url or os.getenv("TRADIER_BASE_URL", TRADIER_BASE_URL)).rstrip('/')
+
+    if not token or not account_id:
+        print(f"[-] Tradier credentials missing. Could not stepped-close {shares}x {occ_symbol}")
+        return False
+
+    bid, ask, _ = get_live_bid_ask(occ_symbol)
+    if bid <= 0 and ask <= 0:
+        print(f"[!] Quote book empty for {occ_symbol}. Falling back to standard market close.")
+        return execute_tradier_close(occ_symbol, ticker, shares, active_base_url, max_wait_seconds)
+
+    mid = round((bid + ask) / 2.0, 2)
+    target_price = max(mid, bid, 0.01)
+
+    match = re.match(r'^([A-Z]+)\d{6}[CP]\d{8}$', occ_symbol)
+    root_symbol = match.group(1) if match else ticker.split('260821')[0].rstrip('0123456789')
+
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+    payload = {
+        "class": "option",
+        "symbol": root_symbol,
+        "option_symbol": occ_symbol,
+        "side": "sell_to_close",
+        "quantity": str(abs(int(shares))),
+        "type": "limit",
+        "price": f"{target_price:.2f}",
+        "duration": "day"
+    }
+
+    try:
+        url = f"{active_base_url}/accounts/{account_id}/orders"
+        print(f"[⚡ STEPPED CLOSE] Submitting Limit Sell @ ${target_price:.2f} (Mid: ${mid:.2f} / Bid: ${bid:.2f}) for {shares}x {occ_symbol}...")
+        res = requests.post(url, data=payload, headers=headers, timeout=5)
+        
+        if res.status_code == 200:
+            body = res.json()
+            order_info = body.get('order', {})
+            order_id = order_info.get('id')
+            print(f"[✓ STEPPED CLOSE SUCCESS] {shares}x {occ_symbol} | Limit Price: ${target_price:.2f} | Order ID: {order_id}")
+            return True
+        else:
+            print(f"[-] Stepped close failed HTTP {res.status_code}: {res.text}. Escalating to market close fallback...")
+            return execute_tradier_close(occ_symbol, ticker, shares, active_base_url, max_wait_seconds)
+    except Exception as e:
+        print(f"[-] Stepped close exception for {occ_symbol}: {e}. Falling back to standard close...")
+        return execute_tradier_close(occ_symbol, ticker, shares, active_base_url, max_wait_seconds)
 
 
 def sync_local_sqlite_exit(t_id, ticker, exit_reason, exit_price, exit_timestamp, net_pnl=0.0, remaining_shares=0, dynamic_stop=None):
@@ -195,17 +279,18 @@ def sync_local_sqlite_exit(t_id, ticker, exit_reason, exit_price, exit_timestamp
 
 
 def get_recent_fill_price(occ_symbol, default_price=0.0):
-    if not TRADIER_TOKEN or not TRADIER_ACCOUNT_ID:
+    token = get_tradier_token()
+    account_id = os.getenv("TRADIER_ACCOUNT_ID", TRADIER_ACCOUNT_ID)
+    if not token or not account_id:
         return default_price
     try:
-        base_url = os.getenv("TRADIER_BASE_URL", TRADIER_BASE_URL)
-        headers = {"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"}
-        res = requests.get(f"{base_url}/accounts/{TRADIER_ACCOUNT_ID}/orders", headers=headers, timeout=5)
+        base_url = os.getenv("TRADIER_BASE_URL", TRADIER_BASE_URL).rstrip('/')
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        res = requests.get(f"{base_url}/accounts/{account_id}/orders", headers=headers, timeout=5)
         if res.status_code == 200:
             orders = res.json().get("orders", {}).get("order", [])
             if isinstance(orders, dict):
                 orders = [orders]
-            # Filter filled sell orders for this symbol and sort by ID descending (latest first)
             matching = [o for o in orders if o.get("option_symbol") == occ_symbol and str(o.get("status", "")).lower() == "filled"]
             if matching:
                 matching.sort(key=lambda x: int(x.get("id", 0)), reverse=True)
@@ -217,12 +302,11 @@ def get_recent_fill_price(occ_symbol, default_price=0.0):
 
 def synchronize_dynamo_with_tradier():
     """Reconcile DynamoDB active state directly against Tradier live brokerage positions ground truth."""
-    base_url = os.getenv('TRADIER_BASE_URL', TRADIER_BASE_URL)
-    token = TRADIER_TOKEN
-    account_id = TRADIER_ACCOUNT_ID
+    base_url = os.getenv('TRADIER_BASE_URL', TRADIER_BASE_URL).rstrip('/')
+    token = get_tradier_token()
+    account_id = os.getenv('TRADIER_ACCOUNT_ID', TRADIER_ACCOUNT_ID)
     headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
 
-    # 1. Fetch Real Ground-Truth Positions from Tradier API
     try:
         res = requests.get(f'{base_url}/accounts/{account_id}/positions', headers=headers, timeout=10)
         if res.status_code != 200:
@@ -232,7 +316,6 @@ def synchronize_dynamo_with_tradier():
         print(f"[-] Network error fetching Tradier positions: {e}")
         return
 
-    # Safely parse Tradier positions response when 0 positions exist or positions: None / "null"
     positions_data = res.json().get('positions') if res.status_code == 200 else {}
     if not isinstance(positions_data, dict):
         positions_data = {}
@@ -240,10 +323,9 @@ def synchronize_dynamo_with_tradier():
     if isinstance(raw_positions, dict):
         raw_positions = [raw_positions]
 
-    # Map Live Positions from Tradier
     live_broker_state = {}
     for pos in raw_positions:
-        symbol = pos.get('symbol', '')  # OCC Option Symbol
+        symbol = pos.get('symbol', '')
         if not symbol:
             continue
         
@@ -271,7 +353,6 @@ def synchronize_dynamo_with_tradier():
 
     print(f"[✓ TRADIER GROUND TRUTH] Live Open Contracts ({len(live_broker_state)}): {list(live_broker_state.keys())}")
 
-    # 2. Reconcile with DynamoDB Active Positions Table
     dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
     table = dynamodb.Table('HarmonizedTrades')
 
@@ -284,7 +365,6 @@ def synchronize_dynamo_with_tradier():
 
     existing_occ_symbols = {item.get('occ_symbol', item.get('ticker')): item for item in existing_items}
 
-    # A) Purge / Reconcile Positions (In DynamoDB ACTIVE, but NOT in Tradier)
     now_str = dt.now().strftime("%Y-%m-%d %H:%M:%S")
     for db_occ_symbol, item in existing_occ_symbols.items():
         if db_occ_symbol not in live_broker_state:
@@ -294,7 +374,6 @@ def synchronize_dynamo_with_tradier():
             entry_px = float(item.get('entry_price', 0.0))
             shares = float(item.get('shares', 1.0))
 
-            # Strictly verify actual fill price from Tradier order history without fallback estimation
             actual_exit_px = get_recent_fill_price(db_occ_symbol, default_price=0.0)
             realized_pnl = round((actual_exit_px - entry_px) * shares * 100.0, 2) if actual_exit_px > 0 and entry_px > 0 else 0.0
 
@@ -316,7 +395,6 @@ def synchronize_dynamo_with_tradier():
             except Exception as ex:
                 print(f"[-] Failed to reconcile closed entry {db_occ_symbol}: {ex}")
 
-    # B) Hydrate / Update Active Positions
     tenant_id = os.getenv('TENANT_ID', 'COMPANY_A')
     for symbol, data in live_broker_state.items():
         if symbol not in existing_occ_symbols:
@@ -400,7 +478,6 @@ def evaluate_gex_exits():
             dollar_pnl = round((current_price - entry_price) * 100.0 * total_shares, 2)
             pnl_pct = ((current_price - entry_price) / entry_price) * 100.0 if entry_price > 0 else 0.0
 
-            # Feature 1: Persist min_pnl_seen
             raw_min_seen = item.get('min_pnl_seen')
             if raw_min_seen is None:
                 min_seen = dollar_pnl
@@ -421,7 +498,6 @@ def evaluate_gex_exits():
                 else:
                     min_seen = db_min_seen
 
-            # Feature 2: High-Water Mark Peak PnL Tracking
             peak_price = max(stored_peak, current_price)
             peak_pnl_pct = ((peak_price - entry_price) / entry_price) * 100.0 if entry_price > 0 else 0.0
 
@@ -456,14 +532,13 @@ def evaluate_gex_exits():
 
             print(f"[⚙️ MASTER EXIT] {ticker} | {total_shares}x | Entry: ${entry_price:.2f} | Live: ${current_price:.2f} ({pnl_pct:+.1f}%) | Peak: ${peak_price:.2f} (+{peak_pnl_pct:.1f}%) | Active Stop: ${dynamic_stop:.2f} | Min Seen: ${min_seen:+.2f}")
 
-            # Feature 4: Multi-Contract Tranche Scaling
             if total_shares > 1 and not is_runner and (pnl_pct >= 50.0 or (gex_gap_pct != 0.0 and abs(gex_gap_pct) <= 0.5)):
                 scale_shares = total_shares - 1
                 realized_scale_pnl = round((current_price - entry_price) * scale_shares * 100.0, 2)
                 
                 print(f"🚀 [CSO TRANCHE EXIT] Scaling {scale_shares}x contracts on {ticker} at {pnl_pct:+.1f}% | Banking ${realized_scale_pnl:+.2f} | Leaving 1 RUNNER")
                 
-                if execute_tradier_close(occ_symbol, ticker, scale_shares, active_base_url):
+                if execute_tradier_close_stepped(occ_symbol, ticker, scale_shares, active_base_url):
                     table.update_item(
                         Key={'tenant_id': tenant_id, 'trade_id': t_id},
                         UpdateExpression='SET shares = :sh, is_runner = :r, partial_pnl = :pp, peak_price = :pk, cso_status = :cs, stop_loss = :sl',
@@ -479,7 +554,6 @@ def evaluate_gex_exits():
                     sync_local_sqlite_exit(t_id, ticker, "PARTIAL_SCALE_OUT", current_price, now_str, realized_scale_pnl, remaining_shares=1, dynamic_stop=dynamic_stop)
                 continue
 
-            # Feature 5: Dynamic Trailing & Hard Risk Exits
             exit_reason = None
 
             if current_price <= dynamic_stop and current_price > 0:
@@ -505,7 +579,7 @@ def evaluate_gex_exits():
 
             if exit_reason:
                 print(f"🚨 [FINAL EXIT TRIGGERED] ID {t_id} ({ticker} {occ_symbol}) -> Reason: {exit_reason} at {now_str}")
-                if execute_tradier_close(occ_symbol, ticker, total_shares, active_base_url):
+                if execute_tradier_close_stepped(occ_symbol, ticker, total_shares, active_base_url):
                     final_leg_pnl = round((current_price - entry_price) * total_shares * 100.0, 2)
                     total_realized_pnl = round(accumulated_pnl + final_leg_pnl, 2)
 

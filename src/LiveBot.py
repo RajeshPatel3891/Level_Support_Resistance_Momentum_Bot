@@ -7,7 +7,6 @@ from boto3.dynamodb.conditions import Key, Attr
 import datetime
 import pytz
 from datetime import timedelta
-import os
 import requests
 import queue
 import threading
@@ -92,7 +91,7 @@ def get_live_quote(symbol):
 
 def dispatch_discord_alert(symbol, basis, action="ENTRY"):
     webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
-    if not webhook_url or "your_real_id" in webhook_url:
+    if not webhook_url or "your_webhook_if_any" in webhook_url or "your_real_id" in webhook_url:
         return
     payload = {
         "embeds": [{
@@ -133,10 +132,10 @@ MANIFEST_PATH = os.path.join(CURRENT_DIR, 'trading_levels.json')
 if not os.path.exists(MANIFEST_PATH):
     MANIFEST_PATH = os.path.join(PARENT_DIR, 'trading_levels.json')
 
-MASTER_DATA = json.load(open(MANIFEST_PATH, 'r'))
+MASTER_DATA = json.load(open(MANIFEST_PATH, 'r')) if os.path.exists(MANIFEST_PATH) else {}
 ACTIVE_TRADES = {}
 TELEMETRY = {}
-# Dynamically load all playbook modules from src/playbooks/
+
 def load_all_dynamic_playbooks():
     loaded = {}
     pb_files = glob.glob("src/playbooks/*_playbook.py")
@@ -147,12 +146,11 @@ def load_all_dynamic_playbooks():
             mod = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(mod)
             loaded[ticker] = mod
-        except Exception as e:
+        except Exception:
             pass
     return loaded
 
 PLAYBOOKS = load_all_dynamic_playbooks()
-
 
 CONTRACT_MULTIPLIER = 100
 DEFAULT_DELTA = 0.50
@@ -228,7 +226,6 @@ def init_account_ledger(db_path="harm_telemetry.db", starting_capital=2000.00):
             conn.commit()
             print(f"[✓] Initialized account ledger for {today_str} with ${starting_capital:,.2f} settled cash.")
         
-        # Ensure occ_symbol column exists in trades table
         try:
             cursor.execute("ALTER TABLE trades ADD COLUMN occ_symbol TEXT;")
             conn.commit()
@@ -340,7 +337,7 @@ def log_trade_to_database(ticker, spot_price, stop_loss=None, shares=1.0, direct
         take_profit = round(opt_premium * 1.50, 2)
 
         item = {
-            'tenant_id': 'default',
+            'tenant_id': os.getenv('TENANT_ID', 'default'),
             'trade_id': trade_id,
             'ticker': ticker,
             'timestamp': timestamp,
@@ -411,7 +408,6 @@ def get_ticker_candles_and_vwap(symbol, db_path="harm_telemetry.db"):
     return [], 0.0
 
 def execute_order(symbol, ticker, quantity, side, limit_price=None, stop_loss=None):
-    # Guard Check: Verify active position does not already exist in DynamoDB
     try:
         dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
         table = dynamodb.Table('HarmonizedTrades')
@@ -495,12 +491,6 @@ def execute_order(symbol, ticker, quantity, side, limit_price=None, stop_loss=No
         return False
 
 def safe_eval_playbook_entry(pb, method_name, candles_list, price_val, vwap_val, target_level, velocity=0.5):
-    """
-    Intelligently inspects playbook parameter signatures and return types:
-    - Requires minimum 5 tick candles before evaluating.
-    - Filters fallback triggers unless price is within 0.15%-0.50% proximity window.
-    - Safely coerces signal booleans and numerical contract quantities.
-    """
     if not hasattr(pb, method_name):
         return False, 1.0
     func = getattr(pb, method_name)
@@ -512,17 +502,13 @@ def safe_eval_playbook_entry(pb, method_name, candles_list, price_val, vwap_val,
     first_param = params[0].lower() if params else ""
     expects_candles = any(keyword in first_param for keyword in ["candle", "history", "df", "ohlc", "data"])
     
-    # GUARDRAIL 1: Require minimum candle history buffer before running strategy math
     if expects_candles:
         if len(candles_list) < 5:
             return False, 1.0
         args = [candles_list, price_val, vwap_val, velocity]
     else:
-        # GUARDRAIL 2: Tighten proximity gap. Reject 0.00% gap (target_level == price fallback)
         if price_val <= 0 or target_level <= 0:
             return False, 1.0
-        # Guardrail check bypassed: allow playbook logic to govern entry criteria directly
-        pass
         args = [price_val, target_level, velocity]
         
     padded_args = args[:param_count]
@@ -568,35 +554,95 @@ def safe_eval_playbook_entry(pb, method_name, candles_list, price_val, vwap_val,
         return False, 1.0
 
 class LiveBot:
-    """
-    Core LiveBot Execution Engine & CSO Entry Optimizer.
-    """
     def __init__(self):
         self.active_trades = ACTIVE_TRADES
         self.master_data = MASTER_DATA
         self.playbooks = PLAYBOOKS
 
     def calculate_cso_entry_price(self, bid: float, ask: float, cso_ev_score: float, momentum_state: str) -> float:
-        """
-        Dynamically calculates a competitive limit entry price inside the spread
-        based on live Bid/Ask quotes, micro-momentum, and Gemini CSO EV score.
-        """
         spread = max(0.01, ask - bid)
-        
-        # 1. Base Strategy: Target Midpoint (50% spread)
         aggression = 0.50 
         
-        # 2. Adjust for Micro-Momentum and CSO EV
         if momentum_state == "HIGH_IMPULSE" and cso_ev_score > 500:
-            aggression = 0.70  # Aggressive fill: step up to 70% toward Ask on strong momentum
+            aggression = 0.70 
         elif cso_ev_score < 0:
-            return None        # Negative EV: Abort fill completely
+            return None 
         elif spread > 0.15:
-            aggression = 0.30  # Wide spread: Stay passive near Bid (30%) to prevent slippage
+            aggression = 0.30 
 
-        # 3. Round to standard 2-decimal option strike step
         optimal_limit = round(bid + (spread * aggression), 2)
         return optimal_limit
+
+def process_tick_event(sym, price):
+    tick_queue.put((sym, datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"), float(price)))
+    
+    if sym in MASTER_DATA and isinstance(MASTER_DATA[sym], dict):
+        MASTER_DATA[sym]["last_price"] = float(price)
+        sup = MASTER_DATA[sym].get("support", [])
+        res = MASTER_DATA[sym].get("resistance", [])
+        
+        if len(sup) >= 2 and len(res) >= 2:
+            armed = (sup[0] <= float(price) <= sup[1]) or (res[0] <= float(price) <= res[1])
+            MASTER_DATA[sym]["execution_armed"] = armed
+            MASTER_DATA[sym]["status"] = "ARMED" if armed else "WAITING"
+        
+        try:
+            with open(MANIFEST_PATH, "w") as mf:
+                json.dump(MASTER_DATA, mf, indent=2)
+        except Exception:
+            pass
+
+    if sym in PLAYBOOKS:
+        regime = evaluate_ticker_risk(sym)
+        
+        try:
+            conn_chk = sqlite3.connect("harm_telemetry.db", timeout=5.0)
+            cursor_chk = conn_chk.cursor()
+            cursor_chk.execute("SELECT COUNT(*) FROM trades WHERE ticker = ? AND exit_status = 'ACTIVE'", (sym,))
+            is_already_active = cursor_chk.fetchone()[0] > 0
+            conn_chk.close()
+        except Exception:
+            is_already_active = False
+
+        if is_already_active or ACTIVE_TRADES.get(sym):
+            ACTIVE_TRADES[sym] = True
+            return
+        else:
+            pb = PLAYBOOKS[sym]
+            candles_list, current_vwap = get_ticker_candles_and_vwap(sym)
+            target_level = MASTER_DATA.get(sym, {}).get("support_a") or MASTER_DATA.get(sym, {}).get("resistance_a") or float(price)
+            velocity = 0.5
+
+            call_sig, call_shares = safe_eval_playbook_entry(pb, 'evaluate_call_entry', candles_list, float(price), current_vwap, target_level, velocity)
+            put_sig, put_shares   = safe_eval_playbook_entry(pb, 'evaluate_put_entry', candles_list, float(price), current_vwap, target_level, velocity)
+
+            if call_sig or put_sig:
+                direction = "CALL" if call_sig else "PUT"
+                sig_shares = call_shares if call_sig else put_shares
+                
+                occ_symbol = fetch_occ_option_symbol(sym, direction, float(price))
+                opt_quote = get_live_quote(occ_symbol) if occ_symbol else get_live_quote(sym)
+                opt_bid = float(opt_quote.get('bid', 0.0))
+                opt_ask = float(opt_quote.get('ask', 0.0))
+                
+                if opt_ask <= 0 or opt_bid <= 0:
+                    print(f"[GUARD BLOCKED] {sym} {direction}: Invalid Option Quote (Bid: ${opt_bid}, Ask: ${opt_ask})")
+                    return
+
+                spread_pct = ((opt_ask - opt_bid) / opt_ask) * 100.0
+                if spread_pct > 8.0:
+                    print(f"[GUARD BLOCKED] {sym} {direction}: Spread too wide ({spread_pct:.2f}% | Bid: ${opt_bid}, Ask: ${opt_ask})")
+                    return
+
+                print(f"[🚀] SIGNAL & LIQUIDITY CONFIRMED FOR {sym} ({direction}) AT Spot ${price} | Option Ask ${opt_ask:.2f}")
+                stop_lvl = round(opt_ask * 0.80, 2)
+
+                if execute_order(sym, sym, sig_shares, direction, limit_price=float(price), stop_loss=stop_lvl):
+                    try:
+                        dispatch_discord_alert(sym, float(price), 'ENTRY')
+                    except Exception:
+                        pass
+                    ACTIVE_TRADES[sym] = True
 
 def on_message(ws, message):
     if not is_market_hours():
@@ -608,91 +654,17 @@ def on_message(ws, message):
         for e in events:
             if e.get("type") == "trade":
                 sym, price = e.get("symbol"), e.get("price")
-                tick_queue.put((sym, datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f"), float(price)))
                 print(f"[+] TICKER HIT -> {sym}: ${price}")
-                
-                if sym in MASTER_DATA and isinstance(MASTER_DATA[sym], dict):
-                    MASTER_DATA[sym]["last_price"] = float(price)
-                    sup = MASTER_DATA[sym].get("support", [])
-                    res = MASTER_DATA[sym].get("resistance", [])
-                    
-                    if len(sup) >= 2 and len(res) >= 2:
-                        armed = (sup[0] <= float(price) <= sup[1]) or (res[0] <= float(price) <= res[1])
-                        MASTER_DATA[sym]["execution_armed"] = armed
-                        MASTER_DATA[sym]["status"] = "ARMED" if armed else "WAITING"
-                    
-                    try:
-                        with open(MANIFEST_PATH, "w") as mf:
-                            json.dump(MASTER_DATA, mf, indent=2)
-                    except Exception:
-                        pass
-
-                if sym in PLAYBOOKS:
-                    regime = evaluate_ticker_risk(sym)
-                    
-                    # Before executing or placing an order for a ticker:
-                    try:
-                        conn_chk = sqlite3.connect("harm_telemetry.db", timeout=5.0)
-                        cursor_chk = conn_chk.cursor()
-                        cursor_chk.execute("SELECT COUNT(*) FROM trades WHERE ticker = ? AND exit_status = 'ACTIVE'", (sym,))
-                        is_already_active = cursor_chk.fetchone()[0] > 0
-                        conn_chk.close()
-                    except Exception:
-                        is_already_active = False
-
-                    if is_already_active or ACTIVE_TRADES.get(sym):
-                        ACTIVE_TRADES[sym] = True
-                        print(f"[!] Skipped {sym}: Active position already exists in database.")
-                        continue
-                    else:
-                        pb = PLAYBOOKS[sym]
-                        candles_list, current_vwap = get_ticker_candles_and_vwap(sym)
-                        target_level = MASTER_DATA.get(sym, {}).get("support_a") or MASTER_DATA.get(sym, {}).get("resistance_a") or float(price)
-                        velocity = 0.5
-
-                        call_sig, call_shares = safe_eval_playbook_entry(pb, 'evaluate_call_entry', candles_list, float(price), current_vwap, target_level, velocity)
-                        put_sig, put_shares   = safe_eval_playbook_entry(pb, 'evaluate_put_entry', candles_list, float(price), current_vwap, target_level, velocity)
-
-                        if call_sig or put_sig:
-                            direction = "CALL" if call_sig else "PUT"
-                            sig_shares = call_shares if call_sig else put_shares
-                            
-                            # --- 1. SPREAD & MOMENTUM LOOK-AHEAD GUARD ---
-                            occ_symbol = fetch_occ_option_symbol(sym, direction, float(price))
-                            opt_quote = get_live_quote(occ_symbol) if occ_symbol else get_live_quote(sym)
-                            opt_bid = float(opt_quote.get('bid', 0.0))
-                            opt_ask = float(opt_quote.get('ask', 0.0))
-                            
-                            # Check 1: Ensure valid bid/ask liquidity
-                            if opt_ask <= 0 or opt_bid <= 0:
-                                print(f"[GUARD BLOCKED] {sym} {direction}: Invalid Option Quote (Bid: ${opt_bid}, Ask: ${opt_ask})")
-                                continue
-
-                            # Check 2: Spread Threshold (Max 8% slippage risk)
-                            spread_pct = ((opt_ask - opt_bid) / opt_ask) * 100.0
-                            if spread_pct > 8.0:
-                                print(f"[GUARD BLOCKED] {sym} {direction}: Spread too wide ({spread_pct:.2f}% | Bid: ${opt_bid}, Ask: ${opt_ask})")
-                                continue
-
-                            # --- 2. PROCEED TO EXECUTION ---
-                            print(f"[🚀] SIGNAL & LIQUIDITY CONFIRMED FOR {sym} ({direction}) AT Spot ${price} | Option Ask ${opt_ask:.2f}")
-                            # Stop loss set as 20% risk on option premium ask
-                            stop_lvl = round(opt_ask * 0.80, 2)
-
-                            if execute_order(sym, sym, sig_shares, direction, limit_price=float(price), stop_loss=stop_lvl):
-                                try:
-                                    dispatch_discord_alert(sym, float(price), 'ENTRY')
-                                except Exception:
-                                    pass
-                                ACTIVE_TRADES[sym] = True
+                process_tick_event(sym, price)
     except Exception as err:
         print(f"[-] LiveBot Loop Exception: {err}", file=sys.stderr)
 
 def get_streaming_session():
-    token = os.getenv("TRADIER_TOKEN")
+    base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
+    token = os.getenv("TRADIER_SANDBOX_TOKEN") if "sandbox" in base_url.lower() else os.getenv("TRADIER_TOKEN")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     try:
-        r = requests.post("https://api.tradier.com/v1/markets/events/session", headers=headers)
+        r = requests.post(f"{base_url}/markets/events/session", headers=headers, data={})
         if r.status_code == 200:
             return r.json().get("stream", {})
     except Exception as e:
@@ -704,8 +676,9 @@ def on_ws_open(ws):
     session_id = session_info.get("sessionid")
     
     if session_id:
+        active_tickers = [t.strip() for t in os.getenv("ACTIVE_TICKERS", "NVDA,AAPL,TSLA,PLTR,RIVN,SOFI,F,AAL").split(",") if t.strip()]
         auth_payload = {
-            "symbols": ["SPY", "QQQ", "IWM", "NVDA", "TSLA", "AAPL", "AMZN", "GOOGL", "AMD", "META", "NFLX", "PLTR", "SOFI", "F", "AAL", "INTC", "RIVN", "HOOD", "BAC", "SNAP", "MARA", "CCL", "UBER", "NKE"],
+            "symbols": active_tickers,
             "lineage": "true",
             "sessionid": session_id,
             "breakdown": "true"
@@ -731,5 +704,50 @@ def run_ws_loop():
             print(f"[-] WS Error: {e}. Reconnecting in 5s...", file=sys.stderr)
             time.sleep(5)
 
+def run_rest_polling_loop():
+    base_url = os.getenv("TRADIER_BASE_URL", "https://sandbox.tradier.com/v1")
+    token = os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN")
+    tickers = [t.strip() for t in os.getenv("ACTIVE_TICKERS", "NVDA,AAPL,TSLA,PLTR,RIVN,SOFI,F,AAL").split(",") if t.strip()]
+    
+    print(f"[ℹ️ SANDBOX MODE] Tradier streaming restricted. Engaging REST Quote Poller for: {tickers}")
+    
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json"
+    }
+    
+    while True:
+        try:
+            if is_market_hours():
+                symbols_str = ",".join(tickers)
+                res = requests.get(
+                    f"{base_url}/markets/quotes",
+                    params={"symbols": symbols_str},
+                    headers=headers,
+                    timeout=5
+                )
+                if res.status_code == 200:
+                    quotes = res.json().get("quotes", {}).get("quote", [])
+                    if isinstance(quotes, dict):
+                        quotes = [quotes]
+                    
+                    for q in quotes:
+                        sym = q.get("symbol")
+                        price = q.get("last") or q.get("close")
+                        if sym and price:
+                            process_tick_event(sym, price)
+                else:
+                    print(f"[!] REST Polling Warning ({res.status_code}): {res.text}")
+        except Exception as e:
+            print(f"[!] REST Poller Exception: {e}", file=sys.stderr)
+        
+        time.sleep(5)
+
 if __name__ == "__main__":
-    run_ws_loop()
+    env = os.getenv("EXECUTION_ENV", "SANDBOX").upper()
+    base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
+    
+    if env == "SANDBOX" or "sandbox" in base_url.lower():
+        run_rest_polling_loop()
+    else:
+        run_ws_loop()
