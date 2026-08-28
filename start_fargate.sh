@@ -37,9 +37,9 @@ echo "[3/4] Launching CSO Master Exit Monitor with auto-restart loop..."
 (
   until 
     if [ -f "src/gex_exit_monitor.py" ]; then
-      python3 -u src/gex_exit_monitor.py >> /tmp/gex_monitor.log 2>&1
+      python3 -u src/gex_exit_monitor.py 2>&1
     elif [ -f "run_gex_monitor.py" ]; then
-      python3 -u run_gex_monitor.py >> /tmp/gex_monitor.log 2>&1
+      python3 -u run_gex_monitor.py 2>&1
     else
       echo "[-] Exit monitor script missing." >&2 && exit 1
     fi
