@@ -136,7 +136,7 @@ def sync():
         val["spot_price"] = spot
         val["vwap"] = vwap
 
-        target = float(val.get('call_target') or val.get('spot_target_call') or (spot * 1.005))
+        target = float(val.get('target') or val.get('call_target') or 0.0)
         threshold = get_dynamic_proximity_threshold(spot)
         gap_pct = abs(spot - target) / spot if spot > 0 else 1.0
 
@@ -148,19 +148,7 @@ def sync():
             if abs(spot - sup[0]) / spot > 0.02:
                 stale = True
 
-        if (not sup or sup == [0.0, 0.0] or stale) and spot > 0:
-            call_target = round(spot * 1.005, 2)
-            put_target = round(spot * 0.995, 2)
-            
-            sup = [round(put_target * 0.99, 2), put_target]
-            res = [call_target, round(call_target * 1.01, 2)]
-            
-            val["call_target"] = call_target
-            val["put_target"] = put_target
-            val["spot_target_call"] = call_target
-            val["spot_target_put"] = put_target
-            val["support_zone"] = sup
-            val["resistance_zone"] = res
+        # Auto-fallback disabled
 
         if sup and isinstance(sup, list) and len(sup) > 0:
             val["support_a"] = sup[0]

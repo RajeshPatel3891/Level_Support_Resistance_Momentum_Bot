@@ -453,8 +453,12 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
     ask = float(quote.get("ask") or 0.0)
 
     if bid <= 0 or ask <= 0:
-        log_msg(f"[⛔ EXECUTION ABORTED] Quote book empty for {occ_symbol}.")
-        return False, 0.0, ""
+        if os.getenv("EXECUTION_ENV") == "SANDBOX":
+            log_msg(f"[⚠️ SANDBOX OVERRIDE] Injecting simulated bid/ask spread for {occ_symbol}.")
+            bid, ask = 1.45, 1.50
+        else:
+            log_msg(f"[⛔ EXECUTION ABORTED] Quote book empty for {occ_symbol}.")
+            return False, 0.0, ""
 
     mid_price = round((bid + ask) / 2.0, 2)
     if mid_price <= 0:

@@ -1,10 +1,6 @@
 #!/usr/bin/env python3
 """
 HARM.AI // LIVE PNL, FILL QUALITY & 0-100 CONFIDENCE MONITOR
-===============================================================================
-Polls active positions, computes persistent fill scores, and displays live
-composite trade confidence (0-100 scale) based on microstructure, VWAP,
-SPY/QQQ market beta, and time-of-day liquidity gates.
 """
 
 import os
@@ -56,7 +52,6 @@ def check_gex_engagement(underlying, opt_type, underlying_spot, gex_data):
     if not ticker_gex:
         return "⚠️ NO LEVEL"
     
-    # Dynamic target resolution across key variants
     call_target = 0.0
     put_target = 0.0
 
@@ -101,15 +96,16 @@ def safe_fetch_json(url, headers, params=None, timeout=3.0):
 
 def poll_pnl_loop(env="SANDBOX", interval=2.5):
     env_upper = env.upper()
+    acct_env = os.getenv("TRADIER_ACCOUNT_ID", "")
     
     if env_upper in ["PROD", "PRODUCTION", "LIVE"]:
         token = os.getenv("TRADIER_TOKEN", "fyR75AACwlIYhkMyev1doRh6gnSr")
-        acct = os.getenv("TRADIER_ACCOUNT_ID", "6YB87601")
+        acct = acct_env if acct_env and not acct_env.startswith("VA") else "6YB87601"
         base_url = "https://api.tradier.com/v1"
         display_env = "PROD"
     else:
-        token = os.getenv("TRADIER_SANDBOX_TOKEN", "hcY1t0sY8RZmcsfVjQCA41ecAkFT")
-        acct = "VA83416608"
+        token = os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN") or "CvtMHhNSylWy5KLTTvU29UD3zMdb"
+        acct = acct_env if acct_env.startswith("VA") else "VA83416608"
         base_url = "https://sandbox.tradier.com/v1"
         display_env = "SANDBOX"
 

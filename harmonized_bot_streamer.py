@@ -70,7 +70,12 @@ class HarmonizedBotStreamer:
         conn = sqlite3.connect(DB_FILE)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM trades WHERE exit_status = 'ACTIVE'")
+        import os
+        target_env = os.getenv("EXECUTION_ENV", os.getenv("TRADIER_ENV", "SANDBOX")).upper()
+        if target_env in ["PROD", "PRODUCTION", "LIVE"]:
+            cursor.execute("SELECT * FROM trades WHERE exit_status = 'ACTIVE' AND (execution_env = 'PRODUCTION' OR is_live = 1)")
+        else:
+            cursor.execute("SELECT * FROM trades WHERE exit_status = 'ACTIVE' AND (execution_env = 'SANDBOX' OR is_live = 0)")
         rows = cursor.fetchall()
         conn.close()
 
