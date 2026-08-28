@@ -430,6 +430,13 @@ def fetch_occ_symbol(underlying, option_type, spot_price):
 # ===============================================================================
 
 def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_wait_seconds=5):
+    # HARD SECURITY FLOOR - ENTRY GUARD
+    import os
+    env_chk = os.getenv("EXECUTION_ENV", "SANDBOX").upper()
+    acct_chk = os.getenv("TRADIER_ACCOUNT_ID", "")
+    if env_chk == "SANDBOX" and acct_chk == "6YB87601":
+        print("[🚨 SECURITY BLOCK] Aborting Tradier order! SANDBOX process detected Live Prod Account ID (6YB87601).")
+        return None
     """
     Submits a strict Limit Order at Midpoint ((Bid + Ask) / 2).
     Holds for 5 seconds. If unfilled, CANCELS and walks away—NO spread crossing.

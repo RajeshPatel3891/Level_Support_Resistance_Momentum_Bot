@@ -112,6 +112,12 @@ def execute_exit(base_url, account_id, symbol, qty, reason, headers, active_exit
             'type': 'market',
             'duration': 'day'
         }
+        # HARD SECURITY FLOOR
+        import os
+        env_chk = os.getenv("EXECUTION_ENV", "SANDBOX").upper()
+        if env_chk == "SANDBOX" and str(account_id) == "6YB87601":
+            print("[🚨 SECURITY BLOCK] Bracket Manager blocked order dispatch to Live Prod Account ID (6YB87601) under SANDBOX mode.")
+            return None
         r = requests.post(f"{base_url}/accounts/{account_id}/orders", data=payload, headers=headers)
         if r.status_code == 200:
             print(f"[✓] {reason} executed cleanly via new Market Order ID: {r.json().get('order', {}).get('id')}")
