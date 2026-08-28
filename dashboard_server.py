@@ -578,7 +578,8 @@ INDEX_HTML_TEMPLATE = r"""
 
     <!-- 
 <div id="active-cards-container" style="display: flex; flex-wrap: wrap; gap: 15px; margin: 20px 0;"></div>
-<div style="font-size: 1.1em; font-weight: bold; margin-bottom: 10px;">LEVEL PROXIMITY MATRIX</div>
+<div style="font-size: 1.1em; font-weight: bold; margin-bottom: 10px;"><div id="active-cards-container" style="display: flex; flex-wrap: wrap; gap: 15px; margin: 20px 0;"></div>
+LEVEL PROXIMITY MATRIX</div>
  -->
     <div style="margin-top: 25px; margin-bottom: 25px;">
         <h3 style="color: #8f9bba; font-size: 14px; letter-spacing: 1px; margin-bottom: 12px; font-weight: 700;">LEVEL PROXIMITY MATRIX</h3>
@@ -812,6 +813,49 @@ async function renderActiveCards() {
 }
 setInterval(renderActiveCards, 3000);
 document.addEventListener("DOMContentLoaded", renderActiveCards);
+</script>
+
+<script>
+async function renderActiveCards() {
+    try {
+        const res = await fetch('/dashboard_data.json');
+        const data = await res.json();
+        const container = document.getElementById('active-cards-container');
+
+        const items = data.active_positions || data.active_trade_cards || [];
+        if (items.length === 0) {
+            container.innerHTML = '<div style="color: #6c757d; font-style: italic;">No Active Positions Deployed</div>';
+            return;
+        }
+
+        container.innerHTML = items.map(item => `
+            <div style="background: #1e222d; border: 1px solid #2a2e3d; border-radius: 8px; padding: 15px; width: 320px;">
+                <div style="display: flex; justify-content: space-between; border-bottom: 1px solid #2a2e3d; padding-bottom: 8px; margin-bottom: 10px;">
+                    <span style="font-weight: bold; color: #fff;">${item.ticker} <span style="color: #00bc8c;">${item.direction}</span></span>
+                    <span style="background: #2b3245; padding: 2px 8px; border-radius: 4px; color: #ffb74d; font-size: 0.85em;">${item.gex_engagement || 'TARGET'}</span>
+                </div>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px; font-size: 0.9em; color: #ccc;">
+                    <div><span style="color: #848e9c;">Entry:</span> $${item.entry_price}</div>
+                    <div><span style="color: #848e9c;">Bid/Ask:</span> $${item.current_bid}/$${item.current_ask}</div>
+                    <div><span style="color: #848e9c;">Fill Quality:</span> <b style="color:#00bc8c;">${item.fill_quality_score}/10</b></div>
+                    <div><span style="color: #848e9c;">Confidence:</span> <b>${item.confidence_status || item.confidence_score}</b></div>
+                    <div><span style="color: #848e9c;">Spot:</span> $${item.spot_price}</div>
+                    <div><span style="color: #848e9c;">VWAP:</span> $${item.vwap}</div>
+                </div>
+                <div style="margin-top: 12px; padding-top: 8px; border-top: 1px dashed #2a2e3d; display: flex; justify-content: space-between;">
+                    <span style="color: #848e9c;">PNL:</span>
+                    <span style="font-weight: bold; color: ${item.pnl_dollars >= 0 ? '#00c853' : '#ff5252'};">
+                        ${item.pnl_dollars >= 0 ? '+' : ''}$${item.pnl_dollars} (${item.pnl_pct}%)
+                    </span>
+                </div>
+            </div>
+        `).join('');
+    } catch (e) {
+        console.error(e);
+    }
+}
+setInterval(renderActiveCards, 3000);
+document.addEventListener('DOMContentLoaded', renderActiveCards);
 </script>
 </body>
 
