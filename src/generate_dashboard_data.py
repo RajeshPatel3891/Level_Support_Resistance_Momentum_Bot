@@ -259,7 +259,8 @@ def generate_data():
     with open(OUTPUT_PATH, "w") as f:
         json.dump(payload, f, indent=2)
 
-    print(f"[✓] Re-compiled {len(active_cards)} active, {len(closed_trades)} closed. Realized PnL: ${total_realized_pnl:.2f}")
+    guards_summary = [f"{c.get('ticker')}: GEX={c.get('gex_engagement')} | CONF={c.get('confidence_status')}" for c in active_cards]
+    print(f"[✓] Re-compiled {len(active_cards)} active trade cards | Telemetry Guards: {guards_summary or 'NOMINAL'}")
     return payload
 
 if __name__ == "__main__":
