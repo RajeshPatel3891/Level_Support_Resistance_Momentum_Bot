@@ -72,7 +72,7 @@ def check_gex_engagement(underlying, opt_type, underlying_spot, gex_data):
 
 def generate_data():
     env = os.getenv("EXECUTION_ENV", "SANDBOX").upper()
-    table_name = os.getenv("DYNAMODB_TABLE", "HarmonizedTrades_Sandbox" if env == "SANDBOX" else "HarmonizedTrades")
+    table_name = os.getenv("DYNAMODB_TABLE", "HarmonizedTrades")
     tenant_id = os.getenv("TENANT_ID", "COMPANY_A_SANDBOX" if env == "SANDBOX" else "COMPANY_A_PROD")
     region = os.getenv("AWS_REGION", "us-east-1")
 
@@ -145,7 +145,7 @@ def generate_data():
     try:
         dynamodb = boto3.resource('dynamodb', region_name=region)
         table = dynamodb.Table(table_name)
-        res = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE') & Attr('tenant_id').eq(tenant_id))
+        res = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE'))
         raw_items = res.get('Items', [])
     except Exception as e:
         print(f"[-] DynamoDB Scan Error: {e}")
