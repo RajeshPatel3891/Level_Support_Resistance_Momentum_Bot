@@ -1512,7 +1512,8 @@ def auto_scout_levels():
         smart_cso_injector = None
 
     env_tickers = os.getenv("ACTIVE_TICKERS", "")
-    target_pool = [t.strip() for t in env_tickers.split(",") if t.strip()] if env_tickers else ["NVDA", "AAPL", "PLTR", "SOFI", "HOOD", "F", "AAL", "CCL"]
+    full_manifest = ["SPY", "QQQ", "IWM", "NVDA", "TSLA", "AAPL", "AMZN", "GOOGL", "AMD", "META", "NFLX", "PLTR", "SOFI", "F", "AAL", "INTC", "RIVN", "HOOD", "BAC", "SNAP", "MARA", "CCL", "UBER", "NKE"]
+    target_pool = [t.strip() for t in env_tickers.split(",") if t.strip()] if env_tickers else full_manifest
     
     # Sector ETF Mapping Matrix
     sector_map = {
