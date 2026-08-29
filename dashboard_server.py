@@ -479,68 +479,7 @@ INDEX_HTML_TEMPLATE = r"""
         <!-- Active Position Cards Render Here -->
     </div>
       
-    <div class="space-y-3 mb-6">
-        {% for trade in trades %}
-        <div class="bg-gray-900/60 p-3 rounded-xl border {% if trade.near_target %}border-emerald-500 shadow-lg shadow-emerald-950/50{% else %}border-gray-800{% endif %} flex flex-col gap-2">
-            <div class="flex justify-between items-center w-full">
-                <div class="space-y-1">
-                    <div class="flex items-center space-x-2">
-                        <span class="font-black text-sm">{{ trade.ticker }}</span>
-                        <span class="text-[10px] bg-amber-950 text-amber-300 border border-amber-800 px-1.5 py-0.5 rounded font-bold">{{ trade.shares | int }}x</span>
-                        <span class="text-[10px] {% if trade.direction == 'PUT' %}bg-rose-950 text-rose-300 border border-rose-800{% else %}bg-emerald-950 text-emerald-300 border border-emerald-800{% endif %} px-1.5 py-0.5 rounded font-bold uppercase">{{ trade.direction or 'CALL' }}</span>
-                        <span class="text-[9px] bg-purple-950 text-purple-300 border border-purple-800 px-1.5 py-0.5 rounded font-bold">
-                            PROB: {{ trade.hit_probability }}
-                        </span>
-                        <span class="text-[9px] {{ trade.rr_bg }} {{ trade.rr_text }} {{ trade.rr_border }} border px-1.5 py-0.5 rounded font-bold">
-                            R:R {{ trade.rr_ratio }}
-                        </span>
-                        <span class="text-[9px] {{ trade.cso_badge_bg }} {{ trade.cso_badge_text }} px-1.5 py-0.5 rounded font-black tracking-wide">
-                            CSO: {{ trade.cso_recommendation }}
-                        </span>
-                    </div>
-                     
-                    <div class="text-xs text-gray-400">
-                        Live: <b class="text-gray-200">{{ trade.price }}</b> | Cost: <b class="text-gray-200">{{ trade.basis }}</b> | Stop: <b class="text-amber-400">{{ trade.stop_display }}</b>
-                    </div>
-
-                    <div class="text-[11px] text-purple-400">
-                        GEX Target: <strong class="text-purple-300">{{ trade.gex_target_str }}</strong> 
-    <span class="inline-flex items-center gap-1 bg-purple-950/60 border border-purple-500/40 rounded px-1.5 py-0.5 text-[10px] ml-1">
-        <button type="button" onclick="adjustTP('{{ trade.ticker }}', -1.0)" class="text-purple-300 hover:text-white font-bold px-1 hover:bg-purple-800/50 rounded transition-colors">-</button>
-        <span id="tp-val-{{ trade.ticker }}" class="text-purple-300 font-bold">(Dist: {{ trade.gex_dist }})</span>
-        <button type="button" onclick="adjustTP('{{ trade.ticker }}', 1.0)" class="text-purple-300 hover:text-white font-bold px-1 hover:bg-purple-800/50 rounded transition-colors">+</button>
-    </span>
-                    </div>
-
-                    <div class="flex items-center space-x-3 text-[10px] pt-1 border-t border-gray-800/80">
-                        <span class="text-emerald-400 font-bold">
-                            🎯 TP Return: {{ trade.potential_tp_return }}
-                        </span>
-                        <span class="text-red-400 font-bold">
-                            🛑 SL Risk: {{ trade.potential_sl_risk }}
-                        </span>
-                        <button type="button" onclick="toggleActiveStream('{{ trade.ticker }}')" class="bg-indigo-950 hover:bg-indigo-900 text-indigo-300 border border-indigo-800 text-[9px] px-1.5 py-0.5 rounded font-bold uppercase transition-colors">
-                            📡 LOGS
-                        </button>
-                    </div>
-                </div>
-
-                <div class="text-right flex items-center space-x-3">
-                    <div>
-                        <div class="font-bold text-sm {{ trade.pnl_class }}">{{ trade.dollar_pnl }}</div>
-                        <div class="text-[10px] {{ trade.pnl_class }}">{{ trade.pnl_pct }}</div>
-                    </div>
-                    <form action="/close-position/{{ trade.ticker }}" method="POST" onsubmit="return confirm('Close {{ trade.ticker }} position?');">
-                        <button type="submit" class="bg-red-950/80 hover:bg-red-800 text-red-300 border border-red-800 text-[10px] px-2 py-1 rounded font-bold uppercase">
-                            Close
-                        </button>
-                    </form>
-                </div>
-            </div>
-            <pre id="active-console-{{ trade.ticker }}" class="hidden p-2 bg-black text-emerald-400 font-mono text-[10px] rounded max-h-36 overflow-y-auto whitespace-pre-wrap leading-tight border border-gray-800 text-left w-full"></pre>
-        </div>
-        {% endfor %}
-    </div>
+<div id="active-cards-container" class="space-y-3 mb-6 w-full"></div>
 
     <div style="margin-top: 25px; margin-bottom: 25px;">
         <h3 style="color: #8f9bba; font-size: 14px; letter-spacing: 1px; margin-bottom: 12px; font-weight: 700;">LEVEL PROXIMITY MATRIX</h3>
