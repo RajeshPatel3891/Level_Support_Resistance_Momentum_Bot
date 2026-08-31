@@ -330,7 +330,8 @@ def search_smart_option_chain(ticker, direction="CALL", spot_price=0.0):
             valid_contracts.append(opt)
              
         if valid_contracts:
-            best_opt = min(valid_contracts, key=lambda x: abs(float(x.get("ask", 0)) - 0.80))
+            # Targeted option premium search adjusted to $0.65 ($65 contract target)
+            best_opt = min(valid_contracts, key=lambda x: abs(float(x.get("ask", 0)) - 0.65))
             return best_opt
     except Exception as e:
         log_msg(f"[!] Chain search error for {ticker}: {e}", "SCJ_ENGINE")
@@ -742,7 +743,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
         else:
             log_msg(f"🎯 [PREDICTIVE SCORE PASSED] Score: {pred_score}/10.0 | Dispatching Order Walker...", "SCJ_ENGINE")
 
-        ask_price = float(best_opt.get("ask") or 0.80)
+        ask_price = float(best_opt.get("ask") or 0.65)
         log_msg(f"[✓ OPTION CHAIN MATCH] Contract: {occ_symbol} | Ask: ${ask_price:.2f}", "SCJ_ENGINE")
     else:
         log_msg(f"[⚠️ FALLBACK] No liquid contract found. Generating synthetic OCC symbol...", "SCJ_ENGINE")
