@@ -6,7 +6,7 @@ if os.getenv('EXECUTION_ENV', '').upper() == 'SANDBOX':
         os.environ['TRADIER_TOKEN'] = os.getenv('TRADIER_SANDBOX_TOKEN')
 
 # ==============================================================================
-# HARM.AI UNIFIED CHIEF STRATEGY OFFICER (CSO) MASTER EXIT MONITOR
+# HARM.AI OPTIMIZED CHIEF STRATEGY OFFICER (CSO) MASTER EXIT MONITOR
 # ==============================================================================
 import os
 import sys
@@ -28,7 +28,7 @@ else:
     load_dotenv(override=True)
 
 MANIFEST_PATH = "trading_levels.json"
-MTTP_MAX_MINUTES = int(os.getenv("MTTP_MAX_MINUTES", 45))
+MTTP_MAX_MINUTES = int(os.getenv("MTTP_MAX_MINUTES", 15))  # Default 15m Scalp Horizon
 
 def get_tradier_token():
     token = os.getenv('TRADIER_TOKEN') or os.getenv('TRADIER_SANDBOX_TOKEN') or os.getenv('TRADIER_ACCESS_TOKEN')
@@ -47,9 +47,7 @@ TRADIER_TOKEN = get_tradier_token()
 TRADIER_ACCOUNT_ID = os.getenv("TRADIER_ACCOUNT_ID")
 TRADIER_BASE_URL = os.getenv("TRADIER_BASE_URL", "https://sandbox.tradier.com/v1")
 
-
 def is_regular_trading_hours():
-    """Verify NYSE regular trading session (09:30 - 16:00 EST, Mon-Fri)."""
     ny_tz = pytz.timezone('America/New_York')
     now = datetime.datetime.now(ny_tz)
     if now.weekday() >= 5:
@@ -58,32 +56,28 @@ def is_regular_trading_hours():
     market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
     return market_open <= now <= market_close
 
-
 def get_gex_target_info(ticker):
-    """Fetch live GEX target and spot gap from root manifest with dynamic fallback keys."""
     if os.path.exists(MANIFEST_PATH):
         try:
             with open(MANIFEST_PATH, "r") as f:
                 data = json.load(f)
-            val = data.get(ticker, {})
-            spot = float(val.get("spot", val.get("last_price", val.get("spot_price", 0.0))) or 0.0)
-            target = float(val.get("target", val.get("gex_target", val.get("call_target", val.get("put_target", 0.0)))) or 0.0)
-            gap_pct = float(val.get("gap_pct", 0.0) or 0.0)
-            return spot, target, gap_pct
+                val = data.get(ticker, {})
+                spot = float(val.get("spot", val.get("last_price", val.get("spot_price", 0.0))) or 0.0)
+                target = float(val.get("target", val.get("gex_target", val.get("call_target", val.get("put_target", 0.0)))) or 0.0)
+                gap_pct = float(val.get("gap_pct", 0.0) or 0.0)
+                return spot, target, gap_pct
         except Exception:
             pass
     return 0.0, 0.0, 0.0
 
-
 def ensure_schema():
-    """Ensure local SQLite schema supports peak prices, contract counts, and WAL mode."""
     db_file = "harm_telemetry.db"
     if os.path.exists(db_file):
         try:
             conn = sqlite3.connect(db_file, timeout=10.0)
             cursor = conn.cursor()
             cursor.execute("PRAGMA journal_mode=WAL;")
-            for col in ["exit_timestamp TEXT", "peak_price REAL", "is_runner INTEGER", "partial_pnl REAL", "min_pnl_seen REAL"]:
+            for col in ["exit_timestamp TEXT", "peak_price REAL", "is_runner INTEGER", "partial_pnl REAL", "min_pnl_seen REAL", "execution_tag TEXT DEFAULT 'SCJ'"]:
                 try:
                     cursor.execute(f"ALTER TABLE trades ADD COLUMN {col}")
                 except sqlite3.OperationalError:
@@ -93,9 +87,7 @@ def ensure_schema():
         except Exception as e:
             print(f"[-] Local SQLite schema warning: {e}")
 
-
 def get_live_quote(occ_symbol):
-    """Fetch live option mark with dynamic Live/Sandbox endpoint auto-switching."""
     token = get_tradier_token()
     if not token or not occ_symbol:
         return 0.0, os.getenv("TRADIER_BASE_URL", TRADIER_BASE_URL)
@@ -130,9 +122,7 @@ def get_live_quote(occ_symbol):
             
     return 0.0, os.getenv("TRADIER_BASE_URL", TRADIER_BASE_URL)
 
-
 def get_live_bid_ask(occ_symbol):
-    """Fetch live option bid and ask prices explicitly for realistic execution calculation."""
     token = get_tradier_token()
     base_url = os.getenv("TRADIER_BASE_URL", TRADIER_BASE_URL).rstrip('/')
     if not token or not occ_symbol:
@@ -153,9 +143,7 @@ def get_live_bid_ask(occ_symbol):
 
     return 0.0, 0.0, base_url
 
-
 def execute_tradier_close(occ_symbol, ticker, shares, base_url=None, max_wait_seconds=10):
-    """Execute sell_to_close order on Tradier API enforcing explicit OCC payload formatting."""
     token = get_tradier_token()
     account_id = os.getenv("TRADIER_ACCOUNT_ID", TRADIER_ACCOUNT_ID)
     active_base_url = (base_url or os.getenv("TRADIER_BASE_URL", TRADIER_BASE_URL)).rstrip('/')
@@ -201,12 +189,7 @@ def execute_tradier_close(occ_symbol, ticker, shares, base_url=None, max_wait_se
         print(f"[-] Tradier Close Exception for {occ_symbol}: {e}")
         return False
 
-
 def execute_tradier_close_stepped(occ_symbol, ticker, shares, base_url=None, max_wait_seconds=10):
-    """
-    Executes a stepped sell_to_close limit order trying Midpoint first,
-    stepping down toward Bid to prevent slippage on illiquid option contracts.
-    """
     token = get_tradier_token()
     account_id = os.getenv("TRADIER_ACCOUNT_ID", TRADIER_ACCOUNT_ID)
     active_base_url = (base_url or os.getenv("TRADIER_BASE_URL", TRADIER_BASE_URL)).rstrip('/')
@@ -257,9 +240,7 @@ def execute_tradier_close_stepped(occ_symbol, ticker, shares, base_url=None, max
         print(f"[-] Stepped close exception for {occ_symbol}: {e}. Falling back to standard close...")
         return execute_tradier_close(occ_symbol, ticker, shares, active_base_url, max_wait_seconds)
 
-
 def sync_local_sqlite_exit(t_id, ticker, exit_reason, exit_price, exit_timestamp, net_pnl=0.0, remaining_shares=0, dynamic_stop=None):
-    """Dual-log exits or partial scalings to local SQLite."""
     db_file = "harm_telemetry.db"
     if os.path.exists(db_file):
         try:
@@ -276,7 +257,6 @@ def sync_local_sqlite_exit(t_id, ticker, exit_reason, exit_price, exit_timestamp
             conn.close()
         except Exception as e:
             print(f"[-] Local SQLite exit sync warning: {e}")
-
 
 def get_recent_fill_price(occ_symbol, default_price=0.0):
     token = get_tradier_token()
@@ -299,9 +279,7 @@ def get_recent_fill_price(occ_symbol, default_price=0.0):
         print(f"[!] Error fetching fill price for {occ_symbol}: {e}")
     return default_price
 
-
 def synchronize_dynamo_with_tradier():
-    """Reconcile DynamoDB active state directly against Tradier live brokerage positions ground truth."""
     base_url = os.getenv('TRADIER_BASE_URL', TRADIER_BASE_URL).rstrip('/')
     token = get_tradier_token()
     account_id = os.getenv('TRADIER_ACCOUNT_ID', TRADIER_ACCOUNT_ID)
@@ -377,7 +355,7 @@ def synchronize_dynamo_with_tradier():
             actual_exit_px = get_recent_fill_price(db_occ_symbol, default_price=0.0)
             realized_pnl = round((actual_exit_px - entry_px) * shares * 100.0, 2) if actual_exit_px > 0 and entry_px > 0 else 0.0
 
-            print(f"[ℹ️ TRADIER REJECTION RECONCILED] Reconciling {ticker} ({db_occ_symbol}) in DynamoDB -> Fill Px: ${actual_exit_px:.2f} | PnL: ${realized_pnl:+.2f}")
+            print(f"[ℹ️ RECONCILED] Reconciling {ticker} ({db_occ_symbol}) -> Fill Px: ${actual_exit_px:.2f} | PnL: ${realized_pnl:+.2f}")
             try:
                 table.update_item(
                     Key={'tenant_id': tenant_id, 'trade_id': t_id},
@@ -411,6 +389,7 @@ def synchronize_dynamo_with_tradier():
                 'exit_status': 'ACTIVE',
                 'direction': 'CALL' if 'C' in symbol[len(data['ticker']):] else 'PUT',
                 'timestamp': now_str,
+                'execution_tag': 'NF',
                 'cso_notes': 'REHYDRATED_FROM_TRADIER'
             }
             try:
@@ -419,7 +398,6 @@ def synchronize_dynamo_with_tradier():
                 print(f"[-] Failed to hydrate DynamoDB for {symbol}: {e}")
 
     print("[✓ SYSTEM SYNC COMPLETE] DynamoDB perfectly matches Tradier brokerage state.")
-
 
 def evaluate_gex_exits():
     try:
@@ -454,6 +432,9 @@ def evaluate_gex_exits():
             stored_stop_loss = float(item.get('stop_loss', 0.0) or 0.0)
             is_runner = bool(item.get('is_runner', False))
             accumulated_pnl = float(item.get('partial_pnl', 0.0) or 0.0)
+            
+            exec_tag = str(item.get('execution_tag', 'SCJ')).upper()
+            strategy_mode = str(item.get('strategy', 'SMART_CSO_SCALP')).upper()
 
             if entry_price <= 0:
                 continue
@@ -476,48 +457,69 @@ def evaluate_gex_exits():
                 continue
 
             dollar_pnl = round((current_price - entry_price) * 100.0 * total_shares, 2)
-            pnl_pct = ((current_price - entry_price) / entry_price) * 100.0 if entry_price > 0 else 0.0
-
-            raw_min_seen = item.get('min_pnl_seen')
-            if raw_min_seen is None:
-                min_seen = dollar_pnl
-                table.update_item(
-                    Key={'tenant_id': tenant_id, 'trade_id': t_id},
-                    UpdateExpression="SET min_pnl_seen = :m",
-                    ExpressionAttributeValues={':m': str(min_seen)}
-                )
-            else:
-                db_min_seen = float(raw_min_seen)
-                if dollar_pnl < db_min_seen:
-                    min_seen = dollar_pnl
-                    table.update_item(
-                        Key={'tenant_id': tenant_id, 'trade_id': t_id},
-                        UpdateExpression="SET min_pnl_seen = :m",
-                        ExpressionAttributeValues={':m': str(min_seen)}
-                    )
-                else:
-                    min_seen = db_min_seen
+            pnl_pct = round(((current_price - entry_price) / entry_price) * 100.0, 2) if entry_price > 0 else 0.0
 
             peak_price = max(stored_peak, current_price)
-            peak_pnl_pct = ((peak_price - entry_price) / entry_price) * 100.0 if entry_price > 0 else 0.0
+            peak_pnl_pct = round(((peak_price - entry_price) / entry_price) * 100.0, 2) if entry_price > 0 else 0.0
 
-            if is_runner:
-                cushion = 12.0 if peak_pnl_pct >= 100.0 else 10.0
-                dynamic_stop_pct = max(3.0, peak_pnl_pct - cushion)
-                dynamic_stop = round(entry_price * (1.0 + dynamic_stop_pct / 100.0), 2)
-            elif peak_pnl_pct >= 35.0:
-                dynamic_stop = round(entry_price * (1.0 + (peak_pnl_pct - 10.0) / 100.0), 2)
-            elif peak_pnl_pct >= 20.0:
-                dynamic_stop = round(entry_price * (1.0 + (peak_pnl_pct - 10.0) / 100.0), 2)
-            elif peak_pnl_pct >= 12.0:
-                dynamic_stop = round(entry_price * 1.03, 2)
+            exit_reason = None
+
+            # DUAL-BRANCH EXECUTION ROUTING BY EXECUTION TAG (NF vs SCJ)
+            if exec_tag == 'NF' or strategy_mode == 'NATURAL_GEX_SWING':
+                if gex_target > 0 and spot > 0 and abs(spot - gex_target) / spot <= 0.003:
+                    exit_reason = f"🎯 [NF] GEX_TARGET_WALL_REACHED (${gex_target:.2f})"
+                elif trade_dir == "CALL" and gex_target > 0 and spot < gex_target * 0.992:
+                    exit_reason = f"🔴 [NF] GEX_STRUCTURAL_SUPPORT_BREACH (${spot:.2f})"
+                elif trade_dir == "PUT" and gex_target > 0 and spot > gex_target * 1.008:
+                    exit_reason = f"🔴 [NF] GEX_STRUCTURAL_RESISTANCE_BREACH (${spot:.2f})"
+                elif elapsed_minutes >= 90 and is_regular_trading_hours():
+                    exit_reason = "[NF] GEX_MAX_SWING_TIME_EXPIRED_90M"
+                elif pnl_pct <= -20.0:
+                    exit_reason = "[NF] STOP_LOSS_20PCT"
+
+                dynamic_stop = stored_stop_loss
+
             else:
-                if entry_price <= 0.50:
-                    calculated_stop = round(max(0.02, entry_price - 0.10), 2)
+                # SMART CSO INJECTOR EXIT ENGINE (Micro-Scalp 15m Horizon & Multi-Tier Trailing Ladder)
+                if is_runner:
+                    cushion = 10.0 if peak_pnl_pct >= 50.0 else 8.0
+                    dynamic_stop_pct = max(3.0, peak_pnl_pct - cushion)
+                    calculated_stop = round(entry_price * (1.0 + dynamic_stop_pct / 100.0), 2)
+                elif peak_pnl_pct >= 35.0:
+                    calculated_stop = round(entry_price * (1.0 + (peak_pnl_pct - 8.0) / 100.0), 2)
+                elif peak_pnl_pct >= 20.0:
+                    calculated_stop = round(entry_price * (1.0 + (peak_pnl_pct - 6.0) / 100.0), 2)
+                elif peak_pnl_pct >= 5.0:  # Early +5% Dynamic Breakeven Floor
+                    calculated_stop = round(entry_price * 1.01, 2)
                 else:
-                    calculated_stop = round(entry_price * 0.80, 2)
+                    if entry_price <= 0.50:
+                        calculated_stop = round(max(0.02, entry_price - 0.10), 2)
+                    else:
+                        calculated_stop = round(entry_price * 0.80, 2)
 
+                # Monotonic ratchet: dynamic stop loss never moves downward
                 dynamic_stop = max(stored_stop_loss, calculated_stop)
+
+                if current_price <= dynamic_stop and current_price > 0:
+                    exit_reason = f"[SCJ] DYNAMIC_TRAIL_STOP_TRIGGERED_(${dynamic_stop:.2f})"
+                elif pnl_pct >= 50.0 and total_shares == 1:
+                    exit_reason = "[SCJ] TAKE_PROFIT_50PCT"
+                elif -20.0 < pnl_pct <= -8.0 and spot > 0:
+                    support_lvl = float(gex_target or 0.0)
+                    if support_lvl > 0:
+                        support_breached = (spot < support_lvl) if trade_dir == "CALL" else (spot > support_lvl)
+                        if support_breached:
+                            print(f"[🚨 CSO MOMENTUM CUT] {ticker} option down {pnl_pct:.1f}% & stock (${spot:.2f}) breached support (${support_lvl:.2f}). Executing early exit!")
+                            exit_reason = f"[SCJ] CSO_EARLY_MOMENTUM_CUT_({pnl_pct:.1f}%)"
+                        else:
+                            print(f"[🛡️ CSO NOISE FILTER] {ticker} option mark down {pnl_pct:.1f}% but stock (${spot:.2f}) holds structure (${support_lvl:.2f}). IGNORING SPREAD NOISE.")
+                    elif pnl_pct <= -12.0:
+                        print(f"[⚠️ CSO FALLBACK CUT] {ticker} missing GEX level data & down {pnl_pct:.1f}%. Capping loss at -12% fallback floor!")
+                        exit_reason = f"[SCJ] CSO_MISSING_LEVEL_FALLBACK_CUT_({pnl_pct:.1f}%)"
+                elif pnl_pct <= -20.0:
+                    exit_reason = "[SCJ] STOP_LOSS_20PCT"
+                elif elapsed_minutes >= MTTP_MAX_MINUTES and is_regular_trading_hours():
+                    exit_reason = f"[SCJ] MTTP_TIME_EXPIRED_{MTTP_MAX_MINUTES}M"
 
             table.update_item(
                 Key={'tenant_id': tenant_id, 'trade_id': t_id},
@@ -530,9 +532,10 @@ def evaluate_gex_exits():
                 }
             )
 
-            print(f"[⚙️ MASTER EXIT] {ticker} | {total_shares}x | Entry: ${entry_price:.2f} | Live: ${current_price:.2f} ({pnl_pct:+.1f}%) | Peak: ${peak_price:.2f} (+{peak_pnl_pct:.1f}%) | Active Stop: ${dynamic_stop:.2f} | Min Seen: ${min_seen:+.2f}")
+            print(f"[⚙️ MASTER EXIT ({exec_tag})] {ticker} | {total_shares}x | Entry: ${entry_price:.2f} | Live: ${current_price:.2f} ({pnl_pct:+.1f}%) | Peak: ${peak_price:.2f} (+{peak_pnl_pct:.1f}%) | Active Stop: ${dynamic_stop:.2f}")
 
-            if total_shares > 1 and not is_runner and (pnl_pct >= 50.0 or (gex_gap_pct != 0.0 and abs(gex_gap_pct) <= 0.5)):
+            # TRANCHE SCALING (MICRO-SCALP SCJ MODE ONLY)
+            if exec_tag != 'NF' and strategy_mode != 'NATURAL_GEX_SWING' and total_shares > 1 and not is_runner and (pnl_pct >= 15.0 or (gex_gap_pct != 0.0 and abs(gex_gap_pct) <= 0.5)):
                 scale_shares = total_shares - 1
                 realized_scale_pnl = round((current_price - entry_price) * scale_shares * 100.0, 2)
                 
@@ -553,29 +556,6 @@ def evaluate_gex_exits():
                     )
                     sync_local_sqlite_exit(t_id, ticker, "PARTIAL_SCALE_OUT", current_price, now_str, realized_scale_pnl, remaining_shares=1, dynamic_stop=dynamic_stop)
                 continue
-
-            exit_reason = None
-
-            if current_price <= dynamic_stop and current_price > 0:
-                exit_reason = f"DYNAMIC_TRAIL_STOP_TRIGGERED_(${dynamic_stop:.2f})"
-            elif pnl_pct >= 50.0 and total_shares == 1:
-                exit_reason = "TAKE_PROFIT_50PCT"
-            elif -20.0 < pnl_pct <= -8.0 and spot > 0:
-                support_lvl = float(get_gex_target_info(ticker)[1] or 0.0)
-                if support_lvl > 0:
-                    support_breached = (spot < support_lvl) if trade_dir == "CALL" else (spot > support_lvl)
-                    if support_breached:
-                        print(f"[🚨 CSO MOMENTUM CUT] {ticker} option down {pnl_pct:.1f}% & stock (${spot:.2f}) breached support (${support_lvl:.2f}). Executing early exit!")
-                        exit_reason = f"CSO_EARLY_MOMENTUM_CUT_({pnl_pct:.1f}%)"
-                    else:
-                        print(f"[🛡️ CSO NOISE FILTER] {ticker} option mark down {pnl_pct:.1f}% but stock (${spot:.2f}) holds structure (${support_lvl:.2f}). IGNORING SPREAD NOISE.")
-                elif pnl_pct <= -12.0:
-                    print(f"[⚠️ CSO FALLBACK CUT] {ticker} missing GEX level data & down {pnl_pct:.1f}%. Capping loss at -12% fallback floor!")
-                    exit_reason = f"CSO_MISSING_LEVEL_FALLBACK_CUT_({pnl_pct:.1f}%)"
-            elif pnl_pct <= -20.0:
-                exit_reason = "STOP_LOSS_20PCT"
-            elif elapsed_minutes >= MTTP_MAX_MINUTES and is_regular_trading_hours():
-                exit_reason = f"MTTP_TIME_EXPIRED_{MTTP_MAX_MINUTES}M"
 
             if exit_reason:
                 print(f"🚨 [FINAL EXIT TRIGGERED] ID {t_id} ({ticker} {occ_symbol}) -> Reason: {exit_reason} at {now_str}")
@@ -600,7 +580,6 @@ def evaluate_gex_exits():
 
     except Exception as e:
         print(f"[-] Master Exit Monitor Error: {e}")
-
 
 if __name__ == "__main__":
     ensure_schema()
