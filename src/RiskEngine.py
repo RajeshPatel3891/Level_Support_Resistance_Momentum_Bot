@@ -106,3 +106,74 @@ def evaluate_cso_informed_exit(spot: float, target: float, stop_loss: float,
         "cso_badge_bg": cso_badge_bg,
         "cso_badge_text": cso_badge_text
     }
+
+import numpy as np
+import pandas as pd
+
+def evaluate_orb_vwap_setup(df_1min, orb_minutes=15):
+    """
+    Evaluates Opening Range Breakout (ORB) paired with VWAP Slope Angle.
+    Expects df_1min with columns: ['open', 'high', 'low', 'close', 'volume']
+    """
+    if df_1min is None or df_1min.empty:
+        return {"signal": "NO_DATA", "confidence": 0.0, "reason": "Empty DataFrame"}
+
+    try:
+        # Deduplicate columns if Tradier returned duplicate headers
+        df = df_1min.loc[:, ~df_1min.columns.duplicated()].copy().reset_index(drop=True)
+        
+        # Ensure required columns exist and force to 1D float series
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col].squeeze(), errors='coerce').astype(float)
+
+        if len(df) < orb_minutes:
+            return {"signal": "WAITING", "confidence": 0.0, "reason": f"Awaiting ORB Window ({len(df)}/{orb_minutes} bars)"}
+
+        # 1. Calculate Opening Range (First N minutes)
+        orb_df = df.iloc[:orb_minutes]
+        orb_high = float(orb_df['high'].max())
+        orb_low = float(orb_df['low'].min())
+
+        # 2. Calculate VWAP & VWAP Slope
+        typical_price = (df['high'] + df['low'] + df['close']) / 3.0
+        pv = typical_price * df['volume']
+        
+        vwap_series = pv.cumsum() / df['volume'].cumsum()
+        df['vwap'] = vwap_series
+
+        current_close = float(df['close'].iloc[-1])
+        current_vwap = float(df['vwap'].iloc[-1])
+
+        # VWAP Slope calculation (last 5 periods, flattened to 1D)
+        vwap_recent = df['vwap'].iloc[-5:].to_numpy().flatten()
+        if len(vwap_recent) < 5 or np.isnan(vwap_recent).any():
+            return {"signal": "NO_SETUP", "confidence": 0.0, "reason": "Insufficient VWAP history"}
+
+        x = np.arange(len(vwap_recent), dtype=float)
+        slope, _ = np.polyfit(x, vwap_recent, 1)
+
+        # Normalize slope as percentage of price
+        normalized_slope = (slope / current_vwap) * 100.0 if current_vwap > 0 else 0.0
+
+        # 3. Trigger Conditions
+        if current_close > orb_high and current_close > current_vwap and normalized_slope > 0.12:
+            return {
+                "signal": "BUY_CALL",
+                "confidence": 0.85,
+                "reason": f"ORB High Break (${orb_high:.2f}) + VWAP Bullish Slope ({normalized_slope:.3f}%)",
+                "orb_high": orb_high,
+                "orb_low": orb_low
+            }
+        elif current_close < orb_low and current_close < current_vwap and normalized_slope < -0.12:
+            return {
+                "signal": "BUY_PUT",
+                "confidence": 0.85,
+                "reason": f"ORB Low Break (${orb_low:.2f}) + VWAP Bearish Slope ({normalized_slope:.3f}%)",
+                "orb_high": orb_high,
+                "orb_low": orb_low
+            }
+
+        return {"signal": "NO_SETUP", "confidence": 0.0, "reason": f"Inside ORB (${orb_low:.2f}-${orb_high:.2f}) or Flat VWAP Slope ({normalized_slope:.3f}%)"}
+    except Exception as e:
+        return {"signal": "ERROR", "confidence": 0.0, "reason": f"ORB Calc Exception: {str(e)}"}

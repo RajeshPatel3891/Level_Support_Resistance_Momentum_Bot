@@ -1,3 +1,5 @@
+import sys, os
+sys.path.extend([os.path.abspath("."), os.path.dirname(os.path.dirname(os.path.abspath(__file__)))])
 import os
 
 if os.getenv('EXECUTION_ENV', '').upper() == 'SANDBOX':
@@ -14,7 +16,7 @@ boundaries, resolves directional bias (Call vs Put), enforces multivariable mome
 confluence (VWAP slope, SPY/QQQ beta alignment), applies Time-of-Day liquidity gates,
 enforces 4% relative spread caps (with $0.02 penny-spread bypass for sub-$0.50 contracts),
 executes Midpoint-to-Join dynamic 5-second order walking, logs execution tags (SCJ vs NF)
-to dual DB receipts (SQLite/DynamoDB), and streams telemetry.
+to dual DB receipts (SQLite/DynamoDB), and streams telemetry. Fallback to ORB+VWAP sub-engine.
 """
 
 import os
@@ -31,6 +33,9 @@ import datetime
 from datetime import datetime, timedelta
 import pytz
 from dotenv import load_dotenv
+
+# Import ORB + VWAP Fallback Sub-Engine
+from src.RiskEngine import evaluate_orb_vwap_setup
 
 load_dotenv()
 
@@ -219,7 +224,7 @@ def validate_reentry_eligibility(ticker, db_path=DB_PATH):
         if trade_count >= 2:
             print(f"[⛔ RE-ENTRY BLOCKED] {ticker} has hit maximum 2 trades for today.")
             return False
-             
+              
         if last_timestamp_str:
             try:
                 last_time = datetime.strptime(str(last_timestamp_str), "%Y-%m-%d %H:%M:%S")
@@ -231,7 +236,7 @@ def validate_reentry_eligibility(ticker, db_path=DB_PATH):
                 print(f"[!] Timestamp parse error: {parse_err}")
     except Exception as e:
         print(f"[!] Re-entry validation warning: {e}")
-             
+              
     return True
 
 def check_active_position_exists(ticker, tenant_id='COMPANY_A'):
@@ -288,6 +293,24 @@ def get_live_quote(symbol):
         log_msg(f"[-] Quote Fetch Error ({symbol}): {e}", "SCJ_ENGINE")
     return {}
 
+def fetch_intraday_bars(symbol, interval="1min"):
+    """Fetches intraday OHLCV bars dataframe from Tradier market data endpoint."""
+    headers = {"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"}
+    try:
+        res = requests.get(f"{TRADIER_BASE_URL}/markets/timesales", params={"symbol": symbol, "interval": interval}, headers=headers, timeout=5)
+        if res.status_code == 200:
+            series = res.json().get("series", {}).get("data", [])
+            if isinstance(series, dict):
+                series = [series]
+            if series:
+                import pandas as pd
+                df = pd.DataFrame(series)
+                df.rename(columns={'price': 'close'}, inplace=True)
+                return df
+    except Exception as e:
+        log_msg(f"[-] Intraday Bar Fetch Error ({symbol}): {e}", "SCJ_ENGINE")
+    return None
+
 def search_smart_option_chain(ticker, direction="CALL", spot_price=0.0):
     headers = {"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"}
     exp_url = f"{TRADIER_BASE_URL}/markets/options/expirations"
@@ -315,22 +338,21 @@ def search_smart_option_chain(ticker, direction="CALL", spot_price=0.0):
             options = [options]
         if not options:
             return None
-             
+            
         target_side = direction.lower()
         valid_contracts = []
-         
+        
         for opt in options:
             if opt.get("option_type") != target_side:
                 continue
-             
+            
             valid_liquidity, reason = validate_option_liquidity(opt)
             if not valid_liquidity:
                 continue
                 
             valid_contracts.append(opt)
-             
+            
         if valid_contracts:
-            # Targeted option premium search adjusted to $0.65 ($65 contract target)
             best_opt = min(valid_contracts, key=lambda x: abs(float(x.get("ask", 0)) - 0.65))
             return best_opt
     except Exception as e:
@@ -355,7 +377,7 @@ def fetch_occ_symbol(underlying, option_type, spot_price):
     best_opt = search_smart_option_chain(underlying, option_type, spot_price)
     if best_opt and best_opt.get("symbol"):
         return best_opt.get("symbol"), float(best_opt.get("ask") or 1.00)
-         
+        
     occ = generate_valid_occ_symbol(underlying, option_type, spot_price, min_dte=3)
     return occ, 1.00
 
@@ -642,22 +664,50 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
             contract_qty = max(1, base_qty)
             log_msg(f"[🟡 BASE EXECUTION] Proximity Score {score}% (50.0% - 89.9%) -> Setting Contract Qty to 1x ({contract_qty})", "SCJ_ENGINE")
         else:
-            log_msg(f"[🛡️ PROXIMITY BLOCKER] Proximity Score {score}% < 50.0% -> Execution Aborted.", "SCJ_ENGINE")
-            return
+            log_msg(f"[🛡️ PROXIMITY BLOCKER] GEX Proximity {score}% < 50.0%. Checking ORB + VWAP Slope Sub-Engine...", "SCJ_ENGINE")
+            try:
+                df_1min = fetch_intraday_bars(ticker_upper, interval="1min")
+                if df_1min is not None and not df_1min.empty:
+                    orb_res = evaluate_orb_vwap_setup(df_1min, orb_minutes=15)
+                    log_msg(f"⚡ [ORB_VWAP EVAL] {ticker_upper} | Signal: {orb_res['signal']} | Reason: {orb_res['reason']}", "SCJ_ENGINE")
+                    if orb_res['signal'] in ['BUY_CALL', 'BUY_PUT']:
+                        direction = "CALL" if orb_res['signal'] == 'BUY_CALL' else "PUT"
+                        candidates.append({
+                            "ticker": ticker_upper,
+                            "spot": spot,
+                            "direction": direction,
+                            "reason": orb_res['reason'],
+                            "info": info,
+                            "score": 85.0,
+                            "strategy_tag": "ORB_VWAP"
+                        })
+                    else:
+                        return
+                else:
+                    return
+            except Exception as orb_err:
+                log_msg(f"[!] ORB Evaluation error for {ticker_upper}: {orb_err}", "SCJ_ENGINE")
+                return
 
-        if direction_override in ["CALL", "PUT"]:
+        if not candidates and direction_override in ["CALL", "PUT"]:
             direction = direction_override.upper()
             reason = "CLI_EXPLICIT_OVERRIDE"
-        else:
+            candidates.append({
+                "ticker": ticker_upper,
+                "spot": spot,
+                "direction": direction,
+                "reason": reason,
+                "info": info
+            })
+        elif not candidates:
             direction, reason = resolve_smart_direction(info, spot)
-
-        candidates.append({
-            "ticker": ticker_upper,
-            "spot": spot,
-            "direction": direction,
-            "reason": reason,
-            "info": info
-        })
+            candidates.append({
+                "ticker": ticker_upper,
+                "spot": spot,
+                "direction": direction,
+                "reason": reason,
+                "info": info
+            })
     else:
         if isinstance(levels, dict):
             for ticker, info in levels.items():
@@ -684,8 +734,29 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
                         "direction": direction,
                         "reason": reason,
                         "info": info,
-                        "score": score
+                        "score": score,
+                        "strategy_tag": strategy_mode
                     })
+                else:
+                    log_msg(f"[🛡️ PROXIMITY BLOCKER] GEX Proximity {score}% < 50.0%. Checking ORB + VWAP Slope Sub-Engine for {ticker_upper}...", "SCJ_ENGINE")
+                    try:
+                        df_1min = fetch_intraday_bars(ticker_upper, interval="1min")
+                        if df_1min is not None and not df_1min.empty:
+                            orb_res = evaluate_orb_vwap_setup(df_1min, orb_minutes=15)
+                            if orb_res['signal'] in ['BUY_CALL', 'BUY_PUT']:
+                                log_msg(f"⚡ [ORB_VWAP TRIGGER] {ticker_upper} | Signal: {orb_res['signal']} | Reason: {orb_res['reason']}", "SCJ_ENGINE")
+                                direction = "CALL" if orb_res['signal'] == 'BUY_CALL' else "PUT"
+                                candidates.append({
+                                    "ticker": ticker_upper,
+                                    "spot": spot,
+                                    "direction": direction,
+                                    "reason": orb_res['reason'],
+                                    "info": info,
+                                    "score": 85.0,
+                                    "strategy_tag": "ORB_VWAP"
+                                })
+                    except Exception as orb_err:
+                        log_msg(f"[!] ORB Evaluation error for {ticker_upper}: {orb_err}", "SCJ_ENGINE")
 
     if not candidates:
         log_msg("[-] No qualified trades found or all active candidates already exist.", "SCJ_ENGINE")
@@ -696,6 +767,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
     direction = target["direction"]
     spot = target["spot"]
     info = target["info"]
+    active_strategy_mode = target.get("strategy_tag", strategy_mode)
 
     if not force_ticker:
         score = target.get("score", 0.0)
@@ -705,9 +777,6 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
         elif score >= 50.0:
             contract_qty = max(1, base_qty)
             log_msg(f"[🟡 BASE EXECUTION] Proximity Score {score}% (50.0% - 89.9%) -> Setting Contract Qty to 1x ({contract_qty})", "SCJ_ENGINE")
-        else:
-            log_msg(f"[🛡️ PROXIMITY BLOCKER] Proximity Score {score}% < 50.0% -> Execution Aborted.", "SCJ_ENGINE")
-            return
 
     # Multivariable Momentum Confluence Gate
     confluent, reason = check_multivariable_momentum_confluence(ticker, direction, spot, info)
@@ -715,7 +784,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
         log_msg(f"[⛔ CONFLUENCE REJECTED] {reason}", "SCJ_ENGINE")
         return
 
-    log_msg(f"[🎯 SMART SELECTION] Ticker: {ticker} | Direction: {direction} | Spot: ${spot:.2f} | Reason: {target['reason']} | Confluence: Passed", "SCJ_ENGINE")
+    log_msg(f"[🎯 SMART SELECTION] Ticker: {ticker} | Direction: {direction} | Spot: ${spot:.2f} | Strategy: {active_strategy_mode} | Reason: {target['reason']} | Confluence: Passed", "SCJ_ENGINE")
 
     best_opt = search_smart_option_chain(ticker, direction, spot_price=spot)
     if best_opt:
@@ -737,7 +806,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
         if pred_score < 7.5:
             log_msg(f"[⛔ PREDICTIVE FILL SCORE REJECTED] {ticker} ({occ_symbol}) | {score_reason}", "SCJ_ENGINE")
             return
-             
+              
         if execution_tag == "NF":
             log_msg(f"🎯 [PREDICTIVE SCORE PASSED] Score: {pred_score}/10.0 | Dispatching Natural GEX Fill...", "NF_ENGINE")
         else:
@@ -760,7 +829,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
     take_profit = round(fill_price * 1.50, 2)
     shares = contract_qty
 
-    log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, direction, occ_symbol, order_id, execution_tag=execution_tag, strategy_mode=strategy_mode)
+    log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, direction, occ_symbol, order_id, execution_tag=execution_tag, strategy_mode=active_strategy_mode)
     log_msg(f"[✓ SUCCESS] Strict Tradier Receipt confirmed and live watch loops engaged for {ticker} {direction} [{execution_tag}]!", "SCJ_ENGINE")
     
     monitor_live_exit_telemetry(ticker)
@@ -796,7 +865,7 @@ if __name__ == "__main__":
     parser.add_argument("--direction", type=str, choices=["CALL", "PUT", "SMART"], default="SMART", help="Side selection")
     parser.add_argument("--scan", type=int, default=25, help="Scan duration window in seconds")
     parser.add_argument("--tag", type=str, choices=["SCJ", "NF"], default="SCJ", help="Execution origin tag (SCJ=Smart Injector, NF=Natural Fill)")
-    parser.add_argument("--strategy", type=str, choices=["SMART_CSO_SCALP", "NATURAL_GEX_SWING"], default="SMART_CSO_SCALP", help="Strategy mode")
+    parser.add_argument("--strategy", type=str, choices=["SMART_CSO_SCALP", "NATURAL_GEX_SWING", "ORB_VWAP"], default="SMART_CSO_SCALP", help="Strategy mode")
     
     args = parser.parse_args()
     smart_cso_scout_and_execute(
