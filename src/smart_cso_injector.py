@@ -16,7 +16,7 @@ boundaries, resolves directional bias (Call vs Put), enforces multivariable mome
 confluence (VWAP slope, SPY/QQQ beta alignment), applies Time-of-Day liquidity gates,
 enforces 4% relative spread caps (with $0.02 penny-spread bypass for sub-$0.50 contracts),
 executes Midpoint-to-Join dynamic 5-second order walking, logs execution tags (SCJ vs NF)
-to dual DB receipts (SQLite/DynamoDB), and streams telemetry. Fallback to ORB+VWAP sub-engine.
+to dual DB receipts (SQLite/DynamoDB), and streams telemetry. Fallback to ORB+VWAP and VWAP Mean Reversion sub-engines.
 """
 
 import os
@@ -34,8 +34,8 @@ from datetime import datetime, timedelta
 import pytz
 from dotenv import load_dotenv
 
-# Import ORB + VWAP Fallback Sub-Engine
-from src.RiskEngine import evaluate_orb_vwap_setup
+# Import Strategy Sub-Engines from RiskEngine
+from src.RiskEngine import evaluate_orb_vwap_setup, evaluate_vwap_mean_reversion
 
 load_dotenv()
 
@@ -664,13 +664,15 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
             contract_qty = max(1, base_qty)
             log_msg(f"[🟡 BASE EXECUTION] Proximity Score {score}% (50.0% - 89.9%) -> Setting Contract Qty to 1x ({contract_qty})", "SCJ_ENGINE")
         else:
-            log_msg(f"[🛡️ PROXIMITY BLOCKER] GEX Proximity {score}% < 50.0%. Checking ORB + VWAP Slope Sub-Engine...", "SCJ_ENGINE")
+            log_msg(f"[🛡️ PROXIMITY BLOCKER] GEX Proximity {score}% < 50.0%. Checking Sub-Engines (ORB + Mean Reversion)...", "SCJ_ENGINE")
             try:
                 df_1min = fetch_intraday_bars(ticker_upper, interval="1min")
                 if df_1min is not None and not df_1min.empty:
+                    # --- SUB-ENGINE 1: ORB BREAKOUT ---
                     orb_res = evaluate_orb_vwap_setup(df_1min, orb_minutes=15)
                     log_msg(f"⚡ [ORB_VWAP EVAL] {ticker_upper} | Signal: {orb_res['signal']} | Reason: {orb_res['reason']}", "SCJ_ENGINE")
-                    if orb_res['signal'] in ['BUY_CALL', 'BUY_PUT']:
+                    
+                    if orb_res.get('signal') in ['BUY_CALL', 'BUY_PUT']:
                         direction = "CALL" if orb_res['signal'] == 'BUY_CALL' else "PUT"
                         candidates.append({
                             "ticker": ticker_upper,
@@ -682,11 +684,26 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
                             "strategy_tag": "ORB_VWAP"
                         })
                     else:
-                        return
+                        # --- SUB-ENGINE 2: VWAP MEAN REVERSION (STRATEGY B) ---
+                        mr_res = evaluate_vwap_mean_reversion(df_1min)
+                        log_msg(f"⚡ [VWAP_REVERSION EVAL] {ticker_upper} | Signal: {mr_res['signal']} | Reason: {mr_res['reason']}", "SCJ_ENGINE")
+                        if mr_res.get('signal') in ['BUY_CALL', 'BUY_PUT']:
+                            direction = "CALL" if mr_res['signal'] == 'BUY_CALL' else "PUT"
+                            candidates.append({
+                                "ticker": ticker_upper,
+                                "spot": spot,
+                                "direction": direction,
+                                "reason": mr_res['reason'],
+                                "info": info,
+                                "score": 80.0,
+                                "strategy_tag": "VWAP_MEAN_REVERSION"
+                            })
+                        else:
+                            return
                 else:
                     return
-            except Exception as orb_err:
-                log_msg(f"[!] ORB Evaluation error for {ticker_upper}: {orb_err}", "SCJ_ENGINE")
+            except Exception as sub_err:
+                log_msg(f"[!] Sub-engine evaluation error for {ticker_upper}: {sub_err}", "SCJ_ENGINE")
                 return
 
         if not candidates and direction_override in ["CALL", "PUT"]:
@@ -738,12 +755,13 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
                         "strategy_tag": strategy_mode
                     })
                 else:
-                    log_msg(f"[🛡️ PROXIMITY BLOCKER] GEX Proximity {score}% < 50.0%. Checking ORB + VWAP Slope Sub-Engine for {ticker_upper}...", "SCJ_ENGINE")
+                    log_msg(f"[🛡️ PROXIMITY BLOCKER] GEX Proximity {score}% < 50.0%. Checking Sub-Engines for {ticker_upper}...", "SCJ_ENGINE")
                     try:
                         df_1min = fetch_intraday_bars(ticker_upper, interval="1min")
                         if df_1min is not None and not df_1min.empty:
+                            # --- SUB-ENGINE 1: ORB BREAKOUT ---
                             orb_res = evaluate_orb_vwap_setup(df_1min, orb_minutes=15)
-                            if orb_res['signal'] in ['BUY_CALL', 'BUY_PUT']:
+                            if orb_res.get('signal') in ['BUY_CALL', 'BUY_PUT']:
                                 log_msg(f"⚡ [ORB_VWAP TRIGGER] {ticker_upper} | Signal: {orb_res['signal']} | Reason: {orb_res['reason']}", "SCJ_ENGINE")
                                 direction = "CALL" if orb_res['signal'] == 'BUY_CALL' else "PUT"
                                 candidates.append({
@@ -755,8 +773,23 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
                                     "score": 85.0,
                                     "strategy_tag": "ORB_VWAP"
                                 })
-                    except Exception as orb_err:
-                        log_msg(f"[!] ORB Evaluation error for {ticker_upper}: {orb_err}", "SCJ_ENGINE")
+                            else:
+                                # --- SUB-ENGINE 2: VWAP MEAN REVERSION (STRATEGY B) ---
+                                mr_res = evaluate_vwap_mean_reversion(df_1min)
+                                if mr_res.get('signal') in ['BUY_CALL', 'BUY_PUT']:
+                                    log_msg(f"⚡ [VWAP_REVERSION TRIGGER] {ticker_upper} | Signal: {mr_res['signal']} | Reason: {mr_res['reason']}", "SCJ_ENGINE")
+                                    direction = "CALL" if mr_res['signal'] == 'BUY_CALL' else "PUT"
+                                    candidates.append({
+                                        "ticker": ticker_upper,
+                                        "spot": spot,
+                                        "direction": direction,
+                                        "reason": mr_res['reason'],
+                                        "info": info,
+                                        "score": 80.0,
+                                        "strategy_tag": "VWAP_MEAN_REVERSION"
+                                    })
+                    except Exception as sub_err:
+                        log_msg(f"[!] Sub-engine evaluation error for {ticker_upper}: {sub_err}", "SCJ_ENGINE")
 
     if not candidates:
         log_msg("[-] No qualified trades found or all active candidates already exist.", "SCJ_ENGINE")
@@ -865,7 +898,7 @@ if __name__ == "__main__":
     parser.add_argument("--direction", type=str, choices=["CALL", "PUT", "SMART"], default="SMART", help="Side selection")
     parser.add_argument("--scan", type=int, default=25, help="Scan duration window in seconds")
     parser.add_argument("--tag", type=str, choices=["SCJ", "NF"], default="SCJ", help="Execution origin tag (SCJ=Smart Injector, NF=Natural Fill)")
-    parser.add_argument("--strategy", type=str, choices=["SMART_CSO_SCALP", "NATURAL_GEX_SWING", "ORB_VWAP"], default="SMART_CSO_SCALP", help="Strategy mode")
+    parser.add_argument("--strategy", type=str, choices=["SMART_CSO_SCALP", "NATURAL_GEX_SWING", "ORB_VWAP", "VWAP_MEAN_REVERSION"], default="SMART_CSO_SCALP", help="Strategy mode")
     
     args = parser.parse_args()
     smart_cso_scout_and_execute(
