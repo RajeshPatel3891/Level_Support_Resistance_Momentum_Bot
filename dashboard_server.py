@@ -1,10 +1,4 @@
 import os
-from dotenv import load_dotenv
-exec_env_passed = os.getenv("EXECUTION_ENV", "").upper()
-if not exec_env_passed and os.path.exists(".env.prod"):
-    load_dotenv(".env.prod", override=False)
-
-import os
 import sys
 import json
 import sqlite3
@@ -13,8 +7,10 @@ import tempfile
 import traceback
 import subprocess
 import uvicorn
+import logging
 import pandas as pd
 from datetime import datetime, date, timedelta
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse, RedirectResponse, JSONResponse
@@ -22,20 +18,19 @@ from jinja2 import Template
 import boto3
 from boto3.dynamodb.conditions import Attr
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("dashboard_server")
+
 EXEC_ENV = os.getenv("EXECUTION_ENV", "SANDBOX").upper()
 
 if EXEC_ENV in ["PROD", "PRODUCTION", "LIVE"]:
     if os.path.exists(".env.prod"):
         load_dotenv(".env.prod", override=True)
-    else:
-        load_dotenv(override=True)
 else:
     if os.path.exists(".env.sandbox"):
         load_dotenv(".env.sandbox", override=True)
-    else:
-        load_dotenv(override=True)
 
-CURRENT_ENV = os.getenv("EXECUTION_ENV", EXEC_ENV).upper()
+CURRENT_ENV = EXEC_ENV
 TARGET_IS_LIVE = 1 if CURRENT_ENV in ["PROD", "PRODUCTION", "LIVE"] else 0
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'harm_telemetry.db')
 
@@ -72,6 +67,45 @@ def resolve_trade_direction(item):
             return 'PUT'
     return 'CALL'
 
+def save_last_known_balance(acct_id, equity, cash, unsettled):
+    try:
+        db_path = "/app/harm_telemetry.db" if os.path.exists("/app/harm_telemetry.db") else DB_PATH
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute("""
+            CREATE TABLE IF NOT EXISTS account_state (
+                account_id TEXT PRIMARY KEY,
+                equity REAL,
+                cash REAL,
+                unsettled REAL,
+                updated_at TEXT
+            )
+        """)
+        c.execute("""
+            INSERT OR REPLACE INTO account_state (account_id, equity, cash, unsettled, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (acct_id, equity, cash, unsettled, datetime.now().isoformat()))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"Failed to persist balance to local DB: {e}")
+
+def get_last_known_balance(acct_id):
+    try:
+        db_path = "/app/harm_telemetry.db" if os.path.exists("/app/harm_telemetry.db") else DB_PATH
+        if not os.path.exists(db_path):
+            return None
+        conn = sqlite3.connect(db_path)
+        c = conn.cursor()
+        c.execute("SELECT equity, cash, unsettled FROM account_state WHERE account_id = ?", (acct_id,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            return float(row[0]), float(row[1]), float(row[2])
+    except Exception as e:
+        logger.warning(f"Failed to fetch cached balance from local DB: {e}")
+    return None
+
 def init_cloud_state_and_hydrate():
     aws_region = os.getenv("AWS_REGION", "us-east-1")
     dynamo_table_name = os.getenv("DYNAMO_TABLE_NAME", "HarmonizedTrades")
@@ -97,6 +131,15 @@ def init_cloud_state_and_hydrate():
             spot_price REAL, entry_price REAL, shares REAL, stop_loss REAL,
             take_profit REAL, net_pnl REAL, exit_status TEXT, is_live INTEGER,
             occ_symbol TEXT, execution_env TEXT, unrealized_pnl REAL, option_mark REAL, gsg_status TEXT
+        )
+    """)
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS account_state (
+            account_id TEXT PRIMARY KEY,
+            equity REAL,
+            cash REAL,
+            unsettled REAL,
+            updated_at TEXT
         )
     """)
     conn.commit()
@@ -366,7 +409,7 @@ INDEX_HTML_TEMPLATE = r"""
                             <input type="checkbox" id="input-green-stays-green" checked class="w-4 h-4 accent-emerald-500 rounded cursor-pointer">
                         </div>
                     </div>
-                     
+                    
                     <pre id="config-raw-json" class="p-3 bg-black text-amber-400 font-mono text-[10px] rounded border border-gray-800 overflow-x-auto shadow-inner hidden">> System Guards Engine Initialized.</pre>
                 </div>
             </div>
@@ -708,12 +751,12 @@ def get_live_quote(symbol):
 
 def fetch_tradier_balances(env=None):
     from dotenv import dotenv_values
+    
+    current_execution_env = str(os.getenv("EXECUTION_ENV", "")).upper()
     passed_env = str(env or "").upper()
-    exec_env = str(os.getenv("EXECUTION_ENV", "")).upper()
-    tradier_env = str(os.getenv("TRADIER_ENV", "")).upper()
     acct_id = str(os.getenv("TRADIER_ACCOUNT_ID", ""))
     
-    is_prod = (passed_env in ["PROD", "PRODUCTION", "LIVE"] or exec_env in ["PROD", "PRODUCTION", "LIVE"] or acct_id == "6YB87601")
+    is_prod = (current_execution_env in ["PROD", "PRODUCTION", "LIVE"] or passed_env in ["PROD", "PRODUCTION", "LIVE"] or acct_id == "6YB87601")
 
     if is_prod:
         p_env = dotenv_values(".env.prod") if os.path.exists(".env.prod") else {}
@@ -726,23 +769,32 @@ def fetch_tradier_balances(env=None):
         acct = sb_env.get("TRADIER_ACCOUNT_ID") or "VA83416608"
         base_url = "https://sandbox.tradier.com/v1"
 
-    if not token or not acct:
-        return (113210.62, 113210.62, 0.0) if CURRENT_ENV != "PROD" else (453.26, 453.26, 0.0)
+    if token and acct:
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        try:
+            url = f"{base_url}/accounts/{acct}/balances"
+            r = requests.get(url, headers=headers, timeout=5)
+            if r.status_code == 200:
+                bal = r.json().get("balances", {})
+                equity = float(bal.get("total_equity", 0.0) or 0.0)
+                cash = float(bal.get("total_cash", bal.get("cash", {}).get("cash_available", 0.0)) or 0.0)
+                unsettled = float(bal.get("uncleared_funds", bal.get("unsettled_funds", 0.0)) or 0.0)
+                
+                # Persist live response to local database
+                save_last_known_balance(acct, equity, cash, unsettled)
+                return equity, cash, unsettled
+        except Exception as e:
+            logger.warning(f"Tradier balance API request failed: {e}. Falling back to persistence layer.")
 
-    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-    try:
-        url = f"{base_url}/accounts/{acct}/balances"
-        r = requests.get(url, headers=headers, timeout=5)
-        if r.status_code == 200:
-            bal = r.json().get("balances", {})
-            equity = float(bal.get("total_equity", 0.0) or 0.0)
-            cash = float(bal.get("total_cash", bal.get("cash", {}).get("cash_available", 0.0)) or 0.0)
-            unsettled = float(bal.get("uncleared_funds", bal.get("unsettled_funds", 0.0)) or 0.0)
-            return equity, cash, unsettled
-    except Exception as e:
-        pass
+    # Fallback 1: Retrieve last known good balance from local SQLite DB
+    cached_bal = get_last_known_balance(acct if 'acct' in locals() else "6YB87601")
+    if cached_bal:
+        logger.info(f"Serving cached balance state from local DB for {acct}: {cached_bal}")
+        return cached_bal[0], cached_bal[1], cached_bal[2]
 
-    return (113210.62, 113210.62, 0.0) if CURRENT_ENV != "PROD" else (453.26, 453.26, 0.0)
+    # Fallback 2: Read baseline from environment configuration
+    env_default = float(os.getenv("DEFAULT_PROD_BALANCE", "0.00")) if is_prod else 113210.62
+    return env_default, env_default, 0.0
 
 def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A_PROD'):
     db_path = "/app/harm_telemetry.db" if os.path.exists("/app/harm_telemetry.db") else DB_PATH
