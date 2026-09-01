@@ -177,3 +177,58 @@ def evaluate_orb_vwap_setup(df_1min, orb_minutes=15):
         return {"signal": "NO_SETUP", "confidence": 0.0, "reason": f"Inside ORB (${orb_low:.2f}-${orb_high:.2f}) or Flat VWAP Slope ({normalized_slope:.3f}%)"}
     except Exception as e:
         return {"signal": "ERROR", "confidence": 0.0, "reason": f"ORB Calc Exception: {str(e)}"}
+
+def evaluate_vwap_mean_reversion(df_1min, rsi_period=14):
+    """
+    Evaluates intraday mean reversion entries back to the VWAP center line
+    when GEX Proximity < 50% and price is extended to VWAP 2.0 std dev bands.
+    """
+    if df_1min is None or df_1min.empty or len(df_1min) < 30:
+        return {"signal": "WAITING", "confidence": 0.0, "reason": "Insufficient history for VWAP bands (min 30 bars)"}
+
+    try:
+        # Deduplicate columns if Tradier returned duplicate headers
+        df = df_1min.loc[:, ~df_1min.columns.duplicated()].copy().reset_index(drop=True)
+
+        # Ensure required columns exist and force to 1D float series
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col].squeeze(), errors='coerce').astype(float)
+
+        # 1. Calculate VWAP and Standard Deviation Bands
+        typical_price = (df['high'] + df['low'] + df['close']) / 3.0
+        pv = typical_price * df['volume']
+        
+        cum_vol = df['volume'].cumsum()
+        vwap = pv.cumsum() / np.where(cum_vol == 0, 1.0, cum_vol)
+        df['vwap'] = vwap
+
+        # Intraday VWAP Standard Deviation
+        std_dev = (df['close'] - df['vwap']).expanding().std()
+        upper_band = df['vwap'] + (2.0 * std_dev)
+        lower_band = df['vwap'] - (2.0 * std_dev)
+
+        current_close = float(df['close'].iloc[-1])
+        current_vwap = float(df['vwap'].iloc[-1])
+        current_upper = float(upper_band.iloc[-1])
+        current_lower = float(lower_band.iloc[-1])
+
+        # 2. Overextended Mean Reversion Signals
+        if current_close <= current_lower:
+            return {
+                "signal": "BUY_CALL",
+                "confidence": 0.80,
+                "reason": f"Oversold: Spot (${current_close:.2f}) at -2σ VWAP Band (${current_lower:.2f}) -> Targeting Mean (${current_vwap:.2f})",
+                "target_price": current_vwap
+            }
+        elif current_close >= current_upper:
+            return {
+                "signal": "BUY_PUT",
+                "confidence": 0.80,
+                "reason": f"Overbought: Spot (${current_close:.2f}) at +2σ VWAP Band (${current_upper:.2f}) -> Targeting Mean (${current_vwap:.2f})",
+                "target_price": current_vwap
+            }
+
+        return {"signal": "NO_SETUP", "confidence": 0.0, "reason": f"Price (${current_close:.2f}) inside 2σ VWAP bands (${current_lower:.2f}-${current_upper:.2f})"}
+    except Exception as e:
+        return {"signal": "ERROR", "confidence": 0.0, "reason": f"VWAP Reversion Exception: {str(e)}"}
