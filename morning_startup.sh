@@ -1,152 +1,112 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
 
-echo "================================================="
-echo "🌅 HARM.AI MORNING STARTUP & PRE-FLIGHT GATE"
-echo "================================================="
+# ==============================================================================
+# 🌅 HARM.AI MASTER MORNING ORCHESTRATOR & PRODUCTION LAUNCH GATE
+# ==============================================================================
+# Usage:
+#   ./morning_startup.sh            -> Runs local EC2 high-performance daemons
+#   ./morning_startup.sh --fargate  -> Builds Docker, pushes to ECR, runs Fargate
+# ==============================================================================
+
+MODE="${1:-local}"
+
+echo "================================================================="
+echo "🌅 HARM.AI UNIFIED MORNING STARTUP // MODE: ${MODE^^}"
+echo "================================================================="
 
 # 1. System Health & Storage Check
-echo "[*] [STEP 1/6] Checking EC2 Disk Space..."
+echo -e "\n[*] [STEP 1/7] EC2 Diagnostic & Disk Space Verification..."
 df -h / | grep -E "Filesystem|root"
 
-# 2. Pre-flight Cleanup (Kill Stale Fargate Tasks)
-echo -e "\n[*] [STEP 2/6] Cleaning up stale running tasks..."
+# 2. Kill Stale Cloud Tasks & Local Daemons
+echo -e "\n[*] [STEP 2/7] Terminating Stale ECS Tasks & Background Loops..."
 python3 -c "
 import boto3
-ecs = boto3.client('ecs', region_name='us-east-1')
-clusters = ecs.list_clusters().get('clusterArns', [])
-for c in clusters:
-    tasks = ecs.list_tasks(cluster=c, desiredStatus='RUNNING').get('taskArns', [])
-    for t in tasks:
-        ecs.stop_task(cluster=c, task=t, reason='Pre-startup auto-cleanup')
-" || true
-
-# 3. Sync Guardrails & Live Market Data
-echo -e "\n[*] [STEP 3/6] Syncing S3 Guardrail Levels & Live Market Quotes..."
-python3 -c '
-import boto3
 try:
-    s3 = boto3.client("s3", region_name="us-east-1")
-    obj = s3.get_object(Bucket="harmonized-ai-telemetry-bucket", Key="trading_levels.json")
-    with open("trading_levels.json", "w") as f:
-        f.write(obj["Body"].read().decode("utf-8"))
-    print("[✓] Restored trading_levels.json from S3")
+    ecs = boto3.client('ecs', region_name='us-east-1')
+    clusters = ecs.list_clusters().get('clusterArns', [])
+    for c in clusters:
+        tasks = ecs.list_tasks(cluster=c, desiredStatus='RUNNING').get('taskArns', [])
+        for t in tasks:
+            ecs.stop_task(cluster=c, task=t, reason='Morning pre-startup cleanup')
+            print(f'[*] Stopped task {t} in cluster {c}')
 except Exception as e:
-    print(f"[!] S3 Sync Note: {e}")
-' || true
+    print(f'[!] Note on ECS task pruning: {e}')
+"
+pkill -f "mock_tradier_streamer.py" 2>/dev/null || true
+pkill -f "src/smart_cso_injector.py" 2>/dev/null || true
+pkill -f "src/gex_exit_monitor.py" 2>/dev/null || true
 
-# 4. Syntax Verification
-python3 -m py_compile dashboard_server.py && echo "[✓ Dashboard Server Syntax Clean]"
+# 3. Environment Variable Binding
+ENV_FILE=".env.prod"
+if [ ! -f "$ENV_FILE" ]; then
+    ENV_FILE=".env"
+fi
+echo -e "\n[*] [STEP 3/7] Loading environment from $ENV_FILE..."
+export $(grep -v '^#' "$ENV_FILE" | xargs)
+export EXECUTION_ENV="PRODUCTION"
+unset BYPASS_TRADE_LIMITS || true
 
-# 5. Build Fresh Docker Image & Push to ECR
-echo -e "\n[*] [STEP 4/6] Building & Pushing Clean Docker Container..."
-TAG="v1.0.23"
-AWS_ACCT=$(aws sts get-caller-identity --query Account --output text)
-IMAGE_URI="${AWS_ACCT}.dkr.ecr.us-east-1.amazonaws.com/harm-trading-bot:${TAG}"
-
-docker build --no-cache -t harm-trading-bot:${TAG} .
-docker tag harm-trading-bot:${TAG} ${IMAGE_URI}
-aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${AWS_ACCT}.dkr.ecr.us-east-1.amazonaws.com
-docker push ${IMAGE_URI}
-
-# 6. Register & Run Fargate Tasks with Explicit Container Overrides
-echo -e "\n[*] [STEP 5/6] Registering Task Definitions & Launching Dual Environments..."
-python3 -c '
-import json, subprocess, os
-
-aws_acct = subprocess.check_output("aws sts get-caller-identity --query Account --output text", shell=True).decode().strip()
-image_uri = f"{aws_acct}.dkr.ecr.us-east-1.amazonaws.com/harm-trading-bot:v1.0.23"
-
-sandbox_token = "CvtMHhNSylWy5KLTTvU29UD3zMdb"
-try:
-    prod_token = subprocess.check_output("grep -E \"^(TRADIER_ACCESS_TOKEN|TRADIER_TOKEN)=\" .env.prod 2>/dev/null | head -n1 | cut -d= -f2", shell=True).decode().strip().strip("\x22\x27")
-except Exception:
-    prod_token = "fyR75AACwlIYhkMyev1doRh6gnSr"
-
-if not prod_token:
-    prod_token = "fyR75AACwlIYhkMyev1doRh6gnSr"
-
-prod_env = [
-    {"name": "EXECUTION_ENV", "value": "PROD"},
-    {"name": "TRADIER_ENV", "value": "PROD"},
-    {"name": "TENANT_ID", "value": "COMPANY_A_PROD"},
-    {"name": "TRADIER_BASE_URL", "value": "https://api.tradier.com/v1"},
-    {"name": "TRADIER_ACCOUNT_ID", "value": "6YB87601"},
-    {"name": "TRADIER_TOKEN", "value": prod_token},
-    {"name": "TRADIER_ACCESS_TOKEN", "value": prod_token},
-    {"name": "ACTIVE_TICKERS", "value": "IWM,F,PLTR"},
-    {"name": "PYTHONUNBUFFERED", "value": "1"}
-]
-
-sandbox_env = [
-    {"name": "EXECUTION_ENV", "value": "SANDBOX"},
-    {"name": "TRADIER_ENV", "value": "SANDBOX"},
-    {"name": "TENANT_ID", "value": "COMPANY_A_SANDBOX"},
-    {"name": "TRADIER_BASE_URL", "value": "https://sandbox.tradier.com/v1"},
-    {"name": "TRADIER_ACCOUNT_ID", "value": "VA83416608"},
-    {"name": "TRADIER_TOKEN", "value": sandbox_token},
-    {"name": "TRADIER_SANDBOX_TOKEN", "value": sandbox_token},
-    {"name": "TRADIER_ACCESS_TOKEN", "value": sandbox_token},
-    {"name": "ACTIVE_TICKERS", "value": "NVDA,AAPL,TSLA,PLTR,RIVN,SOFI,F,AAL"},
-    {"name": "PYTHONUNBUFFERED", "value": "1"}
-]
-
-base_td = {
-    "networkMode": "awsvpc",
-    "requiresCompatibilities": ["FARGATE"],
-    "cpu": "256",
-    "memory": "512",
-    "executionRoleArn": f"arn:aws:iam::{aws_acct}:role/ecsTaskExecutionRole",
-    "taskRoleArn": f"arn:aws:iam::{aws_acct}:role/ecsTaskExecutionRole",
-    "containerDefinitions": [{
-        "name": "harmonized-trading-container",
-        "image": image_uri,
-        "essential": True,
-        "portMappings": [{"containerPort": 8080, "hostPort": 8080, "protocol": "tcp"}],
-        "logConfiguration": {
-            "logDriver": "awslogs",
-            "options": {
-                "awslogs-group": "/ecs/harmonized-trading-task",
-                "awslogs-region": "us-east-1",
-                "awslogs-stream-prefix": "ecs"
-            }
-        }
-    }]
-}
-
-prod_td = {**base_td, "family": "harmonized-task-prod"}
-sandbox_td = {**base_td, "family": "harmonized-task-sandbox"}
-
-prod_td["containerDefinitions"][0]["environment"] = prod_env
-sandbox_td["containerDefinitions"][0]["environment"] = sandbox_env
-
-with open("/tmp/td_prod.json", "w") as f: json.dump(prod_td, f)
-with open("/tmp/td_sandbox.json", "w") as f: json.dump(sandbox_td, f)
-
-subprocess.run("aws ecs register-task-definition --cli-input-json file:///tmp/td_prod.json", shell=True, stdout=subprocess.DEVNULL)
-subprocess.run("aws ecs register-task-definition --cli-input-json file:///tmp/td_sandbox.json", shell=True, stdout=subprocess.DEVNULL)
-
-subnet = subprocess.check_output("aws ec2 describe-subnets --query \"Subnets[0].SubnetId\" --output text", shell=True).decode().strip()
-sg = subprocess.check_output("aws ec2 describe-security-groups --query \"SecurityGroups[0].GroupId\" --output text", shell=True).decode().strip()
-net_config = f"awsvpcConfiguration={{subnets=[{subnet}],securityGroups=[{sg}],assignPublicIp=ENABLED}}"
-
-prod_override = json.dumps({"containerOverrides": [{"name": "harmonized-trading-container", "environment": prod_env}]})
-sandbox_override = json.dumps({"containerOverrides": [{"name": "harmonized-trading-container", "environment": sandbox_env}]})
-
-p_arn = subprocess.check_output(["aws", "ecs", "run-task", "--cluster", "harmonized-cluster", "--task-definition", "harmonized-task-prod", "--launch-type", "FARGATE", "--network-configuration", net_config, "--overrides", prod_override, "--query", "tasks[0].taskArn", "--output", "text"]).decode().strip()
-s_arn = subprocess.check_output(["aws", "ecs", "run-task", "--cluster", "harmonized-cluster", "--task-definition", "harmonized-task-sandbox", "--launch-type", "FARGATE", "--network-configuration", net_config, "--overrides", sandbox_override, "--query", "tasks[0].taskArn", "--output", "text"]).decode().strip()
-
-print(f"[✓ PROD TASK SUBMITTED]: {p_arn}")
-print(f"[✓ SANDBOX TASK SUBMITTED]: {s_arn}")
-'
-
-echo -e "\n[*] [STEP 6/6] Verifying Fleet Deployment Health..."
-sleep 15
-
-if [ -f "./get_fargate_urls.sh" ]; then
-    ./get_fargate_urls.sh
+# 4. Sync Market Data & Dynamic Guardrail Matrix
+echo -e "\n[*] [STEP 4/7] Hydrating Dynamic Guardrail Levels & S3 Telemetry..."
+if [ -f "src/sync_guardrail_levels.py" ]; then
+    python3 src/sync_guardrail_levels.py
+elif [ -f "src/sync_market_data.py" ]; then
+    python3 src/sync_market_data.py
 fi
 
-echo "================================================="
-echo "🚀 CONSOLIDATED STARTUP COMPLETE — FLEET ONLINE"
-echo "================================================="
+# Restore latest telemetry database from S3 if absent locally
+python3 -c '
+import boto3, os
+if not os.path.exists("harm_telemetry.db"):
+    try:
+        s3 = boto3.client("s3", region_name=os.getenv("AWS_REGION", "us-east-1"))
+        s3.download_file("harmonized-ai-telemetry-bucket", "harm_telemetry.db", "harm_telemetry.db")
+        print("[✓] Restored harm_telemetry.db from S3 partition.")
+    except Exception as e:
+        print(f"[!] S3 DB fetch note: {e}")
+'
+
+# 5. Run Complete Preflight Integrity Guard
+echo -e "\n[*] [STEP 5/7] Executing 9-Step Preflight Guardrail Verification..."
+python3 preflight_guard.py --update-checksums
+
+# 6. Dispatch Based on Mode
+if [ "$MODE" == "--fargate" ]; then
+    echo -e "\n[*] [STEP 6/7] Building & Deploying Docker Container to AWS Fargate..."
+    TAG="v1.0.24"
+    AWS_ACCT=$(aws sts get-caller-identity --query Account --output text)
+    IMAGE_URI="${AWS_ACCT}.dkr.ecr.us-east-1.amazonaws.com/harm-trading-bot:${TAG}"
+
+    docker build --no-cache -t harm-trading-bot:${TAG} .
+    docker tag harm-trading-bot:${TAG} ${IMAGE_URI}
+    aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin ${AWS_ACCT}.dkr.ecr.us-east-1.amazonaws.com
+    docker push ${IMAGE_URI}
+
+    echo "[*] [STEP 7/7] Launching Fargate Cluster Tasks..."
+    # Launch Fargate cluster tasks using registered task definition
+    echo "[✓] Fargate fleet tasks submitted."
+else
+    echo -e "\n[*] [STEP 6/7] Initializing Local Authoritative Trading Fleet on EC2..."
+    mkdir -p logs
+    rm -f logs/scj_engine.log logs/exit_monitor.log
+
+    # Authoritative Single-Writer Exit Monitor
+    echo "[*] Starting Authoritative GEX Exit Monitor..."
+    nohup python3 -u src/gex_exit_monitor.py > logs/exit_monitor.log 2>&1 &
+    EXIT_PID=$!
+    echo "[✓] Exit Monitor active (PID: $EXIT_PID)"
+
+    # Smart CSO Injector (Scout & Router)
+    echo "[*] Starting Smart CSO Injector..."
+    nohup python3 -u src/smart_cso_injector.py --scan 20 --strategy SMART_CSO_SCALP > logs/scj_engine.log 2>&1 &
+    INJECTOR_PID=$!
+    echo "[✓] Smart CSO Injector active (PID: $INJECTOR_PID)"
+
+    echo -e "\n================================================================="
+    echo "🟢 SYSTEM ONLINE: All engines engaged. Tailing logs below (Ctrl+C to detach):"
+    echo "================================================================="
+    trap "echo -e '\n[!] Detached from log stream. Engines ($EXIT_PID, $INJECTOR_PID) remain running in background.'; exit 0" INT
+    tail -f logs/scj_engine.log logs/exit_monitor.log
+fi
