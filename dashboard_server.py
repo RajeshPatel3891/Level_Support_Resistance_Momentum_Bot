@@ -653,8 +653,13 @@ INDEX_HTML_TEMPLATE = r"""
                 const askPx = parseFloat(item.current_ask || item.ask || 0.60).toFixed(2);
                 const fillScore = parseFloat(item.fill_quality_score || 10.0).toFixed(1);
                 const confidence = item.confidence_status || 'HIGH';
-                const pnlStr = item.dollar_pnl || '-$0.23';
-                const pctStr = (item.pnl_pct || '-39.0') + '%';
+                const rawPnl = item.dollar_pnl ?? item.net_pnl ?? item.unrealized_pnl ?? ((parseFloat(item.option_mark || item.price || 0) - parseFloat(item.entry_price || item.cost || 0)) * 100 * parseFloat(item.shares || 1));
+                const numPnl = typeof rawPnl === 'number' ? rawPnl : parseFloat(String(rawPnl).replace(/[^0-9.-]+/g, '')) || 0;
+                const pnlStr = (numPnl >= 0 ? '+$' : '-$') + Math.abs(numPnl).toFixed(2);
+                
+                const rawCost = parseFloat(item.entry_price || item.cost || item.basis || 0);
+                const rawPct = item.pnl_pct ?? (rawCost > 0 ? (numPnl / (rawCost * 100 * parseFloat(item.shares || 1))) * 100 : 0);
+                const pctStr = (typeof rawPct === 'number' ? rawPct.toFixed(1) : parseFloat(rawPct || 0).toFixed(1)) + '%';
                 const isProfit = !String(pnlStr).includes('-');
 
                 html += '<div style="background: #1e222d; border: 1px solid #2a2e3d; border-radius: 8px; padding: 12px; width: 100%; margin-bottom: 8px;">' +
@@ -1026,9 +1031,6 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
 @app.get("/dashboard_data.json")
 async def get_dashboard_data_json():
     try:
-        if os.path.exists("dashboard_data.json"):
-            with open("dashboard_data.json", "r") as f:
-                return json.load(f)
         trades, closed, total_pnl, total_closed_pnl, current_date, starting_balance, settled_free, deployed_capital, unsettled = fetch_portfolio_state()
         return {
             "active_positions": trades,
