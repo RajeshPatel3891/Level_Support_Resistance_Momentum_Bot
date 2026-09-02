@@ -19,6 +19,7 @@ import datetime
 from datetime import datetime as dt
 import pytz
 import re
+from pathlib import Path
 from dotenv import load_dotenv
 from boto3.dynamodb.conditions import Attr
 
@@ -30,6 +31,19 @@ else:
 MANIFEST_PATH = "trading_levels.json"
 MTTP_MAX_MINUTES = int(os.getenv("MTTP_MAX_MINUTES", 15))  # Default 15m Scalp Horizon
 DB_FILE = "harm_telemetry.db"
+
+def write_heartbeat(service_name):
+    hb_dir = Path("logs/heartbeats")
+    hb_dir.mkdir(parents=True, exist_ok=True)
+    hb_file = hb_dir / f"{service_name}.json"
+    
+    data = {
+        "status": "ONLINE",
+        "timestamp": time.time(),
+        "time_str": time.strftime("%H:%M:%S ET")
+    }
+    with open(hb_file, "w") as f:
+        json.dump(data, f)
 
 def get_tradier_token():
     token = os.getenv('TRADIER_TOKEN') or os.getenv('TRADIER_SANDBOX_TOKEN') or os.getenv('TRADIER_ACCESS_TOKEN')
@@ -110,9 +124,9 @@ def get_live_quote(occ_symbol):
                 bid = float(q.get('bid') or 0.0)
                 ask = float(q.get('ask') or 0.0)
                 last = float(q.get('last') or 0.0)
-                 
+                
                 base_url = "https://api.tradier.com/v1" if "api.tradier" in url else "https://sandbox.tradier.com/v1"
-                 
+                
                 if ask > 0 and bid > 0:
                     return round((ask + bid) / 2.0, 2), base_url
                 mark = ask if ask > 0 else (last if last > 0 else 0.0)
@@ -369,7 +383,7 @@ def evaluate_gex_exits():
             ticker = str(item.get('ticker', '')).upper()
             occ_symbol = str(item.get('occ_symbol', ticker))
             entry_price = float(item.get('entry_price', 0.0) or 0.0)
-            
+             
             # Safe shares parsing avoiding 'None' string conversion crash
             raw_shares = item.get('shares')
             if raw_shares is None or str(raw_shares).lower() in ['none', '']:
@@ -468,5 +482,9 @@ if __name__ == "__main__":
     sync_sqlite_to_dynamo()
     print("[🚀 ENTERING ACTIVE MASTER EXIT MONITOR LOOP...]")
     while True:
-        evaluate_gex_exits()
+        try:
+            evaluate_gex_exits()
+            write_heartbeat("GexExitMonitor")
+        except Exception as e:
+            print(f"[-] Loop error: {e}")
         time.sleep(10)

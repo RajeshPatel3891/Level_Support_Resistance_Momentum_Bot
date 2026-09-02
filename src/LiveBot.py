@@ -20,7 +20,21 @@ import numpy as np
 import pandas as pd
 import inspect
 from datetime import datetime
+from pathlib import Path
 from dotenv import load_dotenv
+
+def write_heartbeat(service_name):
+    hb_dir = Path("logs/heartbeats")
+    hb_dir.mkdir(parents=True, exist_ok=True)
+    hb_file = hb_dir / f"{service_name}.json"
+    
+    data = {
+        "status": "ONLINE",
+        "timestamp": time.time(),
+        "time_str": time.strftime("%H:%M:%S ET")
+    }
+    with open(hb_file, "w") as f:
+        json.dump(data, f)
 
 def get_target_expiration_date():
     """
@@ -54,16 +68,16 @@ def validate_extrinsic_floor(ticker, option_price, spot_price, strike, side="CAL
     
     if ticker in LOW_NOMINAL_TICKERS and option_price < MIN_PREMIUM_FLOOR:
         print(f"[⚠️ THETA FLOOR BREACH] {ticker} option premium (${option_price:.2f}) is below ${MIN_PREMIUM_FLOOR:.2f} floor!")
-        
+         
         if side.upper() == "CALL":
             itm_strike = spot_price * 0.97  # 3% In-The-Money
         else:
             itm_strike = spot_price * 1.03  # 3% In-The-Money for PUT
-            
+             
         print(f"[🛡️ ITM SHIFT RE-ROUTE] Shifting {ticker} strike from ${strike:.2f} -> ITM Strike ~${itm_strike:.2f} (Delta ~0.70) to preserve intrinsic value.")
         note = f"[ITM_SHIFT] Premium < $0.20 floor. Re-routed {strike} -> {itm_strike}"
         return False, itm_strike, note
-        
+         
     return True, strike, "STANDARD_PREMIUM"
 
 def get_live_quote(symbol):
@@ -174,7 +188,7 @@ def fetch_occ_option_symbol(underlying: str, option_type: str, spot_price: float
             if expirations:
                 if target_exp not in expirations:
                     target_exp = expirations[0]
-                
+                 
                 chain_res = requests.get(
                     f"{base_url}/markets/options/chains",
                     params={"symbol": underlying, "expiration": target_exp, "greeks": "false"},
@@ -185,10 +199,10 @@ def fetch_occ_option_symbol(underlying: str, option_type: str, spot_price: float
                     options = chain_res.json().get("options", {}).get("option", [])
                     if isinstance(options, dict):
                         options = [options]
-                    
+                     
                     target_side = "call" if option_type.upper() == "CALL" else "put"
                     matching_options = [o for o in options if o.get("option_type") == target_side]
-                    
+                     
                     if matching_options:
                         best_contract = min(matching_options, key=lambda x: abs(float(x.get("strike", 0)) - spot_price))
                         occ_symbol = best_contract.get("symbol")
@@ -225,7 +239,7 @@ def init_account_ledger(db_path="harm_telemetry.db", starting_capital=2000.00):
             ''', (today_str, starting_capital, starting_capital))
             conn.commit()
             print(f"[✓] Initialized account ledger for {today_str} with ${starting_capital:,.2f} settled cash.")
-        
+         
         try:
             cursor.execute("ALTER TABLE trades ADD COLUMN occ_symbol TEXT;")
             conn.commit()
@@ -284,13 +298,13 @@ def evaluate_ticker_risk(symbol):
         label = gex_data['gex_label']
         net_gex = gex_data['net_gex']
         print(f"[*] Core Engine reading local matrix for {symbol}: {label} GEX (${net_gex:,.2f})")
-        
+         
         if label == "NEGATIVE":
             print(f"[!] Warning: High-volatility dealer regime detected for {symbol}. Applying strict risk filters.")
             return "HIGH_VOLATILITY_MODE"
         else:
             return "STANDARD_REGIME"
-            
+             
     return "NO_CONTEXT"
 
 def handle_shutdown_signal(signum, frame):
@@ -331,7 +345,7 @@ def log_trade_to_database(ticker, spot_price, stop_loss=None, shares=1.0, direct
         table = dynamodb.Table('HarmonizedTrades')
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         trade_id = f"{ticker}_{int(time.time())}"
-        
+         
         opt_premium = float(cost) if (cost and float(cost) > 0) else round(max(0.80, spot_price * 0.012), 2)
         sl_val = stop_loss if stop_loss is not None else round(opt_premium * 0.80, 2)
         take_profit = round(opt_premium * 1.50, 2)
@@ -372,7 +386,7 @@ def db_batch_worker():
                 batch.append(tick_queue.get_nowait())
             except queue.Empty:
                 break
-        
+         
         if batch:
             try:
                 cursor.executemany(
@@ -382,7 +396,7 @@ def db_batch_worker():
                 conn.commit()
             except Exception as e:
                 print(f"[-] Asynchronous Batch Write Error: {e}", file=sys.stderr)
-        
+         
         time.sleep(5)
 
 threading.Thread(target=db_batch_worker, daemon=True).start()
@@ -580,12 +594,12 @@ def process_tick_event(sym, price):
         MASTER_DATA[sym]["last_price"] = float(price)
         sup = MASTER_DATA[sym].get("support", [])
         res = MASTER_DATA[sym].get("resistance", [])
-        
+         
         if len(sup) >= 2 and len(res) >= 2:
             armed = (sup[0] <= float(price) <= sup[1]) or (res[0] <= float(price) <= res[1])
             MASTER_DATA[sym]["execution_armed"] = armed
             MASTER_DATA[sym]["status"] = "ARMED" if armed else "WAITING"
-        
+         
         try:
             with open(MANIFEST_PATH, "w") as mf:
                 json.dump(MASTER_DATA, mf, indent=2)
@@ -594,7 +608,7 @@ def process_tick_event(sym, price):
 
     if sym in PLAYBOOKS:
         regime = evaluate_ticker_risk(sym)
-        
+         
         try:
             conn_chk = sqlite3.connect("harm_telemetry.db", timeout=5.0)
             cursor_chk = conn_chk.cursor()
@@ -619,12 +633,12 @@ def process_tick_event(sym, price):
             if call_sig or put_sig:
                 direction = "CALL" if call_sig else "PUT"
                 sig_shares = call_shares if call_sig else put_shares
-                
+                 
                 occ_symbol = fetch_occ_option_symbol(sym, direction, float(price))
                 opt_quote = get_live_quote(occ_symbol) if occ_symbol else get_live_quote(sym)
                 opt_bid = float(opt_quote.get('bid', 0.0))
                 opt_ask = float(opt_quote.get('ask', 0.0))
-                
+                 
                 if opt_ask <= 0 or opt_bid <= 0:
                     print(f"[GUARD BLOCKED] {sym} {direction}: Invalid Option Quote (Bid: ${opt_bid}, Ask: ${opt_ask})")
                     return
@@ -738,9 +752,11 @@ def run_rest_polling_loop():
                             process_tick_event(sym, price)
                 else:
                     print(f"[!] REST Polling Warning ({res.status_code}): {res.text}")
+            
+            write_heartbeat("LiveBot")
         except Exception as e:
             print(f"[!] REST Poller Exception: {e}", file=sys.stderr)
-        
+         
         time.sleep(5)
 
 if __name__ == "__main__":

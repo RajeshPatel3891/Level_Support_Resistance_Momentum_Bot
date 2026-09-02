@@ -29,6 +29,7 @@ import argparse
 import numpy as np
 from datetime import datetime, timedelta
 import pytz
+from pathlib import Path
 from dotenv import load_dotenv
 
 from src.RiskEngine import evaluate_orb_vwap_setup, evaluate_vwap_mean_reversion
@@ -47,6 +48,19 @@ else:
 TRADIER_ACCOUNT_ID = os.getenv("TRADIER_ACCOUNT_ID")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
+def write_heartbeat(service_name):
+    hb_dir = Path("logs/heartbeats")
+    hb_dir.mkdir(parents=True, exist_ok=True)
+    hb_file = hb_dir / f"{service_name}.json"
+    
+    data = {
+        "status": "ONLINE",
+        "timestamp": time.time(),
+        "time_str": time.strftime("%H:%M:%S ET")
+    }
+    with open(hb_file, "w") as f:
+        json.dump(data, f)
+
 def log_msg(msg: str, engine_tag: str = "SCJ_ENGINE"):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [{engine_tag}] {msg}")
 
@@ -58,7 +72,7 @@ def atomically_close_trade(tenant_id: str, occ_symbol: str, exit_price: float, n
     try:
         dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
         table = dynamodb.Table('HarmonizedTrades')
-        
+         
         # If specific trade_id is passed, use it directly; otherwise look up active trade_id for occ_symbol
         resolved_trade_id = trade_id
         if not resolved_trade_id:
@@ -159,7 +173,7 @@ def predict_fill_quality_score(quote: dict, side: str = "buy") -> tuple:
     final_score = round(max(0.0, min(10.0, score)), 1)
     if final_score < 7.5:
         return final_score, f"Predicted Score ({final_score}/10) below 7.5 threshold"
-        
+         
     return final_score, "Passed Predictive Score Gate"
 
 def is_valid_time_of_day_window() -> bool:
@@ -195,10 +209,10 @@ def validate_option_liquidity(chain_quote):
 
     if spread_pct > 5.0 and spread_abs > 0.03:
         return False, f"Spread (${spread_abs:.2f} / {spread_pct:.1f}%) exceeds 5.0% cap (Gate 3)"
-        
+         
     if open_interest < 50 or volume < 10:
         return False, f"Low Liquidity (OI: {open_interest}, Vol: {volume})"
-        
+         
     return True, "Passed"
 
 def check_multivariable_momentum_confluence(ticker, direction, spot, info):
@@ -239,14 +253,14 @@ def validate_reentry_eligibility(ticker, db_path=DB_PATH):
         """, (ticker, f"{today_str}%"))
         row = c.fetchone()
         conn.close()
-        
+         
         trade_count = row[0] if row and row[0] is not None else 0
         last_timestamp_str = row[1] if row and row[1] is not None else None
-        
+         
         if trade_count >= 2:
             print(f"[⛔ RE-ENTRY BLOCKED] {ticker} has hit maximum 2 trades for today.")
             return False
-                
+             
         if last_timestamp_str:
             try:
                 last_time = datetime.strptime(str(last_timestamp_str), "%Y-%m-%d %H:%M:%S")
@@ -258,7 +272,7 @@ def validate_reentry_eligibility(ticker, db_path=DB_PATH):
                 print(f"[!] Timestamp parse error: {parse_err}")
     except Exception as e:
         print(f"[!] Re-entry validation warning: {e}")
-            
+             
     return True
 
 def check_active_position_exists(ticker, tenant_id='COMPANY_A'):
@@ -344,7 +358,7 @@ def search_smart_option_chain(ticker, direction="CALL", spot_price=0.0):
             expirations = [expirations]
         if not expirations:
             return None
-        
+         
         today_str = datetime.now().strftime("%Y-%m-%d")
         valid_exps = [e for e in expirations if e >= today_str]
         target_exp = valid_exps[0] if valid_exps else expirations[0]
@@ -362,18 +376,18 @@ def search_smart_option_chain(ticker, direction="CALL", spot_price=0.0):
             options = [options]
         if not options:
             return None
-            
+             
         target_side = direction.lower()
         valid_contracts = []
-        
+         
         for opt in options:
             if opt.get("option_type") != target_side:
                 continue
-            
+             
             valid_liquidity, reason = validate_option_liquidity(opt)
             if not valid_liquidity:
                 continue
-                
+                 
             valid_contracts.append(opt)
           
         if valid_contracts:
@@ -537,7 +551,7 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
         res_json = response.json()
         order_data = res_json.get("order", {}) if isinstance(res_json, dict) else {}
         order_id = str(order_data.get("id", ""))
-        
+         
         if not order_id:
             return False, 0.0, ""
 
@@ -563,12 +577,12 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
                         return False, 0.0, ""
                     fill_price = float(det.get("avg_fill_price") or limit_price)
                     fill_score = calculate_fill_quality_score(fill_price, bid, ask, side="buy")
-                    
+                     
                     if execution_tag == "NF":
                         log_msg(f"🚀 [NATURAL GEX ENTRY] [NF] Filled {quantity}x {occ_symbol} @ ASK ${fill_price:.2f} | Quality: {fill_score}/10.0", "NF_ENGINE")
                     else:
                         log_msg(f"🎯 [ZERO-SLIPPAGE FILL] [SCJ] Filled {quantity}x {occ_symbol} @ MID ${fill_price:.2f} | Quality: {fill_score}/10.0", "SCJ_ENGINE")
-                        
+                         
                     return True, fill_price, order_id
 
             if elapsed >= 2.0 and not stepped_down:
@@ -621,7 +635,7 @@ def log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, 
                     cursor.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_def}")
                 except Exception:
                     pass
-        
+         
         cursor.execute('''
             INSERT INTO trades (
                 ticker, timestamp, strategy, direction, spot_price, 
@@ -670,7 +684,7 @@ def log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, 
 def monitor_live_exit_telemetry(ticker):
     log_msg(f"[📡 TELEMETRY STREAM ENGAGED] Monitoring live watch loop for {ticker} until exit...", "SCJ_ENGINE")
     ticker_u = ticker.upper()
-    
+     
     while True:
         time.sleep(2.5)
         try:
@@ -686,14 +700,14 @@ def monitor_live_exit_telemetry(ticker):
                 status = latest.get('exit_status', 'ACTIVE')
                 entry_px = float(latest.get('entry_price', 0.64) or 0.64)
                 stop_px = float(latest.get('stop_loss', entry_px * 0.8) or entry_px * 0.8)
-                
+                 
                 occ = latest.get('occ_symbol', ticker_u)
                 q = get_live_quote(occ)
                 bid = float(q.get('bid') or entry_px)
                 ask = float(q.get('ask') or entry_px)
                 mark = round((bid + ask) / 2.0, 2) if (bid and ask) else entry_px
                 shares_cnt = float(latest.get('shares', 1.0))
-                
+                 
                 dollar_pnl = round((mark - entry_px) * 100.0 * shares_cnt, 2)
                 pct_pnl = round((dollar_pnl / (entry_px * shares_cnt * 100.0)) * 100.0, 1) if entry_px > 0 else 0.0
                 pnl_str = f"{'+' if dollar_pnl >= 0 else ''}${dollar_pnl:.2f} ({pct_pnl:+.1f}%)"
@@ -701,7 +715,7 @@ def monitor_live_exit_telemetry(ticker):
                 exit_price = latest.get('exit_price') or latest.get('fill_price') or '0.00'
                 net_pnl = float(latest.get('net_pnl', 0.0) or 0.0)
                 reason = latest.get('cso_reason', latest.get('cso_status', 'ACTIVE'))
-                
+                 
                 if status != 'ACTIVE':
                     pnl_color = "🟢" if net_pnl >= 0 else "🔴"
                     log_msg(f"[{pnl_color} LIVE EXIT DETECTED] {ticker_u} CLOSED @ ${float(exit_price):.2f} | PnL: ${net_pnl:+.2f} | Reason: {reason}", "SCJ_ENGINE")
@@ -757,7 +771,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
         stock_quote = get_live_quote(ticker_upper)
         spot = float(stock_quote.get("last") or info.get("spot") or info.get("last_price") or 0.0)
         target = float(info.get("target") or info.get("call_target") or 0.0)
-        
+         
         if spot <= 0:
             log_msg(f"[!] Could not fetch valid spot price for {ticker_upper}. Aborting.", "SCJ_ENGINE")
             return
@@ -777,7 +791,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
         else:
             score = calculate_proximity_score(spot, target, threshold_pct=0.0075)
             log_msg(f"⚡ [PROXIMITY GRADIENT] {ticker_upper} | Score: {score}/100", "SCJ_ENGINE")
-            
+             
             if score >= 90.0:
                 contract_qty = max(2, base_qty * 2)
                 direction, reason = resolve_smart_direction(info, spot)
@@ -793,7 +807,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
                     if df_1min is not None and not df_1min.empty:
                         orb_res = evaluate_orb_vwap_setup(df_1min, orb_minutes=15)
                         log_msg(f"⚡ [ORB_VWAP EVAL] {ticker_upper} | Signal: {orb_res['signal']} | Reason: {orb_res['reason']}", "SCJ_ENGINE")
-                        
+                         
                         if orb_res.get('signal') in ['BUY_CALL', 'BUY_PUT']:
                             direction = "CALL" if orb_res['signal'] == 'BUY_CALL' else "PUT"
                             candidates.append({
@@ -923,7 +937,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
         best_opt = search_smart_option_chain(ticker, direction, spot_price=spot)
         if best_opt:
             occ_symbol = best_opt.get("symbol")
-            
+             
             bid = float(best_opt.get("bid") or 0.0)
             ask = float(best_opt.get("ask") or 0.0)
             mid = (bid + ask) / 2.0
@@ -938,7 +952,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
             if pred_score < 7.5:
                 log_msg(f"[⛔ PREDICTIVE FILL SCORE REJECTED] {ticker} ({occ_symbol}) | {score_reason}", "SCJ_ENGINE")
                 continue
-                
+                 
             if execution_tag == "NF":
                 log_msg(f"🎯 [PREDICTIVE SCORE PASSED] Score: {pred_score}/10.0 | Dispatching Natural GEX Fill...", "NF_ENGINE")
             else:
@@ -963,7 +977,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
 
         log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, direction, occ_symbol, order_id, execution_tag=execution_tag, strategy_mode=active_strategy_mode)
         log_msg(f"[✓ SUCCESS] Strict Tradier Receipt confirmed for {ticker} {direction} [{execution_tag}]! Continuing continuous multi-ticker scan...", "SCJ_ENGINE")
-        
+         
         import threading
         t = threading.Thread(target=monitor_live_exit_telemetry, args=(ticker,), daemon=False)
         t.start()
@@ -981,10 +995,10 @@ def check_predictive_armed_trigger(ticker, spot_or_info, info=None):
 
     threshold = 0.005
     target = float(info_dict.get("armed_target") or info_dict.get("target") or 0.0)
-    
+     
     if target <= 0 or spot <= 0:
         return False, "INVALID_TARGET_OR_SPOT"
-        
+         
     gap_pct = abs(spot - target) / target
     if gap_pct <= threshold:
         return True, "PREDICTIVE_ARMED_TRIGGER_FIRED"
@@ -1000,12 +1014,19 @@ if __name__ == "__main__":
     parser.add_argument("--scan", type=int, default=25, help="Scan duration window in seconds")
     parser.add_argument("--tag", type=str, choices=["SCJ", "NF"], default="SCJ", help="Execution origin tag (SCJ=Smart Injector, NF=Natural Fill)")
     parser.add_argument("--strategy", type=str, choices=["SMART_CSO_SCALP", "NATURAL_GEX_SWING", "ORB_VWAP", "VWAP_MEAN_REVERSION"], default="SMART_CSO_SCALP", help="Strategy mode")
-    
+     
     args = parser.parse_args()
-    smart_cso_scout_and_execute(
-        force_ticker=args.ticker, 
-        direction_override=args.direction, 
-        scan_duration=args.scan,
-        execution_tag=args.tag,
-        strategy_mode=args.strategy
-    )
+    
+    # Active heartbeat wrapper for containerized execution loops
+    try:
+        smart_cso_scout_and_execute(
+            force_ticker=args.ticker, 
+            direction_override=args.direction, 
+            scan_duration=args.scan,
+            execution_tag=args.tag,
+            strategy_mode=args.strategy
+        )
+        write_heartbeat("SmartCSOInjector")
+    except Exception as e:
+        log_msg(f"[-] SmartCSOInjector loop execution error: {e}", "SCJ_ENGINE")
+        raise e

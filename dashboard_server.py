@@ -9,6 +9,8 @@ import subprocess
 import uvicorn
 import logging
 import pandas as pd
+import time
+from pathlib import Path
 from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, Query
@@ -707,41 +709,46 @@ def get_db_connection():
 @app.get("/api/watchdog_status")
 def get_watchdog_status():
     monitored = {
-        "LiveBot": "src/LiveBot.py",
-        "GexExitMonitor": "src/gex_exit_monitor.py",
-        "ActiveRiskDaemon": "src/active_risk_daemon.py",
-        "BotStreamer": "harmonized_bot_streamer.py"
+        "SmartCSOInjector": "logs/heartbeats/SmartCSOInjector.json",
+        "GexExitMonitor": "logs/heartbeats/GexExitMonitor.json",
+        "DashboardServer": None
     }
     
     status_map = {}
     system_degraded = False
+    now = time.time()
 
-    try:
-        ps_out = subprocess.check_output(["ps", "aux"]).decode()
-    except Exception:
-        ps_out = ""
+    for svc_name, path in monitored.items():
+        if path is None:
+            status_map[svc_name] = {
+                "status": "ONLINE",
+                "script": "dashboard_server.py",
+                "pid": os.getpid(),
+                "last_ping": "Just now"
+            }
+            continue
 
-    for svc_name, script_path in monitored.items():
-        is_running = script_path in ps_out
+        is_online = False
+        last_ping = "NO_HEARTBEAT"
         
-        # Extract PID if running
-        pid = None
-        if is_running:
-            for line in ps_out.splitlines():
-                if script_path in line:
-                    parts = line.split()
-                    if len(parts) > 1:
-                        pid = parts[1]
-                        break
+        if Path(path).exists():
+            try:
+                with open(path, "r") as f:
+                    hb = json.load(f)
+                    if now - hb.get("timestamp", 0) < 60:
+                        is_online = True
+                        last_ping = hb.get("time_str", "ONLINE")
+            except Exception:
+                pass
 
-        if not is_running:
+        if not is_online:
             system_degraded = True
 
         status_map[svc_name] = {
-            "status": "ONLINE" if is_running else "OFFLINE",
-            "script": script_path,
-            "pid": pid,
-            "last_ping": datetime.now().strftime("%H:%M:%S ET") if is_running else "NO_HEARTBEAT"
+            "status": "ONLINE" if is_online else "OFFLINE",
+            "script": path,
+            "pid": None,
+            "last_ping": last_ping
         }
 
     return {
