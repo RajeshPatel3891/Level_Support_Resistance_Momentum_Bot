@@ -163,9 +163,17 @@ def predict_fill_quality_score(quote: dict, side: str = "buy") -> tuple:
     return final_score, "Passed Predictive Score Gate"
 
 def is_valid_time_of_day_window() -> bool:
+    if os.getenv("BYPASS_MARKET_HOURS", "0") == "1":
+        return True
     ny_tz = pytz.timezone('America/New_York')
     now = datetime.now(ny_tz)
     if now.weekday() >= 5:
+        return False
+    # Market hours: 09:30 to 16:00 ET
+    market_open = now.replace(hour=9, minute=30, second=0, microsecond=0)
+    market_close = now.replace(hour=16, minute=0, second=0, microsecond=0)
+    if not (market_open <= now <= market_close):
+        log_msg(f"[⏸️ MARKET CLOSED] Current time {now.strftime('%H:%M:%S')} ET is outside 09:30-16:00 ET. Standing by...", "SCJ_ENGINE")
         return False
     return True
 
