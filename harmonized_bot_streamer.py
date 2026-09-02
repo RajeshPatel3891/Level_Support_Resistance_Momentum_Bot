@@ -7,15 +7,12 @@ import requests
 from datetime import datetime
 from dotenv import load_dotenv
 
-# Load environmental variables (.env)
 load_dotenv()
 
-# Tradier API Configuration
 TRADIER_TOKEN = os.getenv("TRADIER_TOKEN") or os.getenv("TRADIER_SANDBOX_TOKEN")
 TRADIER_BASE_URL = os.getenv("TRADIER_BASE_URL", "https://sandbox.tradier.com/v1")
-ACTIVE_TICKERS = [t.strip() for t in os.getenv("ACTIVE_TICKERS", "F,SOFI,AAL,RIVN").split(",") if t.strip()]
+ACTIVE_TICKERS = [t.strip() for t in os.getenv("ACTIVE_TICKERS", "SPY,QQQ,IWM,NVDA,TSLA,AAPL,AMZN,GOOGL,AMD,META,NFLX,PLTR,HOOD,SOFI,F,AAL,RIVN,BAC,SNAP,MARA,CCL,UBER,NKE,INTC").split(",") if t.strip()]
 
-# Path configuration
 CURRENT_DIR = os.getcwd()
 DB_FILE = os.path.join(CURRENT_DIR, 'harm_telemetry.db')
 DATA_JSON = os.path.join(CURRENT_DIR, 'dashboard_data.json')
@@ -28,18 +25,12 @@ class HarmonizedBotStreamer:
     def __init__(self, tradier_token=None, tradier_base_url=None):
         self.tradier_token = tradier_token or TRADIER_TOKEN
         self.tradier_base_url = tradier_base_url or TRADIER_BASE_URL
-        self.active_tickers = ACTIVE_TICKERS
-        self.active_monitors = {}  # In-memory fast cache for active trades
-        
-        # Momentum & Smart CSO Entry Buffers
-        self.prev_spots = {}      # Ticker -> previous spot price
-        self.green_ticks = {}     # Ticker -> count of consecutive green ticks
-        
+        self.active_tickers = list(ACTIVE_TICKERS)
+        self.active_monitors = {}
         self.init_database()
         self.sync_active_positions_from_db()
 
     def init_database(self):
-        """Initializes trades telemetry table inside the local database."""
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
         cursor.execute("""
@@ -50,14 +41,14 @@ class HarmonizedBotStreamer:
                 strategy TEXT NOT NULL,
                 direction TEXT NOT NULL,
                 support_level REAL,
-                spot_price REAL,            -- Entry Price
+                spot_price REAL,
                 exit_price REAL,
                 stop_loss REAL,
                 take_profit REAL,
                 distance REAL,
                 allowed_dist REAL,
                 proximity_score REAL,
-                exit_status TEXT,           -- 'ACTIVE', 'TAKE_PROFIT', 'STOP_LOSS', 'FORCE_CLOSE'
+                exit_status TEXT,
                 net_pnl REAL
             )
         """)
@@ -66,11 +57,9 @@ class HarmonizedBotStreamer:
         log_msg("[✓] Trade telemetry database verified and active.")
 
     def sync_active_positions_from_db(self):
-        """Pulls active positions from database into standard Python dictionary."""
         conn = sqlite3.connect(DB_FILE)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        import os
         target_env = os.getenv("EXECUTION_ENV", os.getenv("TRADIER_ENV", "SANDBOX")).upper()
         if target_env in ["PROD", "PRODUCTION", "LIVE"]:
             cursor.execute("SELECT * FROM trades WHERE exit_status = 'ACTIVE' AND (execution_env = 'PRODUCTION' OR is_live = 1)")
@@ -87,8 +76,8 @@ class HarmonizedBotStreamer:
                 
             keys = row.keys()
             occ = row["occ_symbol"] if "occ_symbol" in keys else (row["option_symbol"] if "option_symbol" in keys else ticker)
-            shares = abs(float(row["shares"])) if ("shares" in keys and row["shares"]) else 5.0
-            entry_p = float(row["spot_price"] or row["entry_price"] or 0.0)
+            shares = abs(float(row["shares"])) if ("shares" in keys and row["shares"]) else 1.0
+            entry_p = float(row["entry_price"] or row["spot_price"] or 0.0)
             
             self.active_monitors[ticker].append({
                 "db_id": row["id"],
@@ -102,10 +91,8 @@ class HarmonizedBotStreamer:
             })
 
     def update_levels_file_spot_prices(self, quotes_dict):
-        """Updates live spot prices inside trading_levels.json."""
         if not os.path.exists(LEVELS_FILE):
             return
-            
         try:
             with open(LEVELS_FILE, 'r') as f:
                 data = json.load(f)
@@ -128,112 +115,92 @@ class HarmonizedBotStreamer:
         except Exception as e:
             log_msg(f"[!] Error updating trading_levels.json spot prices: {e}")
 
-    def validate_smart_cso_entry(self, ticker, spot, vwap, direction, option_quote=None):
-        """
-        Smart CSO Entry Guard:
-        1. Momentum: Requires >= 3 consecutive green ticks.
-        2. Trend: Spot > VWAP for CALL, Spot < VWAP for PUT.
-        3. Liquidity: Option Bid >= $0.05 and Spread <= 15%.
-        """
-        # 1. Momentum Check (3 consecutive green ticks)
-        consecutive_green = self.green_ticks.get(ticker, 0)
-        if consecutive_green < 3:
-            log_msg(f"[🛡️ GUARD REJECTED] {ticker}: Insufficient momentum ({consecutive_green}/3 green ticks).")
-            return False
-
-        # 2. VWAP Trend Alignment
-        if vwap > 0:
-            if direction == "CALL" and spot <= vwap:
-                log_msg(f"[🛡️ GUARD REJECTED] {ticker}: CALL entry blocked (Spot ${spot:.2f} <= VWAP ${vwap:.2f}).")
-                return False
-            elif direction == "PUT" and spot >= vwap:
-                log_msg(f"[🛡️ GUARD REJECTED] {ticker}: PUT entry blocked (Spot ${spot:.2f} >= VWAP ${vwap:.2f}).")
-                return False
-
-        # 3. Bid-Ask Spread Guard (If Option Quote Provided)
-        if option_quote and isinstance(option_quote, dict):
-            bid = float(option_quote.get("bid") or 0.0)
-            ask = float(option_quote.get("ask") or 0.0)
+    def update_dashboard_data_json(self, quotes_dict):
+        try:
+            active_positions_list = []
             
-            if bid < 0.05:
-                log_msg(f"[🛡️ GUARD REJECTED] {ticker}: Option bid ${bid:.2f} is too low / illiquid.")
-                return False
+            for ticker, positions in self.active_monitors.items():
+                underlying_data = quotes_dict.get(ticker, {})
+                spot_price = underlying_data.get("last", 0.0)
                 
-            if ask > 0:
-                spread_pct = (ask - bid) / ask
-                if spread_pct > 0.15:
-                    log_msg(f"[🛡️ GUARD REJECTED] {ticker}: Option spread too wide ({spread_pct * 100.0:.1f}%).")
-                    return False
+                for pos in positions:
+                    occ = pos["occ_symbol"]
+                    entry_p = pos["entry_price"]
+                    shares = pos["shares"]
+                    direction = pos["direction"]
+                    strategy = pos["strategy"]
+                    sl = pos["stop_loss"]
+                    tp = pos["take_profit"]
+                    
+                    option_data = quotes_dict.get(occ, {})
+                    opt_bid = float(option_data.get("bid", 0.0) or 0.0)
+                    opt_ask = float(option_data.get("ask", 0.0) or 0.0)
+                    opt_last = float(option_data.get("last", 0.0) or 0.0)
+                    
+                    if opt_bid > 0 and opt_ask > 0:
+                        cur_price = round((opt_bid + opt_ask) / 2.0, 2)
+                    elif opt_last > 0:
+                        cur_price = opt_last
+                    else:
+                        cur_price = entry_p
 
-        log_msg(f"[🟢 SMART CSO PASSED] {ticker}: All entry guards passed! Executing entry.")
-        return True
+                    pnl_per_contract = (cur_price - entry_p) * 100.0
+                    total_pnl = round(pnl_per_contract * shares, 2)
+                    pnl_pct = round(((cur_price - entry_p) / entry_p) * 100.0, 2) if entry_p > 0 else 0.0
+                    
+                    spread = opt_ask - opt_bid
+                    fill_score = 10.0
+                    if spread > 0 and entry_p > 0:
+                        fill_score = round(max(0.0, min(10.0, ((opt_ask - entry_p) / spread) * 10.0)), 1)
+                    
+                    bid_display = f"{opt_bid:.2f}" if opt_bid > 0 else f"{entry_p:.2f}"
+                    ask_display = f"{opt_ask:.2f}" if opt_ask > 0 else f"{entry_p:.2f}"
+                    pnl_str = f"{total_pnl:+.2f}"
 
-    def process_tick(self, ticker, spot_price, vwap_price=0.0):
-        """High-performance tick evaluation & exit engine."""
-        # Update Momentum Tracker (Green Tick Counter)
-        prev_spot = self.prev_spots.get(ticker)
-        if prev_spot is not None:
-            if spot_price > prev_spot:
-                self.green_ticks[ticker] = self.green_ticks.get(ticker, 0) + 1
-            elif spot_price < prev_spot:
-                self.green_ticks[ticker] = 0  # Reset counter immediately on red tick
-        self.prev_spots[ticker] = spot_price
+                    active_positions_list.append({
+                        "id": pos["db_id"],
+                        "ticker": ticker,
+                        "occ_symbol": occ,
+                        "direction": direction,
+                        "strategy": strategy,
+                        "entry_price": f"{entry_p:.2f}",
+                        "current_price": f"{cur_price:.2f}",
+                        "current_bid": bid_display,
+                        "current_ask": ask_display,
+                        "bid": bid_display,
+                        "ask": ask_display,
+                        "spot_price": spot_price,
+                        "shares": shares,
+                        "stop_loss": f"{sl:.2f}",
+                        "take_profit": f"{tp:.2f}",
+                        "pnl_dollars": pnl_str,
+                        "dollar_pnl": pnl_str,
+                        "net_pnl": total_pnl,
+                        "pnl_pct": f"{pnl_pct:+.1f}",
+                        "fill_quality_score": f"{fill_score:.1f}",
+                        "confidence_status": "HIGH",
+                        "confidence_score": "HIGH",
+                        "status": "ACTIVE"
+                    })
 
-        if ticker not in self.active_monitors or not self.active_monitors[ticker]:
-            return
+            payload = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "quotes": quotes_dict,
+                "active_positions": active_positions_list,
+                "active_trade_cards": active_positions_list
+            }
 
-        for position in self.active_monitors[ticker][:]:
-            db_id = position["db_id"]
-            entry_price = position["entry_price"]
-            sl = position["stop_loss"]
-            tp = position["take_profit"]
-            direction = position["direction"]
+            temp_json = f"{DATA_JSON}.tmp"
+            with open(temp_json, 'w') as f:
+                json.dump(payload, f, indent=2)
+            os.replace(temp_json, DATA_JSON)
+        except Exception as e:
+            log_msg(f"[!] Error updating dashboard_data.json: {e}")
 
-            triggered_close = False
-            outcome = None
-
-            if direction == "CALL":
-                if spot_price >= tp:
-                    triggered_close = True
-                    outcome = "TAKE_PROFIT"
-                elif spot_price <= sl:
-                    triggered_close = True
-                    outcome = "STOP_LOSS"
-            elif direction == "PUT":
-                if spot_price <= tp:
-                    triggered_close = True
-                    outcome = "TAKE_PROFIT"
-                elif spot_price >= sl:
-                    triggered_close = True
-                    outcome = "STOP_LOSS"
-
-            if triggered_close:
-                price_delta = spot_price - entry_price if direction == "CALL" else entry_price - spot_price
-                net_pnl = 5 * (price_delta * 0.50) * 100.0
-                
-                log_msg(f"[🔔] TRIGGER CRITERIA REACHED: {ticker} {direction} reached {outcome} limit at ${spot_price:.2f}!")
-                self.execute_realtime_close(db_id, ticker, spot_price, outcome, net_pnl, position)
-
-    def execute_realtime_close(self, db_id, ticker, exit_price, outcome, net_pnl, position_obj):
-        conn = sqlite3.connect(DB_FILE)
-        cursor = conn.cursor()
-        cursor.execute("""
-            UPDATE trades 
-            SET exit_status = ?, exit_price = ?, net_pnl = ?
-            WHERE id = ?
-        """, (outcome, exit_price, round(net_pnl, 2), db_id))
-        conn.commit()
-        conn.close()
-
-        log_msg(f"[✓] DB updated successfully. {ticker} trade #{db_id} committed with return: ${net_pnl:+.2f}")
-        
-        self.active_monitors[ticker].remove(position_obj)
-        if not self.active_monitors[ticker]:
-            del self.active_monitors[ticker]
-
-    def fetch_tradier_quotes(self, tickers=None):
-        symbols_list = tickers or self.active_tickers
-        symbols = ",".join(symbols_list) if isinstance(symbols_list, list) else symbols_list
+    def fetch_tradier_quotes(self, symbols_list):
+        if not symbols_list:
+            return {}
+        symbols = ",".join(list(set(symbols_list)))
         url = f"{self.tradier_base_url}/markets/quotes"
         headers = {
             "Authorization": f"Bearer {self.tradier_token}",
@@ -248,35 +215,49 @@ class HarmonizedBotStreamer:
                 quotes = data.get("quotes", {}).get("quote", [])
                 if isinstance(quotes, dict):
                     quotes = [quotes]
-                return {
-                    q["symbol"]: {
-                        "last": float(q["last"]),
-                        "vwap": float(q.get("vwap") or q["last"])
-                    }
-                    for q in quotes 
-                    if q and "symbol" in q and "last" in q and q["last"] is not None
-                }
+                
+                result = {}
+                for q in quotes:
+                    if q and "symbol" in q:
+                        sym = q["symbol"]
+                        last_px = float(q.get("last") or 0.0)
+                        bid_px = float(q.get("bid") or 0.0)
+                        ask_px = float(q.get("ask") or 0.0)
+                        vwap_px = float(q.get("vwap") or last_px)
+                        
+                        result[sym] = {
+                            "last": last_px,
+                            "bid": bid_px,
+                            "ask": ask_px,
+                            "vwap": vwap_px
+                        }
+                return result
         except Exception as e:
             log_msg(f"[!] Error fetching Tradier quotes: {e}")
         return {}
 
     async def start_tradier_stream(self, tickers=None):
-        watch_list = tickers or self.active_tickers
-        log_msg(f"Initiating Smart Tradier quote streamer with Green-Tick & VWAP Guards: {watch_list}")
+        base_watch_list = list(tickers or self.active_tickers)
+        log_msg(f"Initiating Quote Streamer & Dashboard Telemetry Feed: {base_watch_list}")
 
         while True:
             try:
-                quotes = self.fetch_tradier_quotes(watch_list)
-                if quotes:
-                    spot_dict = {t: q["last"] for t, q in quotes.items()}
-                    self.update_levels_file_spot_prices(spot_dict)
-                    
-                    for ticker, qdata in quotes.items():
-                        spot_price = qdata["last"]
-                        vwap_price = qdata["vwap"]
-                        self.process_tick(ticker, spot_price, vwap_price)
-                
                 self.sync_active_positions_from_db()
+                
+                active_symbols = list(base_watch_list)
+                for ticker, positions in self.active_monitors.items():
+                    if ticker not in active_symbols:
+                        active_symbols.append(ticker)
+                    for pos in positions:
+                        occ = pos.get("occ_symbol")
+                        if occ and occ not in active_symbols:
+                            active_symbols.append(occ)
+
+                quotes = self.fetch_tradier_quotes(active_symbols)
+                if quotes:
+                    spot_dict = {t: q["last"] for t, q in quotes.items() if len(t) <= 6}
+                    self.update_levels_file_spot_prices(spot_dict)
+                    self.update_dashboard_data_json(quotes)
                 
             except Exception as e:
                 log_msg(f"[─] Tradier tick stream error: {e}")
@@ -286,7 +267,7 @@ class HarmonizedBotStreamer:
 if __name__ == "__main__":
     if TRADIER_TOKEN:
         streamer = HarmonizedBotStreamer(TRADIER_TOKEN, TRADIER_BASE_URL)
-        log_msg("[✓] Smart Tradier Market Streamer Initialized.")
+        log_msg("[✓] Smart Tradier Market Streamer & Dashboard Feed Initialized.")
         
         try:
             asyncio.run(streamer.start_tradier_stream(ACTIVE_TICKERS))
