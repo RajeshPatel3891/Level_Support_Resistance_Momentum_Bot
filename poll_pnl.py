@@ -3,11 +3,11 @@ from dotenv import load_dotenv
 from boto3.dynamodb.conditions import Attr
 
 env_file = '.env.prod' if os.path.exists('.env.prod') else '.env'
-load_dotenv(env_file, override=True)
+load_dotenv(env_file, override=False)
 
 ENV = os.getenv("EXECUTION_ENV", "PRODUCTION")
 ACCOUNT_ID = os.getenv("TRADIER_ACCOUNT_ID", "6YB87601")
-TOKEN = os.getenv("TRADIER_TOKEN")
+TOKEN = os.getenv("TRADIER_PROD_TOKEN") or os.getenv("TRADIER_TOKEN")
 BASE_URL = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1").rstrip('/')
 REGION = os.getenv("AWS_REGION", "us-east-1")
 TABLE_NAME = os.getenv("DYNAMODB_TABLE", "HarmonizedTrades")

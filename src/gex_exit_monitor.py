@@ -124,9 +124,9 @@ def get_live_quote(occ_symbol):
                 bid = float(q.get('bid') or 0.0)
                 ask = float(q.get('ask') or 0.0)
                 last = float(q.get('last') or 0.0)
-                
+                 
                 base_url = "https://api.tradier.com/v1" if "api.tradier" in url else "https://sandbox.tradier.com/v1"
-                
+                 
                 if ask > 0 and bid > 0:
                     return round((ask + bid) / 2.0, 2), base_url
                 mark = ask if ask > 0 else (last if last > 0 else 0.0)
@@ -134,7 +134,7 @@ def get_live_quote(occ_symbol):
                     return mark, base_url
         except Exception:
             continue
-            
+             
     return 0.0, os.getenv("TRADIER_BASE_URL", TRADIER_BASE_URL)
 
 def get_live_bid_ask(occ_symbol):
@@ -396,7 +396,6 @@ def evaluate_gex_exits():
 
             trade_dir = str(item.get('direction', 'CALL')).upper()
             stored_peak = float(item.get('peak_price', entry_price) or entry_price)
-            stored_stop_loss = float(item.get('stop_loss', round(entry_price * 0.80, 2)) or 0.0)
             is_runner = bool(item.get('is_runner', False))
             accumulated_pnl = float(item.get('partial_pnl', 0.0) or 0.0)
             ts_str = item.get('timestamp')
@@ -418,24 +417,33 @@ def evaluate_gex_exits():
             if current_price == 0.0:
                 current_price = entry_price
 
-            pnl_pct = round(((current_price - entry_price) / entry_price) * 100.0, 2)
+            # WATERMARK & RECOVERY TRACKING
             peak_price = max(stored_peak, current_price)
+            pnl_pct = round(((current_price - entry_price) / entry_price) * 100.0, 2)
             peak_pnl_pct = round(((peak_price - entry_price) / entry_price) * 100.0, 2)
 
-            if is_runner:
-                cushion = 10.0 if peak_pnl_pct >= 50.0 else 8.0
-                dynamic_stop_pct = max(3.0, peak_pnl_pct - cushion)
-                calculated_stop = round(entry_price * (1.0 + dynamic_stop_pct / 100.0), 2)
-            elif peak_pnl_pct >= 35.0:
-                calculated_stop = round(entry_price * (1.0 + (peak_pnl_pct - 8.0) / 100.0), 2)
+            # SMART BASE STOP FLOOR (Sub-$1 options get 30% risk buffer)
+            base_stop = round(entry_price * 0.70, 2) if entry_price <= 1.00 else round(entry_price * 0.80, 2)
+            
+            # HIGH-SIDE DYNAMIC & RECOVERY TRAILING STOP LOGIC:
+            if peak_pnl_pct >= 35.0:
+                calculated_stop = round(peak_price * 0.90, 2)
             elif peak_pnl_pct >= 20.0:
-                calculated_stop = round(entry_price * (1.0 + (peak_pnl_pct - 6.0) / 100.0), 2)
-            elif peak_pnl_pct >= 5.0:
-                calculated_stop = round(entry_price * 1.01, 2)
+                calculated_stop = round(peak_price * 0.88, 2)
+            elif peak_pnl_pct >= 10.0:
+                calculated_stop = round(peak_price * 0.85, 2)
+            elif current_price >= entry_price:
+                # If price has recovered to or above entry, lock stop at break-even / entry cost
+                calculated_stop = round(entry_price, 2)
+            elif peak_price > (entry_price * 0.85) and current_price > stored_peak * 0.90:
+                # Local bounce recovery ratchet: if it recovered significantly from the lows, tighten stop below current mark
+                calculated_stop = round(current_price * 0.90, 2)
             else:
-                calculated_stop = round(entry_price * 0.80, 2) if entry_price > 0.50 else round(max(0.02, entry_price - 0.10), 2)
+                calculated_stop = base_stop
 
-            dynamic_stop = max(stored_stop_loss, calculated_stop)
+            # Ensure dynamic stop respects base floor but ratchets upward on recovery
+            dynamic_stop = max(base_stop, calculated_stop)
+
             mttp_status = f"{elapsed_minutes:.1f}m / {MTTP_MAX_MINUTES}m"
 
             print(f"{occ_symbol:<20} | {trade_dir:<5} | ${entry_price:<7.2f} | ${current_price:<7.2f} | {total_shares:<6} |${dynamic_stop:<7.2f} | {mttp_status:<15} | {pnl_pct:+6.1f}%")
