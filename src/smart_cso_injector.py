@@ -24,7 +24,7 @@ if os.getenv('EXECUTION_ENV', '').upper() == 'SANDBOX':
 # - NATIVE TRADIER HEALTH WATCHDOG: Embedded background thread writing heartbeats
 # - VWAP TOLERANCE BUFFER: Allows micro-dips within 0.05% of VWAP to pass
 # - ADAPTIVE SANDBOX LIQUIDITY: Relaxes OI/Volume caps in paper environment
-# - TRADEALGO SNIPER MODE: Low-ball resting limit sniper for volatility flushes
+# - ADAPTIVE ORDER-FLOW SNIPER: Spread-adaptive, book imbalance & RVOL-scaled resting limit sniper
 # ==============================================================================
 
 import json
@@ -48,7 +48,7 @@ load_dotenv()
 
 DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'harm_telemetry.db')
 MANIFEST_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'trading_levels.json')
-POLL_INTERVAL = int(os.getenv("CSO_POLL_INTERVAL", 3))  # Accelerated for natural fills
+POLL_INTERVAL = int(os.getenv("CSO_POLL_INTERVAL", 3))
 
 # ADAPTIVE MOMENTUM & CONVICTION GATES
 MIN_RVOL = float(os.getenv("MIN_RVOL", 1.2))
@@ -90,7 +90,7 @@ def tradier_watchdog_loop():
             hb_dir.mkdir(parents=True, exist_ok=True)
             with open(hb_dir / "TradierAPI.json", "w") as f:
                 json.dump(status_data, f)
-        except Exception as e:
+        except Exception:
             API_HEALTH_STATUS["healthy"] = False
             API_HEALTH_STATUS["status_code"] = 0
         time.sleep(60)
@@ -448,20 +448,20 @@ def search_smart_option_chain(ticker, direction="CALL", spot_price=0.0):
             options = [options]
         if not options:
             return None
-             
+            
         target_side = direction.lower()
         valid_contracts = []
         
         for opt in options:
             if opt.get("option_type") != target_side:
                 continue
-             
+            
             valid_liquidity, reason = validate_option_liquidity(opt)
             if not valid_liquidity:
                 continue
                 
             ask_val = float(opt.get("ask", 0.0) or 0.0)
-             
+            
             if ask_val < 0.10:
                 continue
 
@@ -495,12 +495,14 @@ def fetch_occ_symbol(underlying, option_type, spot_price):
     occ = generate_valid_occ_symbol(underlying, option_type, spot_price, min_dte=3)
     return occ, 1.00
 
-def execute_tradealgo_sniper_order(occ_symbol, underlying, side, quantity=1, max_wait_seconds=12):
+def execute_tradealgo_sniper_order(occ_symbol, underlying, side, quantity=1, max_wait_seconds=12, rvol_intensity=1.5):
     headers = {"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"}
     
     quote = get_live_quote(occ_symbol)
     bid = float(quote.get("bid") or 0.0)
     ask = float(quote.get("ask") or 0.0)
+    bid_size = int(quote.get("bidsize") or quote.get("bid_size") or 1)
+    ask_size = int(quote.get("asksize") or quote.get("ask_size") or 1)
     
     if bid <= 0.01:
         if os.getenv("EXECUTION_ENV", "").upper() == "SANDBOX":
@@ -508,11 +510,32 @@ def execute_tradealgo_sniper_order(occ_symbol, underlying, side, quantity=1, max
         else:
             return False, 0.0, ""
     
-    spread = ask - bid
-    low_ball_price = round(bid - min(0.05, spread * 0.5), 2)
+    spread = round(ask - bid, 2)
+    mid = (bid + ask) / 2.0
+    spread_pct = round((spread / mid) * 100.0, 2) if mid > 0 else 0.0
+
+    # 1. Order Book Size Imbalance Analysis
+    total_depth = bid_size + ask_size
+    imbalance = (bid_size - ask_size) / total_depth if total_depth > 0 else 0.0
+    
+    # 2. Spread-Adaptive & RVOL-Aware Dynamic Offset Calculation
+    if spread_pct > 8.0:
+        # Wide retail spread: scale into the spread to capture wholesale fills without getting bypassed
+        adaptive_offset = spread * 0.25
+    elif imbalance > 0.6:
+        # Heavy bid wall (buyers defending): rest slightly tighter to ensure execution
+        adaptive_offset = 0.02
+    elif rvol_intensity >= 3.0:
+        # High RVOL / volatility surge: tighten sniper limit near mid for rapid fills
+        adaptive_offset = 0.01
+    else:
+        # Standard balanced regime: default dynamic offset
+        adaptive_offset = min(0.05, spread * 0.4)
+
+    low_ball_price = round(bid - adaptive_offset, 2)
     low_ball_price = max(0.10, low_ball_price)
     
-    log_msg(f"🎯 [SNIPER MODE] Resting low-ball limit order @ ${low_ball_price:.2f} (Bid was ${bid:.2f}) awaiting momentum flush...", "SNIPER_ENGINE")
+    log_msg(f"🎯 [ADAPTIVE SNIPER] Resting order @ ${low_ball_price:.2f} | Bid: ${bid:.2f} (Sz: {bid_size}) | Ask: ${ask:.2f} (Sz: {ask_size}) | Spread: {spread_pct}% | Imbalance: {imbalance:+.2f}", "SNIPER_ENGINE")
 
     payload = {
         "class": "option",
@@ -542,13 +565,13 @@ def execute_tradealgo_sniper_order(occ_symbol, underlying, side, quantity=1, max
                 det = chk.json().get("order", {})
                 if det.get("status") == "filled":
                     fill_px = float(det.get("avg_fill_price") or low_ball_price)
-                    log_msg(f"💥 [SNIPER FILL CAPTURED!] Volatility flush crossed down. Filled @ ${fill_px:.2f}", "SNIPER_ENGINE")
+                    log_msg(f"💥 [SNIPER FILL CAPTURED!] Order-flow flush confirmed. Filled @ ${fill_px:.2f}", "SNIPER_ENGINE")
                     return True, fill_px, order_id
 
         requests.delete(f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders/{order_id}", headers=headers)
         if os.getenv("EXECUTION_ENV", "").upper() == "SANDBOX":
             return True, low_ball_price, f"SIM_SNIPER_{int(time.time()*1000)}"
-        log_msg(f"[⏳ SNIPER TIMEOUT] Order {order_id} unfilled. Market bypassed low-ball mark.", "SNIPER_ENGINE")
+        log_msg(f"[⏳ SNIPER TIMEOUT] Order {order_id} unfilled. Market bypassed adaptive low-ball mark.", "SNIPER_ENGINE")
         return False, 0.0, ""
 
     except Exception as e:
@@ -624,7 +647,7 @@ def execute_passive_bid_maker_order(occ_symbol, underlying, side, quantity=1, ma
         log_msg(f"[-] Maker execution exception: {e}", "SCJ_MAKER")
         return False, 0.0, ""
 
-def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_wait_seconds=5, execution_tag="SCJ"):
+def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_wait_seconds=5, execution_tag="SCJ", rvol_intensity=1.5):
     quantity = int(quantity or 1)
     env_chk = os.getenv("EXECUTION_ENV", "SANDBOX").upper()
     acct_chk = os.getenv("TRADIER_ACCOUNT_ID", "")
@@ -655,8 +678,8 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
 
     # Route high-conviction structural touches with extreme proximity to Sniper Mode
     if execution_tag == "SNIPER" or os.getenv("ENABLE_SNIPER", "0") == "1":
-        log_msg(f"[🎯 SNIPER ROUTER] Routing to TradeAlgo low-ball sniper order...", "SCJ_ENGINE")
-        return execute_tradealgo_sniper_order(occ_symbol, underlying, side, quantity=quantity, max_wait_seconds=12)
+        log_msg(f"[🎯 SNIPER ROUTER] Routing to TradeAlgo adaptive low-ball sniper order...", "SCJ_ENGINE")
+        return execute_tradealgo_sniper_order(occ_symbol, underlying, side, quantity=quantity, max_wait_seconds=12, rvol_intensity=rvol_intensity)
 
     if mid_price <= 0.60 and execution_tag != "NF":
         log_msg(f"[🛡️ LOW-PREMIUM ROUTER] Mid (${mid_price:.2f}) <= $0.60. Routing to PASSIVE MAKER BID...", "SCJ_ENGINE")
@@ -814,7 +837,7 @@ def execute_broker_exit(occ_symbol, underlying, quantity, exit_price, reason="ST
             return True, limit_px
         else:
             return True, limit_px
-    except Exception as e:
+    except Exception:
         return True, limit_px
 
 def monitor_live_exit_telemetry(ticker):
@@ -886,7 +909,7 @@ def monitor_live_exit_telemetry(ticker):
                     log_msg(f"[{pnl_color} TRADE COMPLETED] {ticker_u} CLOSED @ ${final_px:.2f} | Net: ${final_net_pnl:+.2f} ({exit_reason})", "SCJ_ENGINE")
                     return
 
-        except Exception as e:
+        except Exception:
             pass
 
 def resolve_smart_direction(info, spot):
@@ -1091,11 +1114,12 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
         active_strategy_mode = top["strategy_tag"]
         exec_tag = top["exec_tag"]
         exec_qty = contract_qty or top["contract_qty"]
+        candidate_rvol = float(top.get("rvol", 1.5) or 1.5)
 
         log_msg(f"🏆 [CONVICTION MATCH] {ticker} {direction} | Conviction: {top['conviction_score']:.1f} | Prox: {top['prox_score']:.1f}% | RVOL: {top['rvol']}x | Tag: {exec_tag}", "SCJ_ENGINE")
 
         success, fill_px, order_id = execute_strict_tradier_order(
-            occ_symbol, ticker, direction, quantity=exec_qty, execution_tag=exec_tag
+            occ_symbol, ticker, direction, quantity=exec_qty, execution_tag=exec_tag, rvol_intensity=candidate_rvol
         )
 
         if not success or fill_px <= 0 or not order_id:
