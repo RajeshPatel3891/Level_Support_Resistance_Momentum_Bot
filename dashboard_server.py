@@ -20,6 +20,15 @@ from jinja2 import Template
 import boto3
 from boto3.dynamodb.conditions import Attr
 
+# Inbound broker ground-truth reconciliation hook
+try:
+    from src.broker_reconciliation import reconcile_broker_state
+except ImportError:
+    try:
+        from broker_reconciliation import reconcile_broker_state
+    except ImportError:
+        reconcile_broker_state = None
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("dashboard_server")
 
@@ -46,6 +55,11 @@ from src.RiskEngine import (
     resolve_direction_targets,
     evaluate_cso_informed_exit
 )
+
+def get_tradier_token():
+    if CURRENT_ENV in ["PROD", "PRODUCTION", "LIVE"]:
+        return os.getenv("TRADIER_PROD_TOKEN") or os.getenv("TRADIER_TOKEN") or os.getenv("TRADIER_ACCESS_TOKEN")
+    return os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN") or os.getenv("TRADIER_ACCESS_TOKEN")
 
 def get_dynamic_proximity_threshold(price: float) -> float:
     if price >= 100.0:
@@ -274,6 +288,7 @@ INDEX_HTML_TEMPLATE = r"""
         <div class="flex items-center space-x-2">
             <span class="text-xl">🚀</span>
             <h1 class="text-xs font-bold tracking-wide text-red-500">HARM.AI LIVE</h1>
+            <span id="poll-indicator" class="text-[10px] text-emerald-400 font-mono pl-2">● Auto-polling 2.5s</span>
         </div>
         <div class="flex items-center space-x-2">
             <form action="/" method="GET" class="flex items-center">
@@ -305,19 +320,19 @@ INDEX_HTML_TEMPLATE = r"""
             <div class="grid grid-cols-4 gap-2">
                 <div class="bg-gray-900/80 p-2 rounded-xl border border-gray-800 text-center">
                     <div class="text-[8px] text-gray-400 font-medium uppercase tracking-wider">STARTING</div>
-                    <div class="text-xs font-black text-gray-200">{{ str_starting }}</div>
+                    <div id="kpi-starting" class="text-xs font-black text-gray-200">{{ str_starting }}</div>
                 </div>
                 <div class="bg-gray-900/80 p-2 rounded-xl border border-emerald-500/40 text-center">
                     <div class="text-[8px] text-emerald-400 font-medium uppercase tracking-wider">SETTLED FREE</div>
-                    <div class="text-xs font-black text-emerald-400">{{ str_settled }}</div>
+                    <div id="kpi-settled" class="text-xs font-black text-emerald-400">{{ str_settled }}</div>
                 </div>
                 <div class="bg-gray-900/80 p-2 rounded-xl border border-amber-500/40 text-center">
                     <div class="text-[8px] text-amber-400 font-medium uppercase tracking-wider">DEPLOYED</div>
-                    <div class="text-xs font-black text-amber-400">{{ str_deployed }}</div>
+                    <div id="kpi-deployed" class="text-xs font-black text-amber-400">{{ str_deployed }}</div>
                 </div>
                 <div class="bg-gray-900/80 p-2 rounded-xl border border-gray-800 text-center">
                     <div class="text-[8px] text-gray-400 font-medium uppercase tracking-wider">UNSETTLED</div>
-                    <div class="text-xs font-black text-gray-400">{{ str_unsettled }}</div>
+                    <div id="kpi-unsettled" class="text-xs font-black text-gray-400">{{ str_unsettled }}</div>
                 </div>
             </div>
 
@@ -325,11 +340,11 @@ INDEX_HTML_TEMPLATE = r"""
             <div class="grid grid-cols-2 gap-3">
                 <div class="bg-gray-900/80 p-3 rounded-xl border border-gray-800 text-center">
                     <div class="text-[10px] text-gray-400 font-medium uppercase tracking-wider">FLOATING OPEN</div>
-                    <div class="text-xl font-black {{ pnl_class }}">{{ total_pnl }}</div>
+                    <div id="kpi-floating-pnl" class="text-xl font-black {{ pnl_class }}">{{ total_pnl }}</div>
                 </div>
                 <div class="bg-gray-900/80 p-3 rounded-xl border border-gray-800 text-center">
                     <div class="text-[10px] text-gray-400 font-medium uppercase tracking-wider">REALIZED CLOSED</div>
-                    <div class="text-xl font-black {{ closed_pnl_class }}">{{ total_closed_pnl }}</div>
+                    <div id="kpi-realized-pnl" class="text-xl font-black {{ closed_pnl_class }}">{{ total_closed_pnl }}</div>
                 </div>
             </div>
 
@@ -490,6 +505,14 @@ INDEX_HTML_TEMPLATE = r"""
                 <div id="watchdog-service-list" class="space-y-2.5 font-mono text-xs">
                     <!-- Dynamic Service Badges Render Here -->
                 </div>
+
+                <!-- LEVEL PIPELINE TELEMETRY ACCORDION -->
+                <div id="watchdog-manifest-details" class="mt-4 pt-3 border-t border-gray-800 text-[10px] font-mono text-gray-400 hidden">
+                    <div class="text-gray-300 font-bold mb-1 uppercase tracking-wider flex items-center gap-1">
+                        <span>📊</span> Level Pipeline Audit
+                    </div>
+                    <div id="manifest-telemetry-rows" class="space-y-1"></div>
+                </div>
             </div>
 
             <!-- LEVEL PROXIMITY MATRIX -->
@@ -553,6 +576,8 @@ INDEX_HTML_TEMPLATE = r"""
             
             const banner = document.getElementById("watchdog-global-banner");
             const list = document.getElementById("watchdog-service-list");
+            const manifestBox = document.getElementById("watchdog-manifest-details");
+            const manifestRows = document.getElementById("manifest-telemetry-rows");
             if (!banner || !list) return;
 
             if (data.system_status === "HEALTHY") {
@@ -560,7 +585,7 @@ INDEX_HTML_TEMPLATE = r"""
                 banner.innerText = "🟢 ALL SERVICES ONLINE & HEALTHY";
             } else {
                 banner.className = "mb-4 p-2.5 rounded-lg border bg-red-950/60 border-red-500/60 text-red-400 text-center text-xs font-bold font-mono animate-pulse";
-                banner.innerText = "🚨 CRITICAL: SERVICE DEGRADATION / OFFLINE PROCESS DETECTED";
+                banner.innerText = "🚨 CRITICAL: SERVICE OR LEVEL DESYNC DETECTED";
             }
 
             let html = "";
@@ -590,6 +615,22 @@ INDEX_HTML_TEMPLATE = r"""
                 `;
             }
             list.innerHTML = html;
+
+            if (data.manifest_telemetry && manifestBox && manifestRows) {
+                manifestBox.classList.remove("hidden");
+                let mHtml = "";
+                for (const [mName, mStat] of Object.entries(data.manifest_telemetry)) {
+                    const ok = mStat.status === "HEALTHY";
+                    const col = ok ? "text-emerald-400" : "text-amber-400";
+                    mHtml += `
+                        <div class="flex justify-between items-center py-0.5 border-b border-gray-900">
+                            <span>${mName}:</span>
+                            <span class="${col}">${mStat.status} (${mStat.count}/27) • ${mStat.age_sec}s ago</span>
+                        </div>
+                    `;
+                }
+                manifestRows.innerHTML = mHtml;
+            }
         } catch (e) {
             console.error("Watchdog status poll error:", e);
         }
@@ -635,65 +676,100 @@ INDEX_HTML_TEMPLATE = r"""
         }
     }
 
-    async function renderActiveCards() {
+    // Bulletproof 2.5s Auto-Poller (Recursion via setTimeout)
+    let pollCount = 0;
+
+    async function executePollCycle() {
+        pollCount++;
         try {
-            const res = await fetch('/dashboard_data.json');
+            const res = await fetch('/dashboard_data.json?t=' + Date.now(), { cache: 'no-store' });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
             const data = await res.json();
-            const container = document.getElementById('active-cards-container');
-            if (!container) return;
 
-            const items = data.active_positions || data.active_trade_cards || [];
-            if (items.length === 0) {
-                container.innerHTML = '<div style="color: #6c757d; font-style: italic;" class="text-xs">No Active Positions Deployed</div>';
-                return;
+            // 1. Update Header Live Heartbeat
+            const indicator = document.getElementById('poll-indicator');
+            if (indicator) {
+                const nowStr = new Date().toLocaleTimeString();
+                indicator.innerHTML = `<span class="inline-block w-2 h-2 rounded-full bg-emerald-400 animate-ping mr-1"></span>● LIVE SYNC: ${nowStr} (Tick #${pollCount})`;
             }
 
-            let html = "";
-            for (const item of items) {
-                const entryPx = parseFloat(item.entry_price || 0.59).toFixed(2);
-                const bidPx = parseFloat(item.current_bid || item.bid || 0.59).toFixed(2);
-                const askPx = parseFloat(item.current_ask || item.ask || 0.60).toFixed(2);
-                const fillScore = parseFloat(item.fill_quality_score || 10.0).toFixed(1);
-                const confidence = item.confidence_status || 'HIGH';
-                const rawPnl = item.dollar_pnl ?? item.net_pnl ?? item.unrealized_pnl ?? ((parseFloat(item.option_mark || item.price || 0) - parseFloat(item.entry_price || item.cost || 0)) * 100 * parseFloat(item.shares || 1));
-                const numPnl = typeof rawPnl === 'number' ? rawPnl : parseFloat(String(rawPnl).replace(/[^0-9.-]+/g, '')) || 0;
-                const pnlStr = (numPnl >= 0 ? '+$' : '-$') + Math.abs(numPnl).toFixed(2);
+            // 2. Safely Update KPI Cards
+            if (data && data.status === "success") {
+                const updateEl = (id, val) => {
+                    const el = document.getElementById(id);
+                    if (el && val !== undefined && val !== null) el.innerText = String(val);
+                };
                 
-                const rawCost = parseFloat(item.entry_price || item.cost || item.basis || 0);
-                const rawPct = item.pnl_pct ?? (rawCost > 0 ? (numPnl / (rawCost * 100 * parseFloat(item.shares || 1))) * 100 : 0);
-                const pctStr = (typeof rawPct === 'number' ? rawPct.toFixed(1) : parseFloat(rawPct || 0).toFixed(1)) + '%';
-                const isProfit = !String(pnlStr).includes('-');
+                updateEl('kpi-starting', data.starting_balance);
+                updateEl('kpi-settled', data.settled_free);
+                updateEl('kpi-deployed', data.deployed_capital);
+                updateEl('kpi-unsettled', data.unsettled);
+                updateEl('kpi-realized-pnl', data.realized_pnl);
 
-                html += '<div style="background: #1e222d; border: 1px solid #2a2e3d; border-radius: 8px; padding: 12px; width: 100%; margin-bottom: 8px;">' +
-                    '<div style="display: flex; justify-content: space-between; border-bottom: 1px solid #2a2e3d; padding-bottom: 6px; margin-bottom: 8px;">' +
-                        '<span style="font-weight: bold; color: #fff;">' + (item.ticker || 'SPY') + ' <span style="color: #00bc8c;">' + (item.direction || 'PUT') + '</span></span>' +
-                        '<span style="background: #2b3245; padding: 2px 8px; border-radius: 4px; color: #ffb74d; font-size: 0.8em;">TARGET</span>' +
-                    '</div>' +
-                    '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; font-size: 0.85em; color: #ccc;">' +
-                        '<div><span style="color: #848e9c;">Entry:</span> $' + entryPx + '</div>' +
-                        '<div><span style="color: #848e9c;">Bid/Ask:</span> $' + bidPx + '/$' + askPx + '</div>' +
-                        '<div><span style="color: #848e9c;">Fill Score:</span> <b style="color:#00bc8c;">' + fillScore + '/10</b></div>' +
-                        '<div><span style="color: #848e9c;">Confidence:</span> <b>' + confidence + '</b></div>' +
-                    '</div>' +
-                    '<div style="margin-top: 8px; padding-top: 6px; border-top: 1px dashed #2a2e3d; display: flex; justify-content: space-between; font-size: 0.85em;">' +
-                        '<span style="color: #848e9c;">PNL:</span>' +
-                        '<span style="font-weight: bold; color: ' + (isProfit ? '#00c853' : '#ff5252') + ';">' + pnlStr + ' (' + pctStr + ')</span>' +
-                    '</div>' +
-                '</div>';
+                const kpiFloat = document.getElementById('kpi-floating-pnl');
+                if (kpiFloat && data.floating_pnl) {
+                    const strVal = String(data.floating_pnl);
+                    kpiFloat.innerText = strVal;
+                    kpiFloat.className = "text-xl font-black " + (strVal.includes('-') ? 'text-red-400' : 'text-emerald-400');
+                }
             }
-            container.innerHTML = html;
-        } catch (e) {
-            console.error("Error rendering active cards:", e);
+
+            // 3. Render Active Cards
+            const container = document.getElementById('active-cards-container');
+            if (container) {
+                const items = (data && Array.isArray(data.active_positions)) ? data.active_positions : [];
+                if (items.length === 0) {
+                    container.innerHTML = '<div style="color: #6c757d; font-style: italic;" class="text-xs">No Active Positions Deployed</div>';
+                } else {
+                    let html = "";
+                    for (const item of items) {
+                        const entryPx = parseFloat(item.entry_price || 0.0).toFixed(2);
+                        const bidPx = parseFloat(item.current_bid || item.bid || entryPx).toFixed(2);
+                        const askPx = parseFloat(item.current_ask || item.ask || entryPx).toFixed(2);
+                        const fillScore = parseFloat(item.fill_quality_score || 10.0).toFixed(1);
+                        const confidence = item.confidence_status || 'HIGH';
+                        const pnlStr = String(item.dollar_pnl || "+$0.00");
+                        const pctStr = String(item.pnl_pct || "0.0").replace('%', '') + "%";
+                        const isProfit = !pnlStr.includes('-');
+
+                        html += `<div style="background: #1e222d; border: 1px solid #2a2e3d; border-radius: 8px; padding: 12px; width: 100%; margin-bottom: 8px;">
+                            <div style="display: flex; justify-content: space-between; border-bottom: 1px solid #2a2e3d; padding-bottom: 6px; margin-bottom: 8px;">
+                                <span style="font-weight: bold; color: #fff;">${item.ticker || 'SPY'} <span style="color: #00bc8c;">${item.direction || 'CALL'}</span></span>
+                                <div style="display: gap: 6px; align-items: center;">
+                                    <span style="color: #00bc8c; font-size: 10px; font-mono; font-weight: bold;">CYCLE: #${pollCount}</span>
+                                    <span style="background: #2b3245; padding: 2px 8px; border-radius: 4px; color: #ffb74d; font-size: 0.8em;">TARGET</span>
+                                </div>
+                            </div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 6px; font-size: 0.85em; color: #ccc;">
+                                <div><span style="color: #848e9c;">Entry:</span> $${entryPx}</div>
+                                <div><span style="color: #848e9c;">Bid/Ask:</span> $${bidPx}/$${askPx}</div>
+                                <div><span style="color: #848e9c;">Fill Score:</span> <b style="color:#00bc8c;">${fillScore}/10</b></div>
+                                <div><span style="color: #848e9c;">Confidence:</span> <b>${confidence}</b></div>
+                            </div>
+                            <div style="margin-top: 8px; padding-top: 6px; border-top: 1px dashed #2a2e3d; display: flex; justify-content: space-between; font-size: 0.85em;">
+                                <span style="color: #848e9c;">PNL:</span>
+                                <span style="font-weight: bold; color: ${isProfit ? '#00c853' : '#ff5252'};">${pnlStr} (${pctStr})</span>
+                            </div>
+                        </div>`;
+                    }
+                    container.innerHTML = html;
+                }
+            }
+        } catch (err) {
+            console.error("[Poller Warning]", err);
+        } finally {
+            setTimeout(executePollCycle, 2500);
         }
     }
 
-    // Initialize Auto-Polling
+    // Auxiliary pollers
     fetchWatchdogStatus();
     setInterval(fetchWatchdogStatus, 5000);
     fetchProximity();
     setInterval(fetchProximity, 3000);
-    setInterval(renderActiveCards, 3000);
-    document.addEventListener('DOMContentLoaded', renderActiveCards);
+
+    // Start polling loop
+    executePollCycle();
     </script>
 </body>
 </html>
@@ -705,12 +781,13 @@ def get_db_connection():
     conn.row_factory = sqlite3.Row
     return conn
 
-# WATCHDOG DAEMON AUDIT ENDPOINT
+# WATCHDOG DAEMON AUDIT ENDPOINT (WITH LEVEL SENTINEL & MANIFEST AUDITING)
 @app.get("/api/watchdog_status")
 def get_watchdog_status():
     monitored = {
         "SmartCSOInjector": "logs/heartbeats/SmartCSOInjector.json",
         "GexExitMonitor": "logs/heartbeats/GexExitMonitor.json",
+        "LevelSentinel": "logs/heartbeats/LevelSentinel.json",
         "DashboardServer": None
     }
     
@@ -730,14 +807,21 @@ def get_watchdog_status():
 
         is_online = False
         last_ping = "NO_HEARTBEAT"
+        pid_val = None
         
         if Path(path).exists():
             try:
                 with open(path, "r") as f:
                     hb = json.load(f)
-                    if now - hb.get("timestamp", 0) < 60:
+                    epoch_ts = hb.get("epoch") or hb.get("timestamp") or 0
+                    if isinstance(epoch_ts, (int, float)) and (now - epoch_ts < 90):
                         is_online = True
-                        last_ping = hb.get("time_str", "ONLINE")
+                        last_ping = hb.get("time_str") or hb.get("timestamp") or "ONLINE"
+                        pid_val = hb.get("pid")
+                    elif isinstance(epoch_ts, str):
+                        is_online = True
+                        last_ping = epoch_ts
+                        pid_val = hb.get("pid")
             except Exception:
                 pass
 
@@ -747,20 +831,52 @@ def get_watchdog_status():
         status_map[svc_name] = {
             "status": "ONLINE" if is_online else "OFFLINE",
             "script": path,
-            "pid": None,
+            "pid": pid_val,
             "last_ping": last_ping
         }
+
+    # Direct File Level Inspection
+    manifest_telemetry = {}
+    level_files = {
+        "trading_levels_gex": "trading_levels_gex.json",
+        "trading_levels_tradealgo": "trading_levels_tradealgo.json",
+        "trading_levels": "trading_levels.json"
+    }
+
+    for label, rel_path in level_files.items():
+        if os.path.exists(rel_path):
+            try:
+                age_sec = round(now - os.path.getmtime(rel_path), 1)
+                with open(rel_path, "r") as lf:
+                    ldata = json.load(lf)
+                count = len(ldata)
+                healthy = count >= 27 and age_sec <= 1200
+                if not healthy and label != "trading_levels_tradealgo":
+                    system_degraded = True
+                manifest_telemetry[label] = {
+                    "status": "HEALTHY" if healthy else "DEGRADED",
+                    "count": count,
+                    "age_sec": age_sec
+                }
+            except Exception:
+                manifest_telemetry[label] = {"status": "READ_ERROR", "count": 0, "age_sec": 9999}
+                system_degraded = True
+        else:
+            manifest_telemetry[label] = {"status": "MISSING", "count": 0, "age_sec": 9999}
+            if label != "trading_levels_tradealgo":
+                system_degraded = True
 
     return {
         "system_status": "DEGRADED" if system_degraded else "HEALTHY",
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S ET"),
-        "services": status_map
+        "services": status_map,
+        "manifest_telemetry": manifest_telemetry
     }
 
 def get_live_quote(symbol):
-    token = os.getenv("TRADIER_TOKEN") or os.getenv("TRADIER_SANDBOX_TOKEN")
+    token = get_tradier_token()
     headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
-    base_url = os.getenv("TRADIER_BASE_URL", "https://api.tradier.com/v1")
+    base_url = "https://api.tradier.com/v1" if CURRENT_ENV in ["PROD", "PRODUCTION", "LIVE"] else "https://sandbox.tradier.com/v1"
     try:
         r = requests.get(f"{base_url}/markets/quotes?symbols={symbol}", headers=headers, timeout=3)
         if r.status_code == 200:
@@ -781,12 +897,12 @@ def fetch_tradier_balances(env=None):
 
     if is_prod:
         p_env = dotenv_values(".env.prod") if os.path.exists(".env.prod") else {}
-        token = os.getenv("TRADIER_ACCESS_TOKEN") or p_env.get("TRADIER_ACCESS_TOKEN") or os.getenv("TRADIER_TOKEN")
+        token = os.getenv("TRADIER_PROD_TOKEN") or os.getenv("TRADIER_TOKEN") or p_env.get("TRADIER_PROD_TOKEN") or p_env.get("TRADIER_TOKEN")
         acct = os.getenv("TRADIER_ACCOUNT_ID") or p_env.get("TRADIER_ACCOUNT_ID") or "6YB87601"
         base_url = "https://api.tradier.com/v1"
     else:
         sb_env = dotenv_values(".env.sandbox") if os.path.exists(".env.sandbox") else {}
-        token = sb_env.get("TRADIER_ACCESS_TOKEN") or sb_env.get("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_SANDBOX_TOKEN")
+        token = sb_env.get("TRADIER_SANDBOX_TOKEN") or sb_env.get("TRADIER_TOKEN") or os.getenv("TRADIER_SANDBOX_TOKEN")
         acct = sb_env.get("TRADIER_ACCOUNT_ID") or "VA83416608"
         base_url = "https://sandbox.tradier.com/v1"
 
@@ -847,15 +963,14 @@ def close_position_in_db(ticker_to_close, exit_price=None, tenant_id='COMPANY_A_
     return True
 
 def enrich_active_positions_with_live_quotes(trades):
-    token = os.getenv("TRADIER_SANDBOX_TOKEN") or os.getenv("TRADIER_TOKEN")
-    base_url = os.getenv("TRADIER_BASE_URL", "https://sandbox.tradier.com/v1" if CURRENT_ENV not in ["PROD", "PRODUCTION", "LIVE"] else "https://api.tradier.com/v1")
+    token = get_tradier_token()
+    base_url = "https://api.tradier.com/v1" if CURRENT_ENV in ["PROD", "PRODUCTION", "LIVE"] else "https://sandbox.tradier.com/v1"
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 
     total_deployed_basis = 0.0
     total_floating_pnl_val = 0.0
 
     for t in trades:
-        tkr = str(t.get('ticker', '')).upper()
         opt_cost = float(t.get('entry_price') or t.get('basis') or t.get('cost') or 0.80)
         shares_cnt = float(t.get('shares', 1.0))
         direction = resolve_trade_direction(t)
@@ -898,8 +1013,13 @@ def enrich_active_positions_with_live_quotes(trades):
         opt_tp = float(t.get('take_profit') or (opt_cost * 1.50))
         t['stop_display'] = f"${opt_sl:.2f}"
 
-        dollar_pnl_val = round((opt_mark - opt_cost) * 100.0 * shares_cnt, 2)
-        pct_pnl_val = round((dollar_pnl_val / (opt_cost * shares_cnt * 100.0)) * 100.0, 1) if opt_cost > 0 else 0.0
+        # Direction-Aware Option PnL Math matching poll_pnl_prod
+        if direction == 'PUT':
+            dollar_pnl_val = round((opt_cost - opt_mark) * 100.0 * shares_cnt, 2)
+            pct_pnl_val = round(((opt_cost - opt_mark) / opt_cost) * 100.0, 1) if opt_cost > 0 else 0.0
+        else:
+            dollar_pnl_val = round((opt_mark - opt_cost) * 100.0 * shares_cnt, 2)
+            pct_pnl_val = round(((opt_mark - opt_cost) / opt_cost) * 100.0, 1) if opt_cost > 0 else 0.0
 
         t['net_pnl'] = dollar_pnl_val
         t['pnl_dollars'] = f"{dollar_pnl_val:+.2f}"
@@ -914,6 +1034,12 @@ def enrich_active_positions_with_live_quotes(trades):
     return trades, total_deployed_basis, total_floating_pnl_val
 
 def fetch_portfolio_state(page=1, selected_date=None, tenant_id="COMPANY_A_PROD", env=None):
+    if reconcile_broker_state:
+        try:
+            reconcile_broker_state()
+        except Exception:
+            pass
+
     if not env:
         acct_id = os.getenv("TRADIER_ACCOUNT_ID", "")
         exec_env = os.getenv("EXECUTION_ENV", "").upper()
@@ -968,6 +1094,26 @@ def get_proximity_api():
             "prox": info.get("proximity_score") or info.get("prox") or info.get("proximity_pct", 0)
         }
     return response
+
+@app.get("/dashboard_data.json")
+async def get_dashboard_data_json():
+    try:
+        trades, closed, total_pnl, total_closed_pnl, current_date, starting_balance, settled_free, deployed_capital, unsettled = fetch_portfolio_state()
+        pnl_prefix_total = '+' if total_pnl >= 0 else ''
+        return {
+            "active_positions": trades,
+            "active_trade_cards": trades,
+            "closed_positions": closed,
+            "starting_balance": f"${starting_balance:,.2f}",
+            "settled_free": f"${settled_free:,.2f}",
+            "deployed_capital": f"${deployed_capital:,.2f}",
+            "unsettled": f"${unsettled:,.2f}",
+            "floating_pnl": f"{pnl_prefix_total}${total_pnl:,.2f}",
+            "realized_pnl": f"${total_closed_pnl:+.2f}",
+            "status": "success"
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.get("/", response_class=HTMLResponse)
 async def index_view(request: Request, selected_date: str = Query(default=None)):
@@ -1034,21 +1180,6 @@ async def index_view(request: Request, selected_date: str = Query(default=None))
         closed_pnl_class="text-emerald-400" if total_closed_pnl >= 0 else "text-red-400"
     )
     return HTMLResponse(content=rendered_html)
-
-@app.get("/dashboard_data.json")
-async def get_dashboard_data_json():
-    try:
-        trades, closed, total_pnl, total_closed_pnl, current_date, starting_balance, settled_free, deployed_capital, unsettled = fetch_portfolio_state()
-        return {
-            "active_positions": trades,
-            "active_trade_cards": trades,
-            "closed_positions": closed,
-            "deployed_capital": deployed_capital,
-            "floating_pnl": f"${total_pnl:.2f}",
-            "status": "success"
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
 
 CONFIG_FILE = "dashboard_config.json"
 DEFAULT_CONFIG = {

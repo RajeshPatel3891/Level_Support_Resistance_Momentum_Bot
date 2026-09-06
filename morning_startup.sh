@@ -22,11 +22,23 @@ except Exception:
 pkill -f "src/smart_cso_injector.py" 2>/dev/null || true
 pkill -f "src/gex_exit_monitor.py" 2>/dev/null || true
 
-echo -e "\n[*] [STEP 3/5] Loading Environment & Hydrating S3 Levels..."
+echo -e "\n[*] [STEP 3/5] Syncing GemmaEX Telemetry & Synthesizing Levels..."
 if [ -f ".env.prod" ]; then
     export $(grep -v '^#' .env.prod | xargs)
 fi
-python3 src/sync_guardrail_levels.py || python3 src/sync_market_data.py || true
+
+python3 src/sync_gex_lambda.py
+python3 src/level_synthesizer.py
+
+# Heartbeat Manifest Verification
+python3 -c '
+import json, sys
+d = json.load(open("trading_levels.json"))
+if len(d) < 27:
+    print(f"[-] FATAL: Manifest incomplete ({len(d)}/27 tickers). Aborting startup.")
+    sys.exit(1)
+print(f"[✓] Heartbeat Verified: {len(d)} Tickers Active | XLF: {d.get(\"XLF\",{}).get(\"gex_label\")} | SPY: {d.get(\"SPY\",{}).get(\"gex_label\")}")
+'
 
 echo -e "\n[*] [STEP 4/5] Executing 9-Step Preflight Guardrail Verification..."
 python3 preflight_guard.py --update-checksums

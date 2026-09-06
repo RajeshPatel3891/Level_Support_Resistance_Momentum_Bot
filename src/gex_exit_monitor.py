@@ -8,20 +8,27 @@ if os.getenv('EXECUTION_ENV', '').upper() == 'SANDBOX':
 # ==============================================================================
 # HARM.AI OPTIMIZED CHIEF STRATEGY OFFICER (CSO) MASTER EXIT MONITOR (AUTO-DISCOVERY)
 # ==============================================================================
-import os
-import sys
 import time
 import json
 import sqlite3
 import requests
 import boto3
 import datetime
-from datetime import datetime as dt
+from datetime import datetime as dt, timezone
 import pytz
 import re
 from pathlib import Path
 from dotenv import load_dotenv
 from boto3.dynamodb.conditions import Attr
+
+# Inbound broker ground-truth reconciliation hook
+try:
+    from src.broker_reconciliation import reconcile_broker_state
+except ImportError:
+    try:
+        from broker_reconciliation import reconcile_broker_state
+    except ImportError:
+        reconcile_broker_state = None
 
 if os.path.exists('.env.prod'):
     load_dotenv('.env.prod', override=True)
@@ -31,6 +38,20 @@ else:
 MANIFEST_PATH = "trading_levels.json"
 MTTP_MAX_MINUTES = int(os.getenv("MTTP_MAX_MINUTES", 15))  # Default 15m Scalp Horizon
 DB_FILE = "harm_telemetry.db"
+
+# In-memory deduplication and execution lock trackers
+ADOPTED_SYMBOLS = set()
+PENDING_CLOSE_SYMBOLS = set()
+ACTIVE_BROKER_STOPS = {}  # {occ_symbol: {"order_id": id, "stop_price": px, "placed_at": epoch}}
+
+def get_tenant_id():
+    explicit = os.getenv('TENANT_ID')
+    if explicit:
+        return explicit
+    exec_env = os.getenv('EXECUTION_ENV', 'SANDBOX').upper()
+    if exec_env in ['PROD', 'PRODUCTION', 'LIVE']:
+        return 'COMPANY_A_PROD'
+    return 'COMPANY_A_SANDBOX'
 
 def write_heartbeat(service_name):
     hb_dir = Path("logs/heartbeats")
@@ -158,6 +179,34 @@ def get_live_bid_ask(occ_symbol):
 
     return 0.0, 0.0, base_url
 
+def has_active_broker_stop(occ_symbol, account_id, active_base_url, headers):
+    now = time.time()
+    if occ_symbol in ACTIVE_BROKER_STOPS:
+        cached = ACTIVE_BROKER_STOPS[occ_symbol]
+        if now - cached.get("placed_at", 0) < 180:  # Valid for 3 minutes
+            return True
+
+    try:
+        url = f"{active_base_url}/accounts/{account_id}/orders"
+        res = requests.get(url, headers=headers, timeout=4)
+        if res.status_code == 200:
+            orders_data = res.json().get('orders', {}).get('order', [])
+            if isinstance(orders_data, dict):
+                orders_data = [orders_data]
+            for od in orders_data:
+                if (od.get('option_symbol') == occ_symbol 
+                    and od.get('status') in ['open', 'pending'] 
+                    and od.get('side') == 'sell_to_close'):
+                    ACTIVE_BROKER_STOPS[occ_symbol] = {
+                        "order_id": od.get('id'),
+                        "stop_price": float(od.get('stop_price') or 0.0),
+                        "placed_at": now
+                    }
+                    return True
+    except Exception:
+        pass
+    return False
+
 def execute_tradier_close(occ_symbol, ticker, shares, base_url=None, max_wait_seconds=10):
     token = get_tradier_token()
     account_id = os.getenv("TRADIER_ACCOUNT_ID", TRADIER_ACCOUNT_ID)
@@ -219,6 +268,52 @@ def execute_tradier_close_stepped(occ_symbol, ticker, shares, base_url=None, max
     except Exception:
         return execute_tradier_close(occ_symbol, ticker, shares, active_base_url, max_wait_seconds)
 
+def place_broker_stop_order(occ_symbol, ticker, shares, stop_price, base_url=None):
+    token = get_tradier_token()
+    account_id = os.getenv("TRADIER_ACCOUNT_ID", TRADIER_ACCOUNT_ID)
+    active_base_url = (base_url or os.getenv("TRADIER_BASE_URL", TRADIER_BASE_URL)).rstrip('/')
+
+    if not token or not account_id:
+        return False
+
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+    # Guard: Deduplicate against broker open orders & in-memory cache
+    if has_active_broker_stop(occ_symbol, account_id, active_base_url, headers):
+        return True
+
+    match = re.match(r'^([A-Z]+)\d{6}[CP]\d{8}$', occ_symbol)
+    root_symbol = match.group(1) if match else ticker
+
+    payload = {
+        "class": "option",
+        "symbol": root_symbol,
+        "option_symbol": occ_symbol,
+        "side": "sell_to_close",
+        "quantity": str(abs(int(shares))),
+        "type": "stop",
+        "stop": f"{stop_price:.2f}",
+        "duration": "day"
+    }
+
+    try:
+        url = f"{active_base_url}/accounts/{account_id}/orders"
+        res = requests.post(url, data=payload, headers=headers, timeout=5)
+        if res.status_code == 200:
+            body = res.json()
+            order_info = body.get('order', {})
+            order_id = order_info.get('id') if isinstance(order_info, dict) else None
+            ACTIVE_BROKER_STOPS[occ_symbol] = {
+                "order_id": order_id,
+                "stop_price": stop_price,
+                "placed_at": time.time()
+            }
+            print(f"[🛡️ BROKER STOP PLACED] {shares}x {occ_symbol} @ Stop ${stop_price:.2f} | Order ID: {order_id}")
+            return True
+    except Exception as e:
+        print(f"[-] Error placing broker stop order for {occ_symbol}: {e}")
+    return False
+
 def sync_local_sqlite_exit(t_id, ticker, exit_reason, exit_price, exit_timestamp, net_pnl=0.0, remaining_shares=0, dynamic_stop=None):
     if os.path.exists(DB_FILE):
         try:
@@ -242,7 +337,7 @@ def sync_sqlite_to_dynamo():
             return
         dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
         table = dynamodb.Table('HarmonizedTrades')
-        tenant_id = os.getenv('TENANT_ID', 'COMPANY_A')
+        tenant_id = get_tenant_id()
 
         conn = sqlite3.connect(DB_FILE, timeout=5.0)
         conn.row_factory = sqlite3.Row
@@ -267,124 +362,53 @@ def sync_sqlite_to_dynamo():
                 'tenant_id': tenant_id, 'trade_id': t_id, 'occ_symbol': occ, 'ticker': ticker,
                 'shares': shares, 'entry_price': str(entry_p), 'stop_loss': stop_loss, 'take_profit': take_profit,
                 'exit_status': 'ACTIVE', 'direction': direction, 'timestamp': timestamp,
-                'execution_env': 'SANDBOX', 'is_live': 0, 'strategy': str(row["strategy"] if "strategy" in row.keys() else "SMART_CSO_SCALP")
+                'execution_env': os.getenv('EXECUTION_ENV', 'SANDBOX'), 'is_live': int(os.getenv('IS_LIVE', 0)),
+                'strategy': str(row["strategy"] if "strategy" in row.keys() else "SMART_CSO_SCALP")
             }
             table.put_item(Item=item_payload)
     except Exception:
         pass
 
-def synchronize_dynamo_with_tradier():
-    base_url = os.getenv('TRADIER_BASE_URL', TRADIER_BASE_URL).rstrip('/')
-    token = get_tradier_token()
-    account_id = os.getenv('TRADIER_ACCOUNT_ID', TRADIER_ACCOUNT_ID)
-    headers = {'Authorization': f'Bearer {token}', 'Accept': 'application/json'}
-
-    try:
-        res = requests.get(f'{base_url}/accounts/{account_id}/positions', headers=headers, timeout=10)
-        if res.status_code != 200:
-            return
-    except Exception:
-        return
-
-    positions_data = res.json().get('positions') if res.status_code == 200 else {}
-    if not isinstance(positions_data, dict):
-        positions_data = {}
-    raw_positions = positions_data.get('position', [])
-    if isinstance(raw_positions, dict):
-        raw_positions = [raw_positions]
-
-    live_broker_state = {}
-    for pos in raw_positions:
-        symbol = pos.get('symbol', '')
-        if not symbol:
-            continue
-         
-        match = re.match(r'^([A-Z]+)\d{6}[CP]\d{8}$', symbol)
-        ticker = match.group(1) if match else symbol[:4].rstrip('0123456789')
-         
-        qty = float(pos.get('quantity', 0))
-        cost_basis_raw = float(pos.get('cost_basis', 0.0))
-         
-        if cost_basis_raw > 10.0 and qty > 0:
-            per_share_entry = round(cost_basis_raw / (qty * 100.0), 2)
-        elif qty > 0:
-            per_share_entry = round(cost_basis_raw / qty, 2)
-        else:
-            per_share_entry = round(cost_basis_raw, 2)
-
-        live_broker_state[symbol] = {
-            'occ_symbol': symbol,
-            'ticker': ticker,
-            'quantity': qty,
-            'cost_basis': per_share_entry,
-            'entry_price': per_share_entry,
-            'date_acquired': pos.get('date_acquired')
-        }
-
-    dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
-    table = dynamodb.Table('HarmonizedTrades')
-
-    try:
-        response = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE'))
-        existing_items = response.get('Items', [])
-    except Exception:
-        return
-
-    existing_occ_symbols = {item.get('occ_symbol', item.get('ticker')): item for item in existing_items}
-    now_str = dt.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    tenant_id = os.getenv('TENANT_ID', 'COMPANY_A')
-    for symbol, data in live_broker_state.items():
-        if symbol not in existing_occ_symbols:
-            t_id = f"trade_{symbol.lower()}"
-            item_payload = {
-                'tenant_id': tenant_id,
-                'trade_id': t_id,
-                'occ_symbol': symbol,
-                'ticker': data['ticker'],
-                'shares': str(int(data['quantity'])),
-                'entry_price': str(data['entry_price']),
-                'cost_basis': str(data['cost_basis']),
-                'exit_status': 'ACTIVE',
-                'direction': 'CALL' if 'C' in symbol[len(data['ticker']):] else 'PUT',
-                'timestamp': now_str,
-                'execution_tag': 'NF',
-                'cso_notes': 'REHYDRATED_FROM_TRADIER'
-            }
-            try:
-                table.put_item(Item=item_payload)
-            except Exception:
-                pass
-
 def evaluate_gex_exits():
+    # 1. Authoritative ground-truth sync directly from Tradier broker positions
+    if reconcile_broker_state:
+        try:
+            reconcile_broker_state()
+        except Exception as _re_ex:
+            print(f"[-] Broker reconciliation warning: {_re_ex}")
+
     try:
         dynamodb = boto3.resource('dynamodb', region_name=os.getenv('AWS_REGION', 'us-east-1'))
         table = dynamodb.Table('HarmonizedTrades')
+        tenant_id = get_tenant_id()
          
-        res = table.scan(FilterExpression=Attr('exit_status').eq('ACTIVE'))
+        res = table.scan(FilterExpression=Attr('tenant_id').eq(tenant_id) & Attr('exit_status').eq('ACTIVE'))
         active_items = res.get('Items', [])
 
         if not active_items:
-            print("[⚙️ MASTER EXIT MONITOR] Scanning DynamoDB... 0 active trades pending exit.")
+            print(f"[⚙️ MASTER EXIT MONITOR] Scanning DynamoDB ({tenant_id})... 0 active trades pending exit.")
             return
 
         now = dt.now()
         now_str = now.strftime("%Y-%m-%d %H:%M:%S")
 
         print(f"\n=======================================================================================================================")
-        print(f"📊 AUTO-DISCOVERED CSO MASTER MONITOR | {len(active_items)} ACTIVE TRADES | {now_str}")
+        print(f"📊 AUTO-DISCOVERED CSO MASTER MONITOR | {len(active_items)} ACTIVE TRADES ({tenant_id}) | {now_str}")
         print(f"=======================================================================================================================")
         print(f"{'SYMBOL':<20} | {'DIR':<5} | {'ENTRY':<8} | {'MARK':<8} | {'SHARES':<6} | {'STOP':<8} | {'MTTP / HORIZON':<15} | {'PNL':<10}")
         print(f"-" * 105)
 
         for item in active_items:
             t_id = item.get('trade_id')
-            tenant_id = item.get('tenant_id', 'COMPANY_A')
             ticker = str(item.get('ticker', '')).upper()
             occ_symbol = str(item.get('occ_symbol', ticker))
+             
+            # Execution Lock Guard: Skip if already pending close
+            if occ_symbol in PENDING_CLOSE_SYMBOLS:
+                continue
+
             entry_price = float(item.get('entry_price', 0.0) or 0.0)
              
-            # Safe shares parsing avoiding 'None' string conversion crash
             raw_shares = item.get('shares')
             if raw_shares is None or str(raw_shares).lower() in ['none', '']:
                 total_shares = 1
@@ -396,7 +420,6 @@ def evaluate_gex_exits():
 
             trade_dir = str(item.get('direction', 'CALL')).upper()
             stored_peak = float(item.get('peak_price', entry_price) or entry_price)
-            is_runner = bool(item.get('is_runner', False))
             accumulated_pnl = float(item.get('partial_pnl', 0.0) or 0.0)
             ts_str = item.get('timestamp')
 
@@ -417,46 +440,47 @@ def evaluate_gex_exits():
             if current_price == 0.0:
                 current_price = entry_price
 
-            # WATERMARK & RECOVERY TRACKING
             peak_price = max(stored_peak, current_price)
             pnl_pct = round(((current_price - entry_price) / entry_price) * 100.0, 2)
             peak_pnl_pct = round(((peak_price - entry_price) / entry_price) * 100.0, 2)
 
-            # SMART BASE STOP FLOOR (Sub-$1 options get 30% risk buffer)
             base_stop = round(entry_price * 0.70, 2) if entry_price <= 1.00 else round(entry_price * 0.80, 2)
             
-            # HIGH-SIDE DYNAMIC & RECOVERY TRAILING STOP LOGIC:
-            if peak_pnl_pct >= 35.0:
-                calculated_stop = round(peak_price * 0.90, 2)
-            elif peak_pnl_pct >= 20.0:
-                calculated_stop = round(peak_price * 0.88, 2)
-            elif peak_pnl_pct >= 10.0:
-                calculated_stop = round(peak_price * 0.85, 2)
-            elif current_price >= entry_price:
-                # If price has recovered to or above entry, lock stop at break-even / entry cost
-                calculated_stop = round(entry_price, 2)
-            elif peak_price > (entry_price * 0.85) and current_price > stored_peak * 0.90:
-                # Local bounce recovery ratchet: if it recovered significantly from the lows, tighten stop below current mark
-                calculated_stop = round(current_price * 0.90, 2)
+            if peak_pnl_pct >= 40.0:
+                calculated_stop = round(max(entry_price * 1.25, peak_price * 0.85), 2)
+            elif peak_pnl_pct >= 25.0:
+                calculated_stop = round(max(entry_price * 1.15, peak_price * 0.85), 2)
+            elif peak_pnl_pct >= 15.0:
+                calculated_stop = round(max(entry_price * 1.08, peak_price * 0.85), 2)
+            elif peak_pnl_pct >= 8.0:
+                calculated_stop = entry_price * 1.03
             else:
                 calculated_stop = base_stop
 
-            # Ensure dynamic stop respects base floor but ratchets upward on recovery
             dynamic_stop = max(base_stop, calculated_stop)
-
             mttp_status = f"{elapsed_minutes:.1f}m / {MTTP_MAX_MINUTES}m"
 
             print(f"{occ_symbol:<20} | {trade_dir:<5} | ${entry_price:<7.2f} | ${current_price:<7.2f} | {total_shares:<6} |${dynamic_stop:<7.2f} | {mttp_status:<15} | {pnl_pct:+6.1f}%")
 
             exit_reason = None
+             
             if current_price <= dynamic_stop and current_price > 0:
-                exit_reason = f"[SCJ] DYNAMIC_TRAIL_STOP_(${dynamic_stop:.2f})"
+                if peak_pnl_pct >= 8.0:
+                    exit_reason = f"[MTTP] LOCKED_PROFIT_STOP_(${dynamic_stop:.2f})_[Peak:+{peak_pnl_pct}%]"
+                else:
+                    exit_reason = f"[SCJ] DYNAMIC_TRAIL_STOP_(${dynamic_stop:.2f})"
+             
             elif pnl_pct >= 50.0 and total_shares == 1:
                 exit_reason = "[SCJ] TAKE_PROFIT_50PCT"
+                 
             elif pnl_pct <= -20.0:
                 exit_reason = "[SCJ] STOP_LOSS_20PCT"
+                 
             elif elapsed_minutes >= MTTP_MAX_MINUTES and is_regular_trading_hours():
-                exit_reason = f"[SCJ] MTTP_TIME_EXPIRED_{MTTP_MAX_MINUTES}M"
+                if pnl_pct > 0:
+                    exit_reason = f"[MTTP] TIME_HORIZON_EXPIRED_SECURED_+{pnl_pct}%"
+                else:
+                    exit_reason = f"[MTTP] TIME_EXPIRED_STALLED_MOMENTUM"
 
             table.update_item(
                 Key={'tenant_id': tenant_id, 'trade_id': t_id},
@@ -466,8 +490,15 @@ def evaluate_gex_exits():
                 }
             )
 
+            # AUTO-PUSH SERVER-SIDE BROKER STOP ONCE PROFIT TIER ACHIEVED
+            if peak_pnl_pct >= 15.0 and stored_peak < peak_price:
+                place_broker_stop_order(occ_symbol, ticker, total_shares, dynamic_stop, active_base_url)
+
             if exit_reason:
+                # Engage execution lock immediately to prevent race conditions / double-taps
+                PENDING_CLOSE_SYMBOLS.add(occ_symbol)
                 print(f"🚨 [EXIT TRIGGERED] {ticker} ({occ_symbol}) -> {exit_reason}")
+                
                 if execute_tradier_close_stepped(occ_symbol, ticker, total_shares, active_base_url):
                     final_pnl = round((current_price - entry_price) * total_shares * 100.0, 2)
                     total_net = round(accumulated_pnl + final_pnl, 2)
@@ -479,6 +510,7 @@ def evaluate_gex_exits():
                         }
                     )
                     sync_local_sqlite_exit(t_id, ticker, exit_reason, current_price, now_str, total_net, remaining_shares=0)
+                    ADOPTED_SYMBOLS.add(occ_symbol)
                     print(f"[✓] Position Closed Successfully | Net PnL: ${total_net:+.2f}")
 
     except Exception as e:
@@ -495,4 +527,4 @@ if __name__ == "__main__":
             write_heartbeat("GexExitMonitor")
         except Exception as e:
             print(f"[-] Loop error: {e}")
-        time.sleep(10)
+        time.sleep(2.5)
