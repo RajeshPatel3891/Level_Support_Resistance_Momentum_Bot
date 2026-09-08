@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-HARM.AI // DYNAMIC GUARDRAIL LEVEL HARVESTER (24-TICKER MATRIX)
+HARM.AI // DYNAMIC GUARDRAIL LEVEL HARVESTER (27-TICKER MATRIX)
 ===============================================================================
 1. Pulls live prices/targets from Proximity API or Tradier API.
 2. Integrates GEX walls and dynamic price-tiered proximity thresholds.
-3. Falls back to static baselines for off-hours testing across all 24 tickers.
+3. Falls back to static baselines for off-hours testing across all 27 tickers.
 4. Writes updated levels atomically to local disk, memory cache, and S3.
 """
 
@@ -35,7 +35,8 @@ else:
     load_dotenv(override=True)
 
 TARGET_TICKERS = [
-    "SPY", "QQQ", "IWM", "NVDA", "TSLA", "AAPL", "AMZN", "GOOGL", "AMD", 
+    "SPY", "QQQ", "IWM", "XLF", "GDX", "XLE",
+    "NVDA", "TSLA", "AAPL", "AMZN", "GOOGL", "AMD", 
     "META", "NFLX", "PLTR", "SOFI", "F", "AAL", "INTC", "RIVN", "HOOD", 
     "BAC", "SNAP", "MARA", "CCL", "UBER", "NKE"
 ]
@@ -51,40 +52,43 @@ if "sandbox" in TRADIER_BASE_URL.lower():
     TRADIER_BASE_URL = "https://sandbox.tradier.com/v1"
 
 STATIC_BASELINE_LEVELS = {
-  'SPY':   {'spot': 550.00, 'call_target': 552.75, 'put_target': 547.25},
-  'QQQ':   {'spot': 480.00, 'call_target': 482.40, 'put_target': 477.60},
-  'IWM':   {'spot': 210.00, 'call_target': 211.05, 'put_target': 208.95},
-  'NVDA':  {'spot': 226.43, 'call_target': 226.43, 'put_target': 224.90},
-  'TSLA':  {'spot': 341.66, 'call_target': 341.66, 'put_target': 338.50},
-  'AAPL':  {'spot': 306.79, 'call_target': 306.79, 'put_target': 304.80},
-  'AMZN':  {'spot': 180.00, 'call_target': 180.90, 'put_target': 179.10},
-  'GOOGL': {'spot': 165.00, 'call_target': 165.80, 'put_target': 164.20},
-  'AMD':   {'spot': 140.00, 'call_target': 140.70, 'put_target': 139.30},
-  'META':  {'spot': 500.00, 'call_target': 502.50, 'put_target': 497.50},
-  'NFLX':  {'spot': 620.00, 'call_target': 623.10, 'put_target': 616.90},
-  'PLTR':  {'spot': 179.91, 'call_target': 179.91, 'put_target': 176.20},
-  'SOFI':  {'spot': 18.33,  'call_target': 18.33,  'put_target': 18.28},
-  'F':     {'spot': 14.14,  'call_target': 14.14,  'put_target': 13.88},
-  'AAL':   {'spot': 15.48,  'call_target': 15.48,  'put_target': 14.95},
-  'INTC':  {'spot': 105.08, 'call_target': 105.08, 'put_target': 104.20},
-  'RIVN':  {'spot': 15.59,  'call_target': 15.59,  'put_target': 15.40},
-  'HOOD':  {'spot': 22.00,  'call_target': 22.11,  'put_target': 21.89},
-  'BAC':   {'spot': 38.00,  'call_target': 38.19,  'put_target': 37.81},
-  'SNAP':  {'spot': 12.00,  'call_target': 12.06,  'put_target': 11.94},
-  'MARA':  {'spot': 18.00,  'call_target': 18.09,  'put_target': 17.91},
-  'CCL':   {'spot': 16.00,  'call_target': 16.08,  'put_target': 15.92},
-  'UBER':  {'spot': 70.00,  'call_target': 70.85,  'put_target': 69.65},
-  'NKE':   {'spot': 80.00,  'call_target': 80.40,  'put_target': 79.60}
+    'SPY':   {'spot': 550.00, 'call_target': 552.75, 'put_target': 547.25},
+    'QQQ':   {'spot': 480.00, 'call_target': 482.40, 'put_target': 477.60},
+    'IWM':   {'spot': 210.00, 'call_target': 211.05, 'put_target': 208.95},
+    'XLF':   {'spot': 58.10,  'call_target': 58.50,  'put_target': 57.70},
+    'GDX':   {'spot': 99.26,  'call_target': 100.00, 'put_target': 98.50},
+    'XLE':   {'spot': 64.06,  'call_target': 64.50,  'put_target': 63.60},
+    'NVDA':  {'spot': 226.43, 'call_target': 226.43, 'put_target': 224.90},
+    'TSLA':  {'spot': 341.66, 'call_target': 341.66, 'put_target': 338.50},
+    'AAPL':  {'spot': 306.79, 'call_target': 306.79, 'put_target': 304.80},
+    'AMZN':  {'spot': 180.00, 'call_target': 180.90, 'put_target': 179.10},
+    'GOOGL': {'spot': 165.00, 'call_target': 165.80, 'put_target': 164.20},
+    'AMD':   {'spot': 140.00, 'call_target': 140.70, 'put_target': 139.30},
+    'META':  {'spot': 500.00, 'call_target': 502.50, 'put_target': 497.50},
+    'NFLX':  {'spot': 620.00, 'call_target': 623.10, 'put_target': 616.90},
+    'PLTR':  {'spot': 179.91, 'call_target': 179.91, 'put_target': 176.20},
+    'SOFI':  {'spot': 18.33,  'call_target': 18.33,  'put_target': 18.28},
+    'F':     {'spot': 14.14,  'call_target': 14.14,  'put_target': 13.88},
+    'AAL':   {'spot': 15.48,  'call_target': 15.48,  'put_target': 14.95},
+    'INTC':  {'spot': 105.08, 'call_target': 105.08, 'put_target': 104.20},
+    'RIVN':  {'spot': 15.59,  'call_target': 15.59,  'put_target': 15.40},
+    'HOOD':  {'spot': 22.00,  'call_target': 22.11,  'put_target': 21.89},
+    'BAC':   {'spot': 38.00,  'call_target': 38.19,  'put_target': 37.81},
+    'SNAP':  {'spot': 12.00,  'call_target': 12.06,  'put_target': 11.94},
+    'MARA':  {'spot': 18.00,  'call_target': 18.09,  'put_target': 17.91},
+    'CCL':   {'spot': 16.00,  'call_target': 16.08,  'put_target': 15.92},
+    'UBER':  {'spot': 70.00,  'call_target': 70.85,  'put_target': 69.65},
+    'NKE':   {'spot': 80.00,  'call_target': 80.40,  'put_target': 79.60}
 }
 
 def get_dynamic_proximity_threshold(price: float) -> float:
     """Returns dynamic arming threshold based on asset price tier."""
     if price >= 100.0:
-        return 0.0075  # 0.75% (, , )
+        return 0.0075  # 0.75%
     elif price >= 30.0:
-        return 0.0085  # 0.85% (, )
+        return 0.0085  # 0.85%
     else:
-        return 0.0120  # 1.20% (, , )
+        return 0.0120  # 1.20%
 
 def format_ticker_payload(symbol: str, spot_px: float, vwap_px: float = None, call_tgt: float = None, put_tgt: float = None, gex_label: str = "NEUTRAL") -> dict:
     vwap_px = vwap_px or spot_px

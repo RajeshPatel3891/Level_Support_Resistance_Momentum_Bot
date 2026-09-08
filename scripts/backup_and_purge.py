@@ -41,7 +41,7 @@ def run_backup_and_purge():
         # Purge closed records from DynamoDB
         purged_count = 0
         for item in items:
-            if item.get('exit_status') == 'CLOSED':
+            if str(item.get('exit_status', '')).startswith('CLOSED') or '[SCJ]' in str(item.get('exit_status', '')) or 'EXPIRED' in str(item.get('exit_status', '')):
                 table.delete_item(Key={'tenant_id': item['tenant_id'], 'trade_id': item['trade_id']})
                 purged_count += 1
         print(f"[✓] Purged {purged_count} closed historical records from DynamoDB.")
