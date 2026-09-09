@@ -13,17 +13,18 @@ if os.getenv('EXECUTION_ENV', '').upper() == 'SANDBOX':
 # - SESSION REGIME & TIME-OF-DAY VOLATILITY SCALING:
 #   * OPENING RANGE (09:45 - 10:15 ET): Aggressive Mid-Point Crossing / Tight Offset
 #   * MORNING TREND (10:15 - 11:30 ET): Standard Momentum, 10s sniper wait
-#   * MIDDAY LULL (11:30 - 14:00 ET): Mean-reversion bias, patient low-ball, 20s sniper wait
+#   * MIDDAY LULL (11:30 - 14:00 ET): Tightened 95% Proximity Gate, patient low-ball, 20s wait
 #   * POWER HOUR (14:00 - 15:45 ET): Gamma Squeeze Breakout, widened proximity, 10s wait
 #   * CLOSE BLACKOUT (15:45 - 16:00 ET): Entry lockout, risk-only monitoring
-# - MULTI-FACTOR CONFLUENCE SCORING ($C$): GEX + RVOL + Open Interest + VWAP Alignment
-# - MINIMUM DTE ENFORCEMENT: Strips 0 DTE decay, mandates >= 2 DTE
+# - 4-PILLAR CONFLUENCE SCORING: GEX + RVOL (1.3x) + Market Alignment + RSI Exhaustion Guard
+# - TRADEALGO INTRADAY REGIME CLASSIFIER: Dynamic VWAP / Support / Resistance Zone Setups
+# - MINIMUM DTE ENFORCEMENT: Strips 0 DTE decay, mandates 3-7+ DTE safety window
 # - HIGH-DELTA ENFORCEMENT & CONDITIONAL VERBOSE LOGGING: Mandates options with |delta| >= 0.30
-# - ACTIVE INTERNAL SL/TP ENGINE: Direct broker sell_to_close execution in telemetry
-#   (Configured with a 180s startup grace period to defer completely to GexExitMonitor)
+# - IMMEDIATE ZERO-LAG BROKER STOP PLACEMENT: Posts protective stop at Tradier upon fill confirmation
 # - SYNCHRONOUS POST-CANCEL VERIFICATION: Prevents untracked broker ghost fills
-# - ADAPTIVE RVOL FLOOR: 1.2x baseline; bypassed for A+ confluence touches
 # - ASYMMETRIC RE-ENTRY GATE: Win-driven re-entries (Green -> allow 2nd trade; Red -> lockout)
+# - DUAL-TRACK EXECUTION MATRIX: A+ Confluence triggers instant spread-crossing ("NF"/Ask), standard setups use low-ball.
+# - SOLE AUTHORITY DELEGATION: Defers active trailing exits to GexExitMonitor.
 # ==============================================================================
 
 import json
@@ -40,6 +41,7 @@ import pytz
 from pathlib import Path
 from threading import Thread
 from dotenv import load_dotenv
+import re
 
 from src.RiskEngine import evaluate_orb_vwap_setup, evaluate_vwap_mean_reversion
 
@@ -68,12 +70,12 @@ MAX_TRADE_DOLLAR_COST = float(os.getenv("MAX_TRADE_DOLLAR_COST", 150.0))
 API_HEALTH_STATUS = {"healthy": True, "last_latency": 0.0, "status_code": 200}
 
 def get_market_session_regime():
-    if os.getenv("BYPASS_MARKET_HOURS", "0") == "1":
+    if os.getenv("BYPASS_MARKET_HOURS", "0") == "1" or os.getenv("BYPASS_SESSION_GATES", "0") == "1":
         return {
             "session": "REGULAR_MOMENTUM",
-            "min_prox_score": 80.0,
+            "min_prox_score": 75.0,
             "index_boost": 15.0,
-            "wait_seconds": 12,
+            "wait_seconds": 10,
             "prefer_mean_reversion": False,
             "allow_entries": True,
             "execution_style": "LOW_BALL"
@@ -182,6 +184,42 @@ def write_heartbeat(service_name):
 def log_msg(msg: str, engine_tag: str = "SCJ_ENGINE"):
     print(f"[{datetime.now().strftime('%H:%M:%S')}] [{engine_tag}] {msg}")
 
+def place_immediate_broker_stop(occ_symbol: str, ticker: str, shares: int, stop_price: float) -> bool:
+    if not TRADIER_TOKEN or not TRADIER_ACCOUNT_ID:
+        log_msg("[-] Tradier credentials missing for immediate stop placement.", "SCJ_ENGINE")
+        return False
+
+    match = re.match(r'^([A-Z]+)\d{6}[CP]\d{8}$', occ_symbol)
+    root_symbol = match.group(1) if match else ticker
+    headers = {"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"}
+    
+    payload = {
+        "class": "option",
+        "symbol": root_symbol,
+        "option_symbol": occ_symbol,
+        "side": "sell_to_close",
+        "quantity": str(abs(int(shares))),
+        "type": "stop",
+        "stop": f"{stop_price:.2f}",
+        "duration": "day"
+    }
+
+    try:
+        url = f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders"
+        res = requests.post(url, data=payload, headers=headers, timeout=5)
+        if res.status_code == 200:
+            body = res.json()
+            order_info = body.get('order', {})
+            order_id = order_info.get('id') if isinstance(order_info, dict) else None
+            log_msg(f"[🛡️ ZERO-LAG STOP SECURED] {shares}x {occ_symbol} stop placed @ ${stop_price:.2f} (Order ID: {order_id})", "SCJ_ENGINE")
+            return True
+        else:
+            log_msg(f"[-] Broker stop order rejected ({res.status_code}): {res.text}", "SCJ_ENGINE")
+            return False
+    except Exception as e:
+        log_msg(f"[-] Immediate broker stop placement exception: {e}", "SCJ_ENGINE")
+        return False
+
 def atomically_close_trade(tenant_id: str, occ_symbol: str, exit_price: float, net_pnl: float, trade_id: str = None):
     try:
         dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
@@ -286,7 +324,7 @@ def predict_fill_quality_score(quote: dict, side: str = "buy") -> tuple:
     return final_score, "Passed Predictive Score Gate"
 
 def is_valid_time_of_day_window() -> bool:
-    if os.getenv("BYPASS_MARKET_HOURS", "0") == "1":
+    if os.getenv("BYPASS_MARKET_HOURS", "0") == "1" or os.getenv("BYPASS_SESSION_GATES", "0") == "1":
         return True
     ny_tz = pytz.timezone('America/New_York')
     now = datetime.now(ny_tz)
@@ -353,8 +391,80 @@ def calculate_rvol(quote):
     raw_rvol = volume / (avg_volume / 6.5)
     return round(min(raw_rvol, 5.0), 2)
 
+def calculate_intraday_rsi(df_bars, period=14):
+    """Calculates Wilder's RSI on intraday minute closes for exhaustion safety guards."""
+    if df_bars is None or not hasattr(df_bars, "empty") or df_bars.empty or len(df_bars) < (period + 2):
+        return 50.0
+    try:
+        closes = df_bars['close'].astype(float).values
+        deltas = np.diff(closes)
+        gains = np.where(deltas > 0, deltas, 0.0)
+        losses = np.where(deltas < 0, -deltas, 0.0)
+
+        avg_gain = np.mean(gains[:period])
+        avg_loss = np.mean(losses[:period])
+
+        for i in range(period, len(deltas)):
+            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
+        if avg_loss == 0.0:
+            return 100.0
+        rs = avg_gain / avg_loss
+        return round(float(100.0 - (100.0 / (1.0 + rs))), 1)
+    except Exception:
+        return 50.0
+
+def evaluate_tradealgo_regime(spot, vwap, support_zone, resistance_zone, rsi_1m, rvol):
+    """
+    Classifies market action into TradeAlgo's 4 core intraday setups:
+    1. Trend-Following Long (Dip to VWAP/Support)
+    2. Reversal Short (Push to VWAP/Resistance)
+    3. Breakout Continuation (Break of Resistance with Volume)
+    4. Range Fade (Box edges)
+    """
+    if isinstance(support_zone, list) and len(support_zone) >= 2:
+        sup_low, sup_high = min(support_zone), max(support_zone)
+    else:
+        sup_low, sup_high = spot * 0.992, spot * 0.998
+
+    if isinstance(resistance_zone, list) and len(resistance_zone) >= 2:
+        res_low, res_high = min(resistance_zone), max(resistance_zone)
+    else:
+        res_low, res_high = spot * 1.002, spot * 1.008
+
+    # Risk Guard: Exhaustion Bounds
+    if spot > vwap * 1.03 and rsi_1m > 75.0:
+        return "EXHAUSTION_OVERBOUGHT", "NO_ENTRY"
+    if spot < vwap * 0.97 and rsi_1m < 25.0:
+        return "EXHAUSTION_OVERSOLD", "NO_ENTRY"
+
+    # Setup A: Trend-Following Long (Above VWAP, pulling back to VWAP / Support band)
+    if spot >= vwap and sup_low <= spot <= (vwap * 1.003):
+        if rvol >= 1.2 and rsi_1m < 65.0:
+            return "CALL", "TREND_PULLBACK_LONG"
+
+    # Setup B: Reversal Short (Below VWAP, rejection pushing into VWAP / Resistance)
+    if spot <= vwap and (vwap * 0.997) <= spot <= res_high:
+        if rvol >= 1.2 and rsi_1m > 35.0:
+            return "PUT", "RESISTANCE_REVERSAL_SHORT"
+
+    # Setup C: Breakout Continuation
+    if spot > res_high and rvol >= 1.8:
+        return "CALL", "BREAKOUT_CONTINUATION"
+    if spot < sup_low and rvol >= 1.8:
+        return "PUT", "BREAKDOWN_CONTINUATION"
+
+    # Setup D: Range Fade
+    if spot <= sup_low:
+        return "CALL", "RANGE_SUPPORT_FADE"
+    if spot >= res_high:
+        return "PUT", "RANGE_RESISTANCE_FADE"
+
+    return None, "NO_CONFLUENCE"
+
 def validate_reentry_eligibility(ticker, db_path=DB_PATH):
-    if os.getenv("BYPASS_TRADE_LIMITS", "0") == "1":
+    if os.getenv("BYPASS_TRADE_LIMITS", "0") == "1" or os.getenv("BYPASS_COOLDOWNS", "0") == "1":
         return True
 
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -539,10 +649,13 @@ def search_smart_option_chain(ticker, direction="CALL", spot_price=0.0):
          
         ny_tz = pytz.timezone('America/New_York')
         today_ny = datetime.now(ny_tz).date()
-        min_date_target = (today_ny + timedelta(days=2)).strftime("%Y-%m-%d")
-        valid_exps = [e for e in expirations if e >= min_date_target]
+        min_date_target = (today_ny + timedelta(days=3)).strftime("%Y-%m-%d")
+        max_date_target = (today_ny + timedelta(days=8)).strftime("%Y-%m-%d")
+        valid_exps = [e for e in expirations if min_date_target <= e <= max_date_target]
         if not valid_exps:
-            log_msg(f"[⚠️ DTE FILTER] No option expiration found with >= 2 DTE for {ticker}.", "SCJ_ENGINE")
+            valid_exps = [e for e in expirations if e >= min_date_target]
+        if not valid_exps:
+            log_msg(f"[⚠️ DTE FILTER] No option expiration found with >= 3 DTE for {ticker}.", "SCJ_ENGINE")
             return None
         target_exp = valid_exps[0]
     except Exception as e:
@@ -572,12 +685,12 @@ def search_smart_option_chain(ticker, direction="CALL", spot_price=0.0):
                 continue
              
             ask_val = float(opt.get("ask", 0.0) or 0.0)
-            
+             
             # --- HIGH-DELTA ENFORCEMENT & OPTIONAL VERBOSE LOGGING ---
             greeks = opt.get("greeks", {}) or {}
             delta = float(greeks.get("delta", 0.0) or 0.0)
             abs_delta = abs(delta)
-            
+             
             if os.getenv("VERBOSE_DELTA_LOG", "0") == "1":
                 log_msg(f"[🔍 DELTA CHECK] {opt.get('symbol')} | Ask: ${ask_val:.2f} | Delta: {delta:+.2f} (Abs: {abs_delta:.2f}) [Min Required: {MIN_DELTA}]", "SCJ_ENGINE")
 
@@ -779,6 +892,28 @@ def execute_passive_bid_maker_order(occ_symbol, underlying, side, quantity=1, ma
         log_msg(f"[-] Maker execution exception: {e}", "SCJ_MAKER")
         return False, 0.0, ""
 
+def calculate_micro_price(quote: dict, fallback_mid: float = None) -> float:
+    """
+    Computes Volume-Weighted Micro-Price:
+    P_micro = (Bid_Size * Ask + Ask_Size * Bid) / (Bid_Size + Ask_Size)
+    Eliminates adverse selection and accounts for order book queue asymmetry.
+    """
+    bid = float(quote.get("bid") or 0.0)
+    ask = float(quote.get("ask") or 0.0)
+    bid_size = int(quote.get("bidsize") or quote.get("bid_size") or 0)
+    ask_size = int(quote.get("asksize") or quote.get("ask_size") or 0)
+
+    if bid <= 0.0 or ask <= 0.0:
+        return fallback_mid or 1.00
+
+    total_depth = bid_size + ask_size
+    if total_depth <= 0:
+        return round((bid + ask) / 2.0, 2)
+
+    raw_micro = (bid_size * ask + ask_size * bid) / total_depth
+    clamped_micro = max(bid, min(ask, raw_micro))
+    return round(clamped_micro, 2)
+
 def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_wait_seconds=5, execution_tag="SCJ", rvol_intensity=1.5):
     quantity = int(quantity or 1)
     env_chk = os.getenv("EXECUTION_ENV", "SANDBOX").upper()
@@ -806,7 +941,9 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
             log_msg(f"[⛔ EXECUTION ABORTED] Quote book empty for {occ_symbol}.", "SCJ_ENGINE")
             return False, 0.0, ""
 
+    # Calculate Volume-Weighted Micro-Price instead of simple midpoint
     mid_price = round((bid + ask) / 2.0, 2)
+    micro_price = calculate_micro_price(quote, fallback_mid=mid_price)
 
     if execution_tag == "SNIPER" or os.getenv("ENABLE_SNIPER", "0") == "1":
         log_msg(f"[🎯 SNIPER ROUTER] Routing to TradeAlgo adaptive low-ball sniper order...", "SCJ_ENGINE")
@@ -816,8 +953,8 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
         log_msg(f"[🛡️ LOW-PREMIUM ROUTER] Mid (${mid_price:.2f}) <= $0.60. Routing to PASSIVE MAKER BID...", "SCJ_ENGINE")
         return execute_passive_bid_maker_order(occ_symbol, underlying, side, quantity=quantity, max_wait_seconds=8)
 
-    limit_price = ask if (execution_tag == "NF" or os.getenv("FORCE_ASK", "0") == "1") else mid_price
-    log_msg(f"[*] [STEP 1: MIDPOINT ENTRY] Submitting LIMIT order @ MID: ${limit_price:.2f} (Bid: ${bid:.2f} / Ask: ${ask:.2f})...", "SCJ_ENGINE")
+    limit_price = ask if (execution_tag == "NF" or os.getenv("FORCE_ASK", "0") == "1") else micro_price
+    log_msg(f"[*] [STEP 1: MICRO-PRICE ENTRY] Submitting LIMIT order @ MICRO: ${limit_price:.2f} (Bid: ${bid:.2f} [x{quote.get('bidsize', 1)}] / Ask: ${ask:.2f} [x{quote.get('asksize', 1)}])...", "SCJ_ENGINE")
 
     payload = {
         "class": "option",
@@ -857,7 +994,7 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
             mock_order_id = f"SIM_{int(time.time()*1000)}"
             return True, limit_price, mock_order_id
 
-        log_msg(f"[✓] Midpoint Order {order_id} placed. Monitoring fill state...", "SCJ_ENGINE")
+        log_msg(f"[✓] Micro-Price Order {order_id} placed. Monitoring fill state...", "SCJ_ENGINE")
         return True, limit_price, order_id
 
     except Exception as e:
@@ -867,7 +1004,7 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
             fill_score = calculate_fill_quality_score(fill_price, bid, ask, side="buy")
             log_msg(f"[⚡ SANDBOX SIMULATED MATCH] Synthetic Receipt {mock_order_id} filled @ ${fill_price:.2f}", "SCJ_ENGINE")
             return True, fill_price, mock_order_id
-        log_msg(f"[-] Midpoint Execution Exception: {e}", "SCJ_ENGINE")
+        log_msg(f"[-] Micro-Price Execution Exception: {e}", "SCJ_ENGINE")
         return False, 0.0, ""
 
 def log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, direction, occ_symbol, order_id, tenant_id='COMPANY_A_PROD', execution_tag='SCJ', strategy_mode='SMART_CSO_SCALP'):
@@ -938,108 +1075,6 @@ def log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, 
         log_msg(f"[✓] DynamoDB synchronized: {ticker} [Tag: {execution_tag}] (Receipt ID: {order_id})", "SCJ_ENGINE")
     except Exception as e:
         log_msg(f"[-] DynamoDB Log Error: {e}", "SCJ_ENGINE")
-
-def execute_broker_exit(occ_symbol, underlying, quantity, exit_price, reason="STOP_LOSS"):
-    headers = {"Authorization": f"Bearer {TRADIER_TOKEN}", "Accept": "application/json"}
-    q = get_live_quote(occ_symbol)
-    bid = float(q.get('bid') or 0.0)
-    limit_px = round(max(0.01, bid), 2) if bid > 0 else round(float(exit_price), 2)
-    
-    log_msg(f"[🚨 ACTIVE EXIT TRIGGERED] Closing {quantity}x {occ_symbol} @ Bid: ${limit_px:.2f} | Reason: {reason}", "SCJ_ENGINE")
-    
-    payload = {
-        'class': 'option',
-        'symbol': underlying,
-        'option_symbol': occ_symbol,
-        'side': 'sell_to_close',
-        'quantity': str(int(quantity)),
-        'type': 'limit',
-        'price': f'{limit_px:.2f}',
-        'duration': 'day'
-    }
-    
-    try:
-        r = requests.post(f"{TRADIER_BASE_URL}/accounts/{TRADIER_ACCOUNT_ID}/orders", data=payload, headers=headers, timeout=10)
-        if r.status_code == 200:
-            return True, limit_px
-        else:
-            return True, limit_px
-    except Exception:
-        return True, limit_px
-
-def monitor_live_exit_telemetry(ticker):
-    log_msg(f"[📡 TELEMETRY STREAM ENGAGED] Active risk management fallback daemon armed for {ticker}...", "SCJ_ENGINE")
-    ticker_u = ticker.upper()
-    arm_time = time.time()
-    # 180-second grace period: leaves normal trailing/scaling 100% to GexExitMonitor
-    grace_period_seconds = 180.0
-    
-    while True:
-        time.sleep(2.5)
-        try:
-            dynamodb = boto3.resource('dynamodb', region_name=AWS_REGION)
-            table = dynamodb.Table('HarmonizedTrades')
-            res = table.scan(
-                FilterExpression="ticker = :t AND exit_status = :act",
-                ExpressionAttributeValues={":t": ticker_u, ":act": "ACTIVE"}
-            )
-            items = res.get('Items', [])
-            if not items:
-                conn = sqlite3.connect(DB_PATH)
-                c = conn.cursor()
-                c.execute("SELECT exit_status FROM trades WHERE UPPER(ticker) = ? ORDER BY timestamp DESC LIMIT 1", (ticker_u,))
-                row = c.fetchone()
-                conn.close()
-                if not row or row[0] != 'ACTIVE':
-                    log_msg(f"[ℹ️ TELEMETRY SHUTDOWN] Position {ticker_u} confirmed closed in DB. Exiting watch loop.", "SCJ_ENGINE")
-                    return
-                time.sleep(2.5)
-                continue
-
-            latest = max(items, key=lambda x: x.get('timestamp', ''))
-            entry_px = float(latest.get('entry_price', 0.64) or 0.64)
-            # Fallback emergency stop set strictly wider (-30%) so GexExitMonitor manages normal stops
-            stop_px = float(latest.get('stop_loss', entry_px * 0.70) or entry_px * 0.70)
-            take_px = float(latest.get('take_profit', entry_px * 2.00) or entry_px * 2.00)
-            shares_cnt = float(latest.get('shares', 1.0))
-            trade_id = latest.get('trade_id')
-            tenant_id = latest.get('tenant_id', 'COMPANY_A_PROD')
-            occ = latest.get('occ_symbol', ticker_u)
-
-            q = get_live_quote(occ)
-            bid = float(q.get('bid') or entry_px)
-            ask = float(q.get('ask') or entry_px)
-            mark = round((bid + ask) / 2.0, 2) if (bid and ask) else entry_px
-
-            dollar_pnl = round((mark - entry_px) * 100.0 * shares_cnt, 2)
-            pct_pnl = round((dollar_pnl / (entry_px * shares_cnt * 100.0)) * 100.0, 1) if entry_px > 0 else 0.0
-            pnl_str = f"{'+' if dollar_pnl >= 0 else ''}${dollar_pnl:.2f} ({pct_pnl:+.1f}%)"
-
-            log_msg(f"[⏱️ ACTIVE RISK WATCH (FALLBACK)] {ticker_u} | Mark: ${mark:.2f} | PnL: {pnl_str} | Emergency Stop: ${stop_px:.2f}", "SCJ_ENGINE")
-
-            in_grace_period = (time.time() - arm_time) < grace_period_seconds
-            if mark >= take_px or (mark <= stop_px and not in_grace_period):
-                if mark <= stop_px and in_grace_period:
-                    log_msg(f"[🛡️ GRACE PERIOD ACTIVE] {ticker_u} hit emergency mark (${mark:.2f}), but bypassing exit during 180s grace period.", "SCJ_ENGINE")
-                    continue
-                exit_reason = "EMERGENCY_STOP_LOSS" if mark <= stop_px else "EMERGENCY_TAKE_PROFIT"
-                success, final_px = execute_broker_exit(occ, ticker_u, shares_cnt, mark, reason=exit_reason)
-                if success:
-                    final_net_pnl = round((final_px - entry_px) * 100.0 * shares_cnt, 2)
-                    atomically_close_trade(tenant_id, occ, final_px, final_net_pnl, trade_id=trade_id)
-                    
-                    conn = sqlite3.connect(DB_PATH)
-                    c = conn.cursor()
-                    c.execute("UPDATE trades SET exit_status = 'CLOSED' WHERE UPPER(ticker) = ? AND UPPER(exit_status) = 'ACTIVE'", (ticker_u,))
-                    conn.commit()
-                    conn.close()
-                    
-                    pnl_color = "🟢" if final_net_pnl >= 0 else "🔴"
-                    log_msg(f"[{pnl_color} TRADE COMPLETED (FALLBACK)] {ticker_u} CLOSED @ ${final_px:.2f} | Net: ${final_net_pnl:+.2f} ({exit_reason})", "SCJ_ENGINE")
-                    return
-
-        except Exception:
-            pass
 
 def resolve_smart_direction(info, spot):
     vwap = float(info.get("vwap", spot))
@@ -1128,11 +1163,15 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
 
             spot = float(stock_quote.get("last") or info.get("spot") or info.get("last_price") or 0.0)
             target = float(info.get("target") or info.get("call_target") or 0.0)
+            vwap = float(info.get("vwap", spot) or spot)
             if spot <= 0:
                 continue
 
             prox_score = calculate_proximity_score(spot, target, threshold_pct=0.0075)
             is_confluent = bool(info.get("confluence_detected", False))
+
+            if session_tag == "MIDDAY_LULL" and prox_score < 95.0 and os.getenv("BYPASS_SESSION_GATES", "0") != "1":
+                continue
 
             sub_strategy_tag = execution_tag
             if prox_score >= prox_floor:
@@ -1141,23 +1180,42 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
             sub_strategy_mode = strategy_mode
             dir_reason = "PROXIMITY_GRADIENT"
              
+            df_1min_bars = fetch_intraday_bars(ticker_upper, interval="1min")
+            rvol = calculate_rvol(stock_quote)
+            current_rsi = calculate_intraday_rsi(df_1min_bars, period=14)
+
             if direction_override in ["CALL", "PUT"]:
                 raw_direction = direction_override.upper()
                 dir_reason = "CLI_MANUAL_OVERRIDE"
             elif prox_score >= 50.0 or bool(info.get("execution_armed", False)):
-                raw_direction, dir_reason = resolve_smart_direction(info, spot)
+                sup_zone = info.get("support_zone", [round(spot * 0.992, 2), round(spot * 0.998, 2)])
+                res_zone = info.get("resistance_zone", [round(spot * 1.002, 2), round(spot * 1.008, 2)])
+
+                playbook_dir, setup_reason = evaluate_tradealgo_regime(
+                    spot=spot,
+                    vwap=vwap,
+                    support_zone=sup_zone,
+                    resistance_zone=res_zone,
+                    rsi_1m=current_rsi,
+                    rvol=rvol
+                )
+
+                if playbook_dir in ["CALL", "PUT"]:
+                    raw_direction = playbook_dir
+                    dir_reason = setup_reason
+                else:
+                    raw_direction, dir_reason = resolve_smart_direction(info, spot)
             else:
-                df_1min = fetch_intraday_bars(ticker_upper, interval="1min")
-                if df_1min is not None and hasattr(df_1min, "empty") and not df_1min.empty:
+                if df_1min_bars is not None and hasattr(df_1min_bars, "empty") and not df_1min_bars.empty:
                     if session_cfg.get("prefer_mean_reversion", False):
-                        mr_res = evaluate_vwap_mean_reversion(df_1min)
+                        mr_res = evaluate_vwap_mean_reversion(df_1min_bars)
                         if mr_res.get('signal') in ['BUY_CALL', 'BUY_PUT']:
                             raw_direction = "CALL" if mr_res['signal'] == 'BUY_CALL' else "PUT"
                             dir_reason = mr_res['reason']
                             sub_strategy_mode = "VWAP_MEAN_REVERSION"
                             prox_score = max(prox_score, 80.0)
                         else:
-                            orb_res = evaluate_orb_vwap_setup(df_1min, orb_minutes=15)
+                            orb_res = evaluate_orb_vwap_setup(df_1min_bars, orb_minutes=15)
                             if orb_res.get('signal') in ['BUY_CALL', 'BUY_PUT']:
                                 raw_direction = "CALL" if orb_res['signal'] == 'BUY_CALL' else "PUT"
                                 dir_reason = orb_res['reason']
@@ -1166,14 +1224,14 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
                             else:
                                 continue
                     else:
-                        orb_res = evaluate_orb_vwap_setup(df_1min, orb_minutes=15)
+                        orb_res = evaluate_orb_vwap_setup(df_1min_bars, orb_minutes=15)
                         if orb_res.get('signal') in ['BUY_CALL', 'BUY_PUT']:
-                                raw_direction = "CALL" if orb_res['signal'] == 'BUY_CALL' else "PUT"
-                                dir_reason = orb_res['reason']
-                                sub_strategy_mode = "ORB_VWAP"
-                                prox_score = max(prox_score, 85.0)
+                            raw_direction = "CALL" if orb_res['signal'] == 'BUY_CALL' else "PUT"
+                            dir_reason = orb_res['reason']
+                            sub_strategy_mode = "ORB_VWAP"
+                            prox_score = max(prox_score, 85.0)
                         else:
-                            mr_res = evaluate_vwap_mean_reversion(df_1min)
+                            mr_res = evaluate_vwap_mean_reversion(df_1min_bars)
                             if mr_res.get('signal') in ['BUY_CALL', 'BUY_PUT']:
                                 raw_direction = "CALL" if mr_res['signal'] == 'BUY_CALL' else "PUT"
                                 dir_reason = mr_res['reason']
@@ -1190,13 +1248,22 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
             if not confluent and not (force_ticker and direction_override in ["CALL", "PUT"]):
                 continue
 
-            rvol = calculate_rvol(stock_quote)
-             
+            if prox_score >= 90.0 and os.getenv("BYPASS_SESSION_GATES", "0") != "1":
+                has_strict_confluence = is_confluent and (rvol >= 1.3) and (market_alignment_score == 1.0)
+                if not has_strict_confluence and prox_score < 98.0:
+                    continue
+
             effective_min_rvol = 1.0 if (is_confluent or prox_score >= 80.0) else MIN_RVOL
             if rvol < effective_min_rvol and not (force_ticker and os.getenv("BYPASS_RVOL_FILTER", "0") == "1"):
                 continue
 
-            df_1min_bars = fetch_intraday_bars(ticker_upper, interval="1min")
+            if direction == "CALL" and current_rsi > 78.0:
+                log_msg(f"[⛔ RSI OVERBOUGHT EXHAUSTION] {ticker_upper} 1m RSI ({current_rsi}) > 78.0 - CALL Aborted.", "SCJ_ENGINE")
+                continue
+            elif direction == "PUT" and current_rsi < 22.0:
+                log_msg(f"[⛔ RSI OVERSOLD EXHAUSTION] {ticker_upper} 1m RSI ({current_rsi}) < 22.0 - PUT Aborted.", "SCJ_ENGINE")
+                continue
+
             is_valid_structure, struct_reason = validate_micro_structure_breakout(df_1min_bars, direction, proximity_score=prox_score)
             if not is_valid_structure and not (force_ticker and os.getenv("BYPASS_MICRO_STRUCTURE", "0") == "1"):
                 continue
@@ -1206,7 +1273,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
                 continue
 
             pred_score, score_reason = predict_fill_quality_score(best_opt, side="buy")
-            if pred_score < 7.0:
+            if pred_score < 7.0 and os.getenv("BYPASS_SESSION_GATES", "0") != "1":
                 continue
 
             confluence_boost = 15.0 if is_confluent else 0.0
@@ -1221,7 +1288,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
                 index_boost
             )
              
-            if conviction_score < MIN_CONVICTION and not force_ticker:
+            if conviction_score < MIN_CONVICTION and not force_ticker and os.getenv("BYPASS_SESSION_GATES", "0") != "1":
                 continue
 
             if is_confluent or prox_score >= prox_floor:
@@ -1229,11 +1296,16 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
             else:
                 target_qty = max(1, base_qty)
 
+            is_a_plus_confluence = (rvol >= 1.5 and is_confluent and market_alignment_score >= 1.0 and conviction_score >= 85.0)
+            if is_a_plus_confluence:
+                sub_strategy_tag = "NF"
+                dir_reason = f"A+_CONFLUENCE_BREAKOUT_OVERRIDE | {dir_reason}"
+
             candidates.append({
                 "ticker": ticker_upper,
                 "spot": spot,
                 "direction": direction,
-                "reason": f"{dir_reason} | {conf_reason} | {struct_reason}" + (" | [CONFLUENCE_A+]" if is_confluent else "") + (" | [INDEX_BOOST]" if index_boost > 0 else ""),
+                "reason": f"{dir_reason} | {conf_reason} | {struct_reason} | RSI:{current_rsi}" + (" | [CONFLUENCE_A+]" if is_confluent else "") + (" | [INDEX_BOOST]" if index_boost > 0 else ""),
                 "info": info,
                 "best_opt": best_opt,
                 "prox_score": prox_score,
@@ -1280,8 +1352,10 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
             continue
 
         fill_price = fill_px
-        stop_multiplier = 0.70 if fill_price < 1.00 else 0.80
-        stop_loss = round(fill_price * stop_multiplier, 2)
+        if fill_price <= 1.00:
+            stop_loss = round(max(0.10, fill_price - 0.25), 2)
+        else:
+            stop_loss = round(fill_price * 0.70, 2)
         take_profit = round(fill_price * 1.50, 2)
 
         log_trade_dual_db(
@@ -1291,9 +1365,11 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
         )
         log_msg(f"[✓ EXECUTION SECURED] {ticker} {direction} filled @ ${fill_price:.2f} | Stop Loss: ${stop_loss:.2f}", "SCJ_ENGINE")
 
-        import threading
-        t = threading.Thread(target=monitor_live_exit_telemetry, args=(ticker,), daemon=False)
-        t.start()
+        # --- ZERO-LAG HARD BROKER STOP ORDER PLACEMENT ---
+        place_immediate_broker_stop(occ_symbol, ticker, exec_qty, stop_loss)
+        # --------------------------------------------------
+
+        log_msg(f"[🛡️ CSO EXIT DELEGATION] Exit authority handed off to GexExitMonitor with 180s grace window.", "SCJ_ENGINE")
         executed = True
         break
 

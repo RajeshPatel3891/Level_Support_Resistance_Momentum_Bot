@@ -1,4 +1,4 @@
-import os, sys, json, time, requests, boto3, sqlite3
+import os, sys, json, gzip, re, requests, boto3, sqlite3
 from datetime import datetime
 from dotenv import load_dotenv
 
@@ -11,26 +11,69 @@ date_str = datetime.now().strftime('%Y-%m-%d')
 token = os.getenv("TRADIER_PROD_TOKEN") or os.getenv("TRADIER_TOKEN")
 headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
 region = os.getenv("AWS_REGION", "us-east-1")
+bucket_name = "harmonized-ai-telemetry-bucket"
+
+def is_expired_before_today(occ_symbol):
+    # Extracts YYMMDD (e.g., AAL260904P00013000 -> 2026-09-04)
+    m = re.search(r'([0-9]{6})[CP]', occ_symbol)
+    if not m:
+        return False
+    exp_str = f"20{m.group(1)[:2]}-{m.group(1)[2:4]}-{m.group(1)[4:6]}"
+    return exp_str < date_str
 
 def get_closed_trades(target_env='ALL'):
     trades = []
-    # 1. Primary: DynamoDB
+    
+    # 1. Primary: Live DynamoDB Table
     try:
         dynamodb = boto3.resource('dynamodb', region_name=region)
         table = dynamodb.Table('HarmonizedTrades')
         res = table.scan()
-        for item in res.get('Items', []):
+        items = res.get('Items', [])
+        while 'LastEvaluatedKey' in res:
+            res = table.scan(ExclusiveStartKey=res['LastEvaluatedKey'])
+            items.extend(res.get('Items', []))
+
+        for item in items:
             st = str(item.get('exit_status', '')).upper()
             ts = str(item.get('exit_timestamp', item.get('timestamp', '')))
             env = str(item.get('execution_env', 'SANDBOX')).upper()
             if target_env != 'ALL' and env != target_env:
                 continue
-            if ('CLOSED' in st or '[SCJ]' in st) and (date_str in ts or not ts):
+            if ('CLOSED' in st or '[SCJ]' in st or 'BROKER_RECONCILED' in st) and (date_str in ts or not ts):
                 trades.append(item)
     except Exception as e:
         print(f"[-] DynamoDB scan warning: {e}")
 
-    # 2. Fallback: SQLite
+    # 2. S3 / Local Purge Archive Fallback
+    archive_tmp = f"/tmp/dynamodb_trades_{date_str}.json.gz"
+    if len(trades) < 5:
+        if not os.path.exists(archive_tmp):
+            try:
+                s3 = boto3.client('s3', region_name=region)
+                s3_key = f"dynamodb_backup/dynamodb_trades_{date_str}.json.gz"
+                print(f"[*] Fetching archive fallback: s3://{bucket_name}/{s3_key}...")
+                s3.download_file(bucket_name, s3_key, archive_tmp)
+            except Exception as e:
+                print(f"[-] S3 archive download note: {e}")
+
+        if os.path.exists(archive_tmp):
+            try:
+                with gzip.open(archive_tmp, 'rt') as f:
+                    archived = json.load(f)
+                    filtered = []
+                    for item in archived:
+                        env = str(item.get('execution_env', 'SANDBOX')).upper()
+                        if target_env != 'ALL' and env != target_env:
+                            continue
+                        filtered.append(item)
+                    if filtered:
+                        print(f"[✓] Successfully loaded {len(filtered)} trades from archive {archive_tmp}")
+                        trades = filtered
+            except Exception as e:
+                print(f"[-] Error reading archive: {e}")
+
+    # 3. Fallback: Local SQLite
     if not trades and os.path.exists("harm_telemetry.db"):
         try:
             conn = sqlite3.connect("harm_telemetry.db")
@@ -45,50 +88,68 @@ def get_closed_trades(target_env='ALL'):
     return trades
 
 def fetch_timesales(symbol, start_dt):
+    clean_time = "09:30"
+    if start_dt and ":" in str(start_dt):
+        raw = str(start_dt).split(" ")[-1].split("T")[-1]
+        parts = raw.split(":")
+        if len(parts) >= 2:
+            clean_time = f"{parts[0].zfill(2)}:{parts[1].zfill(2)}"
+
     url = "https://api.tradier.com/v1/markets/timesales"
     params = {
         "symbol": symbol,
         "interval": "1min",
-        "start": f"{date_str} {start_dt}",
+        "start": f"{date_str} {clean_time}",
         "end": f"{date_str} 16:00",
         "session_filter": "all"
     }
     try:
         r = requests.get(url, headers=headers, params=params, timeout=10)
         if r.status_code == 200:
-            bars = r.json().get("series", {}).get("data", [])
-            return [bars] if isinstance(bars, dict) else bars
+            series = r.json().get("series")
+            if series:
+                bars = series.get("data", [])
+                return [bars] if isinstance(bars, dict) else bars
+        # Fallback to morning market open
+        params["start"] = f"{date_str} 09:30"
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+        if r.status_code == 200:
+            series = r.json().get("series")
+            if series:
+                bars = series.get("data", [])
+                return [bars] if isinstance(bars, dict) else bars
     except Exception as e:
         print(f"[-] Error fetching timesales for {symbol}: {e}")
     return []
 
 def simulate_trade(occ_symbol, entry_px, actual_exit_px, shares, start_time):
-    start_fmt = start_time.split(' ')[-1][:5] if ' ' in start_time else "09:30"
-    bars = fetch_timesales(occ_symbol, start_fmt)
+    bars = fetch_timesales(occ_symbol, start_time)
     if not bars:
         return None
 
     actual_pnl = round((actual_exit_px - entry_px) * 100 * shares, 2)
     peak_px = entry_px
-    mttp_stop = round(entry_px * 0.80, 2)
+    base_stop = max(0.10, entry_px * 0.65) if entry_px <= 1.00 else entry_px * 0.70
+    mttp_stop = base_stop
     sim_exit = None
 
     for bar in bars:
         hi = float(bar.get("high") or 0.0)
         lo = float(bar.get("low") or 0.0)
+        
         peak_px = max(peak_px, hi)
         peak_gain_pct = ((peak_px - entry_px) / entry_px) * 100.0
 
-        if peak_gain_pct >= 35.0:
-            calc_stop = round(peak_px * 0.90, 2)
+        if peak_gain_pct >= 40.0:
+            calc_stop = round(entry_px * 1.25, 2)
+        elif peak_gain_pct >= 30.0:
+            calc_stop = round(entry_px * 1.15, 2)
         elif peak_gain_pct >= 20.0:
-            calc_stop = round(max(entry_px * 1.10, peak_px * 0.88), 2)
-        elif peak_gain_pct >= 10.0:
-            calc_stop = round(entry_px, 2)
-        elif peak_gain_pct >= 5.0:
-            calc_stop = round(entry_px * 0.97, 2)
+            calc_stop = round(entry_px * 1.08, 2)
+        elif peak_gain_pct >= 15.0:
+            calc_stop = round(entry_px * 1.00, 2)
         else:
-            calc_stop = round(entry_px * 0.80, 2)
+            calc_stop = base_stop
 
         mttp_stop = max(mttp_stop, calc_stop)
 
@@ -131,26 +192,43 @@ def main():
     if not trades:
         return
 
+    unique_setups = {}
+    for t in trades:
+        sym = t.get("occ_symbol") or t.get("ticker")
+        if not sym or len(sym) < 10:
+            continue
+        if is_expired_before_today(sym):
+            continue  # Filter past-expiration contracts
+        
+        entry = float(t.get("entry_price") or 0.0)
+        shares = abs(int(float(t.get("shares", 0.0) or 0.0)))
+        
+        if sym not in unique_setups:
+            unique_setups[sym] = t
+        else:
+            prev_shares = abs(int(float(unique_setups[sym].get("shares", 0.0) or 0.0)))
+            prev_entry = float(unique_setups[sym].get("entry_price") or 0.0)
+            if (shares > 0 and prev_shares == 0) or (entry > 0 and prev_entry == 0):
+                unique_setups[sym] = t
+
+    print(f"[*] Evaluating {len(unique_setups)} active contracts traded today...")
     results = []
     tot_actual = 0.0
     tot_mttp = 0.0
     tot_peak = 0.0
     tot_alpha = 0.0
 
-    print(f"{'SYMBOL':<22} | {'ENV':<7} | {'QTY':<4} | {'ACTUAL PNL':<12} | {'MTTP PNL':<12} | {'PEAK PNL':<12} | {'ALPHA GAIN':<12}")
-    print("-" * 95)
+    print(f"{'SYMBOL':<22} | {'ENV':<10} | {'QTY':<4} | {'ACTUAL PNL':<12} | {'MTTP PNL':<12} | {'PEAK PNL':<12} | {'ALPHA GAIN':<12}")
+    print("-" * 100)
 
-    for t in trades:
-        occ = t.get("occ_symbol") or t.get("ticker")
-        if not occ or len(occ) < 10:
-            continue
-
+    for occ, t in sorted(unique_setups.items()):
         try:
             entry_p = float(t.get("entry_price") or 0.0)
             exit_p = float(t.get("exit_price") or entry_p)
             shares = abs(int(float(t.get("shares", 1.0) or 1.0)))
-            if shares == 0: shares = 2
-            ts = str(t.get("timestamp") or "09:30:00")
+            if shares == 0:
+                shares = 1
+            ts = str(t.get("timestamp") or t.get("created_at") or "09:30:00")
 
             sim = simulate_trade(occ, entry_p, exit_p, shares, ts)
             if sim and sim["mttp_sim"]:
@@ -162,7 +240,7 @@ def main():
                 tot_peak += m['peak_theoretical_pnl']
                 tot_alpha += sim['alpha_diff']
 
-                print(f"{occ:<22} | {env_val:<7} | {shares:<4} | ${sim['actual_pnl']:<11.2f} | ${m['pnl']:<11.2f} | ${m['peak_theoretical_pnl']:<11.2f} | ${sim['alpha_diff']:+11.2f}")
+                print(f"{occ:<22} | {env_val:<10} | {shares:<4} | ${sim['actual_pnl']:<11.2f} | ${m['pnl']:<11.2f} | ${m['peak_theoretical_pnl']:<11.2f} | ${sim['alpha_diff']:+11.2f}")
                 results.append({
                     "trade_id": t.get("trade_id"),
                     "occ_symbol": occ,
@@ -178,25 +256,22 @@ def main():
         except Exception as e:
             print(f"[-] Skipping {occ}: {e}")
 
-    print("=" * 95)
-    print(f"{'TOTAL PORTFOLIO LEDGER':<33} | ${tot_actual:<11.2f} | ${tot_mttp:<11.2f} | ${tot_peak:<11.2f} | ${tot_alpha:+11.2f}")
-    print("=" * 95)
+    print("=" * 100)
+    print(f"{'TOTAL PORTFOLIO LEDGER':<40} | ${tot_actual:<11.2f} | ${tot_mttp:<11.2f} | ${tot_peak:<11.2f} | ${tot_alpha:+11.2f}")
+    print("=" * 100)
 
-    # Save summary report locally
     os.makedirs("logs/nightly_replays", exist_ok=True)
     report_path = f"logs/nightly_replays/replay_{date_str}.json"
     with open(report_path, "w") as f:
         json.dump(results, f, indent=2)
-    print(f"\n[✓] Nightly optimization audit written to: {report_path}")
+    print(f"\n[✓] Clean audit written to: {report_path}")
 
-    # Upload report to S3
     try:
         s3 = boto3.client('s3', region_name=region)
-        bucket = "harmonized-ai-telemetry-bucket"
-        s3.upload_file(report_path, bucket, f"replays/replay_{date_str}.json")
-        print(f"[✓] Replay audit uploaded to S3: s3://{bucket}/replays/replay_{date_str}.json")
+        s3.upload_file(report_path, bucket_name, f"replays/replay_{date_str}.json")
+        print(f"[✓] Clean audit uploaded to S3: s3://{bucket_name}/replays/replay_{date_str}.json")
     except Exception as e:
-        print(f"[-] S3 replay upload note: {e}")
+        print(f"[-] S3 upload note: {e}")
 
 if __name__ == "__main__":
     main()

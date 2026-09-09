@@ -14,7 +14,7 @@ if [ -z "$TASKS" ] || [ "$TASKS" == "None" ]; then
   exit 0
 fi
 
-# Robust Production Environment Evaluator
+# Robust Production Environment Evaluator (Strictly checks EXECUTION_ENV or Task Family)
 is_production_task() {
   local desc="$1"
   local env_str
@@ -23,18 +23,16 @@ is_production_task() {
     (.tasks[0].overrides.containerOverrides[].environment[]? // empty),
     (.tasks[0].containers[].overrides.environment[]? // empty)
     | "\(.name)=\(.value)"' 2>/dev/null)
-  local group
-  group=$(echo "$desc" | jq -r '.tasks[0].group // ""' 2>/dev/null)
+  local task_def
+  task_def=$(echo "$desc" | jq -r '.tasks[0].taskDefinitionArn // ""' 2>/dev/null)
 
-  # Check for explicit PROD environment variables or PROD tickers (HOOD/MARA/UBER)
-  if echo "$env_str" | grep -iE "EXECUTION_ENV=.*PROD|APP_ENV=.*PROD|HOOD|MARA|UBER" >/dev/null 2>&1 || [[ "$group" == *"prod"* ]]; then
+  if echo "$env_str" | grep -iE "EXECUTION_ENV=PROD" >/dev/null 2>&1 || [[ "$task_def" == *"prod"* ]]; then
     return 0
   else
     return 1
   fi
 }
 
-# --- STEP 1: AUTO-PRUNE STALE DUPLICATE TASKS ---
 PROD_TASKS=()
 SANDBOX_TASKS=()
 
@@ -69,7 +67,8 @@ if [ ${#SANDBOX_TASKS[@]} -gt 1 ]; then
   done
 fi
 
-# --- STEP 2: DISPLAY ACTIVE TASKS & DASHBOARD URLS ---
+# Display Active Tasks & Dashboard URLs
+sleep 3
 UPDATED_TASKS=$(aws ecs list-tasks --cluster $CLUSTER --region $REGION --desired-status RUNNING --query 'taskArns[]' --output text 2>/dev/null)
 
 for TASK_ARN in $UPDATED_TASKS; do

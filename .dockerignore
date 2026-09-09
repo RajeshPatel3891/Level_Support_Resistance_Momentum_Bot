@@ -14,3 +14,7 @@ build/
 htmlcov/
 *.sqlite3
 *.db
+.env
+.env.*
+*.db
+logs/

@@ -31,21 +31,22 @@ python3 src/sync_gex_lambda.py
 python3 src/level_synthesizer.py
 
 # Heartbeat Manifest Verification
-python3 -c '
+python3 << 'EOF_HB'
 import json, sys
 d = json.load(open("trading_levels.json"))
-if len(d) < 27:
-    print(f"[-] FATAL: Manifest incomplete ({len(d)}/27 tickers). Aborting startup.")
+if len(d) < 8:
+    print(f"[-] FATAL: Manifest incomplete ({len(d)}/8 tickers). Aborting startup.")
     sys.exit(1)
-print(f"[✓] Heartbeat Verified: {len(d)} Tickers Active | XLF: {d.get(\"XLF\",{}).get(\"gex_label\")} | SPY: {d.get(\"SPY\",{}).get(\"gex_label\")}")
-'
-
+xlf_lbl = d.get("XLF", {}).get("gex_label", "N/A")
+spy_lbl = d.get("SPY", {}).get("gex_label", "N/A")
+print(f"[✓] Heartbeat Verified: {len(d)} Tickers Active | XLF: {xlf_lbl} | SPY: {spy_lbl}")
+EOF_HB
 echo -e "\n[*] [STEP 4/5] Executing 9-Step Preflight Guardrail Verification..."
 python3 preflight_guard.py --update-checksums
 
 if [ "${1:-local}" == "--fargate" ]; then
     echo -e "\n[*] [STEP 5/5] Building Docker & Deploying to AWS Fargate..."
-    TAG="v1.0.24"
+    TAG="v1.0.27"
     AWS_ACCT=$(aws sts get-caller-identity --query Account --output text)
     IMAGE_URI="${AWS_ACCT}.dkr.ecr.us-east-1.amazonaws.com/harm-trading-bot:${TAG}"
 

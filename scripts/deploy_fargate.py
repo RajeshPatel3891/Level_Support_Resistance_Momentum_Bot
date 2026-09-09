@@ -3,10 +3,12 @@ import subprocess
 import os
 
 aws_acct = subprocess.check_output("aws sts get-caller-identity --query Account --output text", shell=True).decode().strip()
-image_uri = f"{aws_acct}.dkr.ecr.us-east-1.amazonaws.com/harm-trading-bot:v1.0.24"
+tag = "v1.0.25"
+image_uri = f"{aws_acct}.dkr.ecr.us-east-1.amazonaws.com/harm-trading-bot:{tag}"
 
 sandbox_token = "CvtMHhNSylWy5KLTTvU29UD3zMdb"
 prod_token = "fyR75AACwlIYhkMyev1doRh6gnSr"
+
 try:
     with open(".env.prod", "r") as f:
         for line in f:
@@ -15,20 +17,26 @@ try:
 except Exception:
     pass
 
+active_universe = "XLF,GDX,XLE,SOFI,HOOD,PLTR,RIVN,MARA"
+
 prod_env = [
     {"name": "EXECUTION_ENV", "value": "PROD"},
+    {"name": "IS_LIVE", "value": "1"},
     {"name": "TRADIER_ENV", "value": "PROD"},
     {"name": "TENANT_ID", "value": "COMPANY_A_PROD"},
     {"name": "TRADIER_BASE_URL", "value": "https://api.tradier.com/v1"},
     {"name": "TRADIER_ACCOUNT_ID", "value": "6YB87601"},
     {"name": "TRADIER_TOKEN", "value": prod_token},
+    {"name": "TRADIER_PROD_TOKEN", "value": prod_token},
     {"name": "TRADIER_ACCESS_TOKEN", "value": prod_token},
-    {"name": "ACTIVE_TICKERS", "value": "IWM,F,PLTR"},
+    {"name": "ACTIVE_TICKERS", "value": active_universe},
+    {"name": "DEFAULT_PROD_BALANCE", "value": "690.27"},
     {"name": "PYTHONUNBUFFERED", "value": "1"}
 ]
 
 sandbox_env = [
     {"name": "EXECUTION_ENV", "value": "SANDBOX"},
+    {"name": "IS_LIVE", "value": "0"},
     {"name": "TRADIER_ENV", "value": "SANDBOX"},
     {"name": "TENANT_ID", "value": "COMPANY_A_SANDBOX"},
     {"name": "TRADIER_BASE_URL", "value": "https://sandbox.tradier.com/v1"},
@@ -36,7 +44,7 @@ sandbox_env = [
     {"name": "TRADIER_TOKEN", "value": sandbox_token},
     {"name": "TRADIER_SANDBOX_TOKEN", "value": sandbox_token},
     {"name": "TRADIER_ACCESS_TOKEN", "value": sandbox_token},
-    {"name": "ACTIVE_TICKERS", "value": "NVDA,AAPL,TSLA,PLTR,RIVN,SOFI,F,AAL"},
+    {"name": "ACTIVE_TICKERS", "value": active_universe},
     {"name": "PYTHONUNBUFFERED", "value": "1"}
 ]
 
@@ -52,7 +60,14 @@ base_td = {
         "image": image_uri,
         "essential": True,
         "portMappings": [{"containerPort": 8080, "hostPort": 8080, "protocol": "tcp"}],
-        "logConfiguration": {"logDriver": "awslogs", "options": {"awslogs-group": "/ecs/harmonized-trading-task", "awslogs-region": "us-east-1", "awslogs-stream-prefix": "ecs"}}
+        "logConfiguration": {
+            "logDriver": "awslogs",
+            "options": {
+                "awslogs-group": "/ecs/harmonized-trading-task",
+                "awslogs-region": "us-east-1",
+                "awslogs-stream-prefix": "ecs"
+            }
+        }
     }]
 }
 
