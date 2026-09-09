@@ -7,7 +7,9 @@ if os.getenv('EXECUTION_ENV', '').upper() == 'SANDBOX':
 
 # ==============================================================================
 # HARM.AI OPTIMIZED CHIEF STRATEGY OFFICER (CSO) MASTER EXIT MONITOR (AUTO-DISCOVERY)
-# WITH 2-CYCLE PERSISTENCE DEBOUNCE CONFIRMATION
+# - 2-CYCLE PERSISTENCE DEBOUNCE CONFIRMATION
+# - TIMEZONE OFFSET NORMALIZATION (UTC vs EDT 14400s HANDLER)
+# - 3-MINUTE IMMATURE TRADE GRACE LOCK (PREVENTS PRE-FILL PEAK CONTAMINATION)
 # ==============================================================================
 import time
 import json
@@ -466,19 +468,25 @@ def evaluate_gex_exits():
                     total_shares = 1
 
             trade_dir = str(item.get('direction', 'CALL')).upper()
-            stored_peak = float(item.get('peak_price', entry_price) or entry_price)
             accumulated_pnl = float(item.get('partial_pnl', 0.0) or 0.0)
             ts_str = item.get('timestamp')
 
             if entry_price <= 0:
                 continue
 
+            # --- TIMEZONE-AWARE ELAPSED TIME NORMALIZATION ---
             elapsed_minutes = 0.0
             if ts_str:
                 try:
                     clean_ts = str(ts_str).split('.')[0].replace('T', ' ')
                     entry_dt = dt.strptime(clean_ts, "%Y-%m-%d %H:%M:%S")
-                    elapsed_minutes = round((now - entry_dt).total_seconds() / 60.0, 1)
+                    raw_diff = (now - entry_dt).total_seconds()
+                    # Neutralize 4-hour UTC vs EDT offset (~14400 seconds)
+                    if 13000 <= raw_diff <= 16000:
+                        raw_diff -= 14400
+                    elif -16000 <= raw_diff <= -13000:
+                        raw_diff += 14400
+                    elapsed_minutes = max(0.0, round(raw_diff / 60.0, 1))
                 except Exception:
                     pass
 
@@ -487,11 +495,18 @@ def evaluate_gex_exits():
             if current_price == 0.0:
                 current_price = entry_price
 
-            peak_price = max(stored_peak, current_price)
+            # --- PRE-FILL PEAK ISOLATION ---
+            # Young trades cannot inherit pre-entry market peaks.
+            stored_peak = float(item.get('peak_price', entry_price) or entry_price)
+            if elapsed_minutes < 3.0:
+                peak_price = max(entry_price, current_price)
+            else:
+                peak_price = max(stored_peak, current_price)
+
             pnl_pct = round(((current_price - entry_price) / entry_price) * 100.0, 2)
             peak_pnl_pct = round(((peak_price - entry_price) / entry_price) * 100.0, 2)
 
-            # Proportional stop scaling respecting 35% hard stop rule for sub-$1.00 options
+            # Base stop calculation
             if entry_price <= 1.00:
                 base_stop = round(max(0.10, entry_price * 0.65), 2)
             else:
@@ -499,7 +514,7 @@ def evaluate_gex_exits():
 
             existing_sl = float(item.get('stop_loss', 0.0) or 0.0)
 
-            # --- DYNAMIC STOP WITH PEAK-DRAWDOWN BUFFER ---
+            # --- IMMATURE TRADE GRACE LOCK ---
             if elapsed_minutes < 3.0:
                 dynamic_stop = base_stop
             else:
@@ -566,7 +581,7 @@ def evaluate_gex_exits():
                         # Allow consolidation retracement without choking out the runner
                         BREACH_WARNING_CYCLES.pop(occ_symbol, None)
                     elif elapsed_minutes < 5.0 and pnl_pct > -25.0:
-                        # Let young trades breathe
+                        # Full breathing window preserved for young trades
                         BREACH_WARNING_CYCLES.pop(occ_symbol, None)
                     else:
                         # Soft trailing stop breach - evaluate debounce
@@ -657,7 +672,7 @@ def evaluate_gex_exits():
 
 if __name__ == "__main__":
     ensure_schema()
-    print("[⚙️] Auto-Discovering Master Exit Monitor Initialized (2-Cycle Debounce Active).")
+    print("[⚙️] Auto-Discovering Master Exit Monitor Initialized (Debounce + Peak Lock Active).")
     sync_sqlite_to_dynamo()
     print("[🚀 ENTERING ACTIVE MASTER EXIT MONITOR LOOP...]")
     while True:

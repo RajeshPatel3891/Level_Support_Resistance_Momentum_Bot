@@ -36,7 +36,7 @@ import boto3
 from botocore.exceptions import ClientError
 import argparse
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 import pytz
 from pathlib import Path
 from threading import Thread
@@ -1008,7 +1008,8 @@ def execute_strict_tradier_order(occ_symbol, underlying, side, quantity=1, max_w
         return False, 0.0, ""
 
 def log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, direction, occ_symbol, order_id, tenant_id='COMPANY_A_PROD', execution_tag='SCJ', strategy_mode='SMART_CSO_SCALP'):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    created_epoch = str(time.time())
     trade_id = str(uuid.uuid4())[:8]
     exec_env = os.getenv("EXECUTION_ENV", "SANDBOX").upper()
     is_live_flag = 1 if exec_env in ["PROD", "PRODUCTION", "LIVE"] else 0
@@ -1052,6 +1053,7 @@ def log_trade_dual_db(ticker, spot, fill_price, stop_loss, take_profit, shares, 
             'trade_id': trade_id,
             'ticker': ticker,
             'timestamp': timestamp,
+            'created_epoch': created_epoch,
             'strategy': strategy_mode,
             'execution_tag': execution_tag,
             'direction': direction,
@@ -1179,7 +1181,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
 
             sub_strategy_mode = strategy_mode
             dir_reason = "PROXIMITY_GRADIENT"
-             
+            
             df_1min_bars = fetch_intraday_bars(ticker_upper, interval="1min")
             rvol = calculate_rvol(stock_quote)
             current_rsi = calculate_intraday_rsi(df_1min_bars, period=14)
@@ -1287,7 +1289,7 @@ def smart_cso_scout_and_execute(force_ticker=None, direction_override="SMART", s
                 confluence_boost +
                 index_boost
             )
-             
+            
             if conviction_score < MIN_CONVICTION and not force_ticker and os.getenv("BYPASS_SESSION_GATES", "0") != "1":
                 continue
 
